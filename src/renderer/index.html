@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      CSP notes: script-src needs 'unsafe-inline' only for Vite/React-refresh
+      dev preamble; connect/img/font allow https: for the configured basemap
+      tile host. No other remote content is ever loaded.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' https: ws:; worker-src 'self' blob:; font-src 'self' data: https:"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arc Visualizer</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

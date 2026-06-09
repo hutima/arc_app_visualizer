@@ -15,6 +15,7 @@
   Deliberate edge cases for parser/cleaning tests:
     - "stationary" track: tight cluster of points
     - "bogus" track: invalid category that should be hidden/ignored by default
+      (it also moves impossibly fast, ~314 m/s, like real junk data would)
     - empty trkseg (occurs in real Arc exports)
     - track with two trksegs (legal GPX, parser must not assume one)
     - consecutive duplicate points (car track)
