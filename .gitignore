@@ -1,0 +1,55 @@
+# ============================================================
+# Privacy: never commit real location data
+# ============================================================
+*.gpx
+*.tcx
+*.fit
+
+# Allow synthetic (non-private, hand-authored) fixtures only
+!fixtures/**/*.gpx
+!test-fixtures/**/*.gpx
+!src/**/fixtures/**/*.gpx
+!src/**/test-fixtures/**/*.gpx
+
+# Local imports and private data
+data/
+private-data/
+imports/
+local-data/
+
+# Local databases and indexes
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Map/cache artifacts
+.cache/
+tiles-cache/
+*.pmtiles
+*.mbtiles
+
+# ============================================================
+# Build / tooling
+# ============================================================
+node_modules/
+dist/
+out/
+.vite/
+coverage/
+*.tsbuildinfo
+.eslintcache
+*.log
+npm-debug.log*
+
+# Environment / secrets (e.g. map tokens)
+.env
+.env.*
+!.env.example
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
