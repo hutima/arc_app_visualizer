@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SYNTHETIC FIXTURE - contains no real location data.
+
+  Hand-authored from the Arc Timeline GPX *schema* only (element structure,
+  attribute names, field formats). Every coordinate is a made-up point on a
+  tiny grid near 0,0 (Null Island) and every timestamp is a fake value in
+  ISO week 2000-W01. Nothing here is shifted, offset, simplified, or in any
+  other way derived from real coordinates, routes, or movement patterns.
+
+  Structure mirrors Arc Timeline exports:
+    gpx > trk > (name, type, trkseg > trkpt[lat,lon] > (ele, time))
+    gpx > wpt[lat,lon] > (time, name)        (Arc exports visits as waypoints)
+
+  Deliberate edge cases for parser/cleaning tests:
+    - "stationary" track: tight cluster of points
+    - "bogus" track: invalid category that should be hidden/ignored by default
+    - empty trkseg (occurs in real Arc exports)
+    - track with two trksegs (legal GPX, parser must not assume one)
+    - consecutive duplicate points (car track)
+    - impossible-speed teleport spike (metro track, jumps to lat 0.5 and back)
+    - out-of-range coordinate lat=95 (cycling track)
+    - trkpt with no ele/time children (hovercraft track)
+    - unknown category "hovercraft" (tests unknown-type handling)
+-->
+<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" creator="Arc Timeline">
+	<trk>
+		<name>Synthetic morning walk</name>
+		<type>walking</type>
+		<trkseg>
+			<trkpt lat="0.0010000" lon="0.0010000">
+				<ele>10.1</ele>
+				<time>2000-01-03T08:00:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0015000" lon="0.0010000">
+				<ele>10.3</ele>
+				<time>2000-01-03T08:00:20Z</time>
+			</trkpt>
+			<trkpt lat="0.0020000" lon="0.0010000">
+				<ele>10.6</ele>
+				<time>2000-01-03T08:00:40Z</time>
+			</trkpt>
+			<trkpt lat="0.0025000" lon="0.0010000">
+				<ele>10.9</ele>
+				<time>2000-01-03T08:01:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0030000" lon="0.0010000">
+				<ele>11.2</ele>
+				<time>2000-01-03T08:01:20Z</time>
+			</trkpt>
+			<trkpt lat="0.0030000" lon="0.0015000">
+				<ele>11.4</ele>
+				<time>2000-01-03T08:01:40Z</time>
+			</trkpt>
+			<trkpt lat="0.0030000" lon="0.0020000">
+				<ele>11.5</ele>
+				<time>2000-01-03T08:02:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0030000" lon="0.0025000">
+				<ele>11.5</ele>
+				<time>2000-01-03T08:02:20Z</time>
+			</trkpt>
+			<trkpt lat="0.0030000" lon="0.0030000">
+				<ele>11.3</ele>
+				<time>2000-01-03T08:02:40Z</time>
+			</trkpt>
+			<trkpt lat="0.0025000" lon="0.0030000">
+				<ele>11.0</ele>
+				<time>2000-01-03T08:03:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0020000" lon="0.0030000">
+				<ele>10.8</ele>
+				<time>2000-01-03T08:03:20Z</time>
+			</trkpt>
+			<trkpt lat="0.0015000" lon="0.0030000">
+				<ele>10.5</ele>
+				<time>2000-01-03T08:03:40Z</time>
+			</trkpt>
+			<trkpt lat="0.0010000" lon="0.0030000">
+				<ele>10.3</ele>
+				<time>2000-01-03T08:04:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0010000" lon="0.0025000">
+				<ele>10.2</ele>
+				<time>2000-01-03T08:04:20Z</time>
+			</trkpt>
+			<trkpt lat="0.0010000" lon="0.0020000">
+				<ele>10.1</ele>
+				<time>2000-01-03T08:04:40Z</time>
+			</trkpt>
+			<trkpt lat="0.0010000" lon="0.0015000">
+				<ele>10.1</ele>
+				<time>2000-01-03T08:05:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0010000" lon="0.0010000">
+				<ele>10.1</ele>
+				<time>2000-01-03T08:05:20Z</time>
+			</trkpt>
+		</trkseg>
+	</trk>
+	<trk>
+		<name>Synthetic stationary visit</name>
+		<type>stationary</type>
+		<trkseg>
+			<trkpt lat="0.0010500" lon="0.0010500">
+				<ele>10.0</ele>
+				<time>2000-01-03T08:06:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0010520" lon="0.0010480">
+				<ele>10.0</ele>
+				<time>2000-01-03T08:16:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0010490" lon="0.0010510">
+				<ele>10.1</ele>
+				<time>2000-01-03T08:26:00Z</time>
+			</trkpt>
+		</trkseg>
+	</trk>
+	<trk>
+		<name>Synthetic empty segment</name>
+		<type>walking</type>
+		<trkseg>
+		</trkseg>
+	</trk>
+	<trk>
+		<name>Synthetic car trip with two segments and a duplicate point</name>
+		<type>car</type>
+		<trkseg>
+			<trkpt lat="0.0040000" lon="0.0010000">
+				<ele>12.0</ele>
+				<time>2000-01-03T09:00:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0042000" lon="0.0014000">
+				<ele>12.2</ele>
+				<time>2000-01-03T09:00:10Z</time>
+			</trkpt>
+			<trkpt lat="0.0042000" lon="0.0014000">
+				<ele>12.2</ele>
+				<time>2000-01-03T09:00:10Z</time>
+			</trkpt>
+			<trkpt lat="0.0044000" lon="0.0018000">
+				<ele>12.4</ele>
+				<time>2000-01-03T09:00:20Z</time>
+			</trkpt>
+			<trkpt lat="0.0046000" lon="0.0022000">
+				<ele>12.5</ele>
+				<time>2000-01-03T09:00:30Z</time>
+			</trkpt>
+		</trkseg>
+		<trkseg>
+			<trkpt lat="0.0050000" lon="0.0030000">
+				<ele>12.8</ele>
+				<time>2000-01-03T09:02:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0052000" lon="0.0034000">
+				<ele>12.9</ele>
+				<time>2000-01-03T09:02:10Z</time>
+			</trkpt>
+			<trkpt lat="0.0054000" lon="0.0038000">
+				<ele>13.0</ele>
+				<time>2000-01-03T09:02:20Z</time>
+			</trkpt>
+		</trkseg>
+	</trk>
+	<trk>
+		<name>Synthetic metro ride with teleport spike</name>
+		<type>metro</type>
+		<trkseg>
+			<trkpt lat="0.0050000" lon="0.0050000">
+				<ele>-5.0</ele>
+				<time>2000-01-03T10:00:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0054000" lon="0.0054000">
+				<ele>-5.2</ele>
+				<time>2000-01-03T10:00:30Z</time>
+			</trkpt>
+			<trkpt lat="0.5000000" lon="0.0056000">
+				<ele>-5.2</ele>
+				<time>2000-01-03T10:01:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0058000" lon="0.0058000">
+				<ele>-5.3</ele>
+				<time>2000-01-03T10:01:30Z</time>
+			</trkpt>
+			<trkpt lat="0.0062000" lon="0.0062000">
+				<ele>-5.5</ele>
+				<time>2000-01-03T10:02:00Z</time>
+			</trkpt>
+		</trkseg>
+	</trk>
+	<trk>
+		<name>Synthetic tram hop</name>
+		<type>tram</type>
+		<trkseg>
+			<trkpt lat="0.0070000" lon="0.0010000">
+				<ele>14.0</ele>
+				<time>2000-01-03T11:00:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0072000" lon="0.0013000">
+				<ele>14.0</ele>
+				<time>2000-01-03T11:00:15Z</time>
+			</trkpt>
+			<trkpt lat="0.0074000" lon="0.0016000">
+				<ele>14.1</ele>
+				<time>2000-01-03T11:00:30Z</time>
+			</trkpt>
+			<trkpt lat="0.0076000" lon="0.0019000">
+				<ele>14.1</ele>
+				<time>2000-01-03T11:00:45Z</time>
+			</trkpt>
+		</trkseg>
+	</trk>
+	<trk>
+		<name>Synthetic bus leg</name>
+		<type>bus</type>
+		<trkseg>
+			<trkpt lat="0.0080000" lon="0.0020000">
+				<ele>15.0</ele>
+				<time>2000-01-04T07:30:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0083000" lon="0.0024000">
+				<ele>15.1</ele>
+				<time>2000-01-04T07:30:20Z</time>
+			</trkpt>
+			<trkpt lat="0.0086000" lon="0.0028000">
+				<ele>15.2</ele>
+				<time>2000-01-04T07:30:40Z</time>
+			</trkpt>
+			<trkpt lat="0.0089000" lon="0.0032000">
+				<ele>15.2</ele>
+				<time>2000-01-04T07:31:00Z</time>
+			</trkpt>
+		</trkseg>
+	</trk>
+	<trk>
+		<name>Synthetic cycling loop with invalid coordinate</name>
+		<type>cycling</type>
+		<trkseg>
+			<trkpt lat="0.0090000" lon="0.0040000">
+				<ele>16.0</ele>
+				<time>2000-01-04T08:00:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0093000" lon="0.0044000">
+				<ele>16.1</ele>
+				<time>2000-01-04T08:00:15Z</time>
+			</trkpt>
+			<trkpt lat="95.0000000" lon="0.0046000">
+				<ele>16.1</ele>
+				<time>2000-01-04T08:00:30Z</time>
+			</trkpt>
+			<trkpt lat="0.0096000" lon="0.0048000">
+				<ele>16.2</ele>
+				<time>2000-01-04T08:00:45Z</time>
+			</trkpt>
+		</trkseg>
+	</trk>
+	<trk>
+		<name>Synthetic bogus noise</name>
+		<type>bogus</type>
+		<trkseg>
+			<trkpt lat="0.0100000" lon="0.0100000">
+				<ele>0.0</ele>
+				<time>2000-01-04T09:00:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0200000" lon="0.0200000">
+				<ele>0.0</ele>
+				<time>2000-01-04T09:00:05Z</time>
+			</trkpt>
+		</trkseg>
+	</trk>
+	<trk>
+		<name>Synthetic unknown vehicle</name>
+		<type>hovercraft</type>
+		<trkseg>
+			<trkpt lat="0.0110000" lon="0.0050000">
+				<ele>1.0</ele>
+				<time>2000-01-04T10:00:00Z</time>
+			</trkpt>
+			<trkpt lat="0.0113000" lon="0.0053000" />
+			<trkpt lat="0.0116000" lon="0.0056000">
+				<ele>1.2</ele>
+				<time>2000-01-04T10:00:40Z</time>
+			</trkpt>
+		</trkseg>
+	</trk>
+	<wpt lat="0.0010000" lon="0.0010000">
+		<time>2000-01-03T07:59:00Z</time>
+		<name>Synthetic Place Alpha</name>
+	</wpt>
+	<wpt lat="0.0050000" lon="0.0050000">
+		<time>2000-01-03T09:59:00Z</time>
+		<name>Synthetic Place Beta</name>
+	</wpt>
+	<wpt lat="0.0090000" lon="0.0040000">
+		<time>2000-01-04T07:59:00Z</time>
+		<name>Synthetic Place Gamma</name>
+	</wpt>
+</gpx>
