@@ -17,6 +17,7 @@ import type {
 import type { Feature, FeatureCollection } from 'geojson'
 import { decodeGeometry } from '../../../shared/geomCodec'
 import { WAYPOINT_COLOR } from '../../../shared/categories'
+import type { DetailMode } from '../../../shared/displayDetail'
 import type { CategoryInfo, ViewportResultMeta } from '../../../shared/types'
 
 export interface RenderStats extends ViewportResultMeta {
@@ -60,6 +61,7 @@ export class MapController {
   private endTsMs: number | null = null
   private categories: CategoryInfo[] = []
   private showWaypoints = true
+  private detailMode: DetailMode = 'auto'
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
   private destroyed = false
@@ -190,6 +192,12 @@ export class MapController {
     this.applyWaypointVisibility()
   }
 
+  setDetailMode(mode: DetailMode): void {
+    if (mode === this.detailMode) return
+    this.detailMode = mode
+    this.scheduleRefresh(0)
+  }
+
   async fitToData(): Promise<void> {
     const b = await window.api.getDataBounds()
     if (!b || this.destroyed) return
@@ -222,7 +230,8 @@ export class MapController {
       maxLon: Math.min(180, bounds.getEast() + lonPad),
       zoom,
       startTsMs: this.startTsMs,
-      endTsMs: this.endTsMs
+      endTsMs: this.endTsMs,
+      detailMode: this.detailMode
     })
     // A newer query superseded this one while we awaited.
     if (token !== this.queryToken || this.destroyed) return

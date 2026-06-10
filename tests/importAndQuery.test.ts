@@ -16,13 +16,15 @@ import {
   queryViewportWaypoints,
   getCategories,
   getSummary,
-  getDataBounds
+  getDataBounds,
+  type ViewportSegmentRow
 } from '../src/main/db/queries'
 import {
   POINT_FLAG_DUPLICATE,
   POINT_FLAG_INVALID_COORD,
   POINT_FLAG_SPEED_SPIKE
 } from '../src/main/importer/clean'
+import { KNOWN_CATEGORY_COLORS, colorForCategory } from '../src/shared/categories'
 import type { ImportProgress, ViewportQuery } from '../src/shared/types'
 
 const FIXTURE = fileURLToPath(new URL('../fixtures/2000-W01-synthetic.gpx', import.meta.url))
@@ -33,6 +35,15 @@ const VIEWPORT_ALL: ViewportQuery = {
   startTsMs: null,
   endTsMs: null
 }
+
+/** Generous defaults so tests exercise filtering, not limiting. */
+const LIMITS = { segments: 1000, points: 100000 }
+
+const totalPoints = (rows: ViewportSegmentRow[]): number =>
+  rows.reduce((sum, r) => sum + r.point_count, 0)
+
+const coordsView = (r: ViewportSegmentRow): Float32Array =>
+  new Float32Array(r.coords.buffer.slice(r.coords.byteOffset, r.coords.byteOffset + r.coords.byteLength))
 
 let dir: string
 let dbPath: string
@@ -103,7 +114,7 @@ describe('import pipeline', () => {
 
 describe('viewport queries', () => {
   it('returns display geometry for clean segments, excluding ignored/bogus and empty ones', () => {
-    const { rows, truncated } = queryViewportSegments(db, VIEWPORT_ALL, 1000)
+    const { rows, truncated } = queryViewportSegments(db, VIEWPORT_ALL, LIMITS)
     expect(truncated).toBe(false)
     // 11 segments − bogus (ignored) − empty walking segment (no geometry) = 9
     expect(rows).toHaveLength(9)
@@ -111,11 +122,9 @@ describe('viewport queries', () => {
   })
 
   it('excludes flagged points from display geometry (teleport spike gone)', () => {
-    const { rows } = queryViewportSegments(db, VIEWPORT_ALL, 1000)
+    const { rows } = queryViewportSegments(db, VIEWPORT_ALL, LIMITS)
     const metro = rows.find((r) => r.type === 'metro')!
-    const coords = new Float32Array(
-      metro.coords.buffer.slice(metro.coords.byteOffset, metro.coords.byteOffset + metro.coords.byteLength)
-    )
+    const coords = coordsView(metro)
     for (let i = 1; i < coords.length; i += 2) {
       expect(Math.abs(coords[i]!)).toBeLessThan(0.1) // spike at lat 0.5 excluded
     }
@@ -125,13 +134,11 @@ describe('viewport queries', () => {
   })
 
   it('serves coarser geometry at low zoom', () => {
-    const low = queryViewportSegments(db, { ...VIEWPORT_ALL, zoom: 3 }, 1000)
+    const low = queryViewportSegments(db, { ...VIEWPORT_ALL, zoom: 3 }, LIMITS)
     expect(low.detail).toBe(0)
-    const high = queryViewportSegments(db, VIEWPORT_ALL, 1000)
+    const high = queryViewportSegments(db, VIEWPORT_ALL, LIMITS)
     expect(high.detail).toBe(2)
-    const sum = (rows: Array<{ point_count: number }>): number =>
-      rows.reduce((a, r) => a + r.point_count, 0)
-    expect(sum(low.rows)).toBeLessThanOrEqual(sum(high.rows))
+    expect(totalPoints(low.rows)).toBeLessThanOrEqual(totalPoints(high.rows))
   })
 
   it('filters by time range', () => {
@@ -142,7 +149,7 @@ describe('viewport queries', () => {
         startTsMs: Date.parse('2000-01-04T00:00:00Z'),
         endTsMs: Date.parse('2000-01-05T00:00:00Z')
       },
-      1000
+      LIMITS
     )
     // Only bus, cycling, and hovercraft are on Jan 4.
     expect(jan4.rows.map((r) => r.type).sort()).toEqual(['bus', 'cycling', 'hovercraft'])
@@ -150,7 +157,7 @@ describe('viewport queries', () => {
     const nothing = queryViewportSegments(
       db,
       { ...VIEWPORT_ALL, startTsMs: Date.parse('2001-01-01T00:00:00Z'), endTsMs: null },
-      1000
+      LIMITS
     )
     expect(nothing.rows).toHaveLength(0)
   })
@@ -159,7 +166,7 @@ describe('viewport queries', () => {
     const offWorld = queryViewportSegments(
       db,
       { ...VIEWPORT_ALL, minLat: 50, maxLat: 60, minLon: 50, maxLon: 60 },
-      1000
+      LIMITS
     )
     expect(offWorld.rows).toHaveLength(0)
   })
@@ -170,10 +177,82 @@ describe('viewport queries', () => {
     expect(wpts.map((w) => w.name)).toContain('Synthetic Place Alpha')
   })
 
-  it('truncates and reports when the segment limit is hit', () => {
-    const { rows, truncated } = queryViewportSegments(db, VIEWPORT_ALL, 2)
+  it('truncates and reports when the segment safety cap is hit', () => {
+    const { rows, truncated } = queryViewportSegments(db, VIEWPORT_ALL, { ...LIMITS, segments: 2 })
     expect(rows).toHaveLength(2)
     expect(truncated).toBe(true)
+  })
+})
+
+describe('detail modes and point budget', () => {
+  it('pins a fixed detail level regardless of zoom', () => {
+    const pinned = queryViewportSegments(db, { ...VIEWPORT_ALL, zoom: 3, detailMode: 'high' }, LIMITS)
+    expect(pinned.detail).toBe(2)
+    const auto = queryViewportSegments(db, { ...VIEWPORT_ALL, zoom: 3 }, LIMITS)
+    expect(auto.detail).toBe(0)
+  })
+
+  it("serves every clean raw point in 'all' mode, still excluding flagged/ignored data", () => {
+    const raw = queryViewportSegments(db, { ...VIEWPORT_ALL, detailMode: 'all' }, LIMITS)
+    expect(raw.detail).toBe('raw')
+    expect(raw.downsampleStride).toBe(1)
+    expect(raw.rows).toHaveLength(9) // same drawable segments as display geometry
+    expect(raw.rows.map((r) => r.type)).not.toContain('bogus')
+    // 46 clean points in the fixture minus the ignored bogus track's 1.
+    expect(totalPoints(raw.rows)).toBe(45)
+
+    const metro = raw.rows.find((r) => r.type === 'metro')!
+    expect(metro.point_count).toBe(4) // 5 raw − teleport spike
+    const coords = coordsView(metro)
+    for (let i = 1; i < coords.length; i += 2) {
+      expect(Math.abs(coords[i]!)).toBeLessThan(0.1)
+    }
+
+    // Strictly more than the finest precomputed level (collinear runs restored).
+    const high = queryViewportSegments(db, VIEWPORT_ALL, LIMITS)
+    expect(totalPoints(raw.rows)).toBeGreaterThan(totalPoints(high.rows))
+  })
+
+  it('downsamples lines over the point budget instead of dropping routes', () => {
+    const thin = queryViewportSegments(
+      db, { ...VIEWPORT_ALL, detailMode: 'all' }, { segments: 1000, points: 20 }
+    )
+    expect(thin.truncated).toBe(false)
+    expect(thin.rows).toHaveLength(9) // every route still present
+    expect(thin.downsampleStride).toBe(3) // ceil(45 / 20)
+    expect(totalPoints(thin.rows)).toBeLessThan(45)
+    for (const row of thin.rows) {
+      expect(row.point_count).toBeGreaterThanOrEqual(2)
+    }
+  })
+
+  it('keeps line endpoints when downsampling', () => {
+    const full = queryViewportSegments(db, { ...VIEWPORT_ALL, detailMode: 'all' }, LIMITS)
+    const thin = queryViewportSegments(
+      db, { ...VIEWPORT_ALL, detailMode: 'all' }, { segments: 1000, points: 20 }
+    )
+    for (const row of thin.rows) {
+      const a = coordsView(row)
+      const b = coordsView(full.rows.find((r) => r.id === row.id)!)
+      expect([a[0], a[1]]).toEqual([b[0], b[1]])
+      expect([a[a.length - 2], a[a.length - 1]]).toEqual([b[b.length - 2], b[b.length - 1]])
+    }
+  })
+
+  it('auto mode steps down to a coarser level before thinning', () => {
+    const tiny = queryViewportSegments(db, VIEWPORT_ALL, { segments: 1000, points: 10 })
+    expect(tiny.detail).toBe(0) // stepped down from zoom-implied 2
+    expect(tiny.downsampleStride).toBeGreaterThan(1) // still over budget at 0
+    expect(tiny.rows).toHaveLength(9) // no route went missing
+  })
+
+  it('pinned modes keep their level and rely on thinning alone', () => {
+    const pinned = queryViewportSegments(
+      db, { ...VIEWPORT_ALL, detailMode: 'high' }, { segments: 1000, points: 10 }
+    )
+    expect(pinned.detail).toBe(2)
+    expect(pinned.downsampleStride).toBeGreaterThan(1)
+    expect(pinned.rows).toHaveLength(9)
   })
 })
 
@@ -183,5 +262,32 @@ describe('data bounds', () => {
     expect(b).not.toBeNull()
     expect(b.maxLat).toBeLessThan(0.05) // metro spike (0.5) and lat=95 excluded
     expect(b.minLat).toBeGreaterThan(0)
+  })
+})
+
+// Keep last: reopens the shared db handle.
+describe('category colors', () => {
+  it('groups mode families: car beside taxi, bus with transit, airplane unique', () => {
+    const cats = new Map(getCategories(db).map((c) => [c.name, c.color]))
+    expect(cats.get('car')).toBe(KNOWN_CATEGORY_COLORS.car)
+    expect(cats.get('bus')).toBe(KNOWN_CATEGORY_COLORS.bus)
+    // Airplane's red is reserved: no other known category may use it.
+    const reds = Object.entries(KNOWN_CATEGORY_COLORS)
+      .filter(([, color]) => color === KNOWN_CATEGORY_COLORS.airplane)
+      .map(([name]) => name)
+    expect(reds).toEqual(['airplane'])
+  })
+
+  it('preserves generated colors for categories the palette does not know', () => {
+    const hover = getCategories(db).find((c) => c.name === 'hovercraft')
+    expect(hover?.color).toBe(colorForCategory('hovercraft'))
+  })
+
+  it('refreshes stale known-category colors on open (existing databases)', () => {
+    db.prepare("UPDATE categories SET color = '#60a5fa' WHERE name = 'car'").run()
+    db.close()
+    db = openDb(dbPath)
+    const car = getCategories(db).find((c) => c.name === 'car')
+    expect(car?.color).toBe(KNOWN_CATEGORY_COLORS.car)
   })
 })

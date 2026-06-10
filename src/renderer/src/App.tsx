@@ -6,10 +6,12 @@ import type {
   ImportProgress,
   ImportStats
 } from '../../shared/types'
+import type { DetailMode } from '../../shared/displayDetail'
 import { MapController, type RenderStats } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
 import { CategoryPanel } from './components/CategoryPanel'
 import { DateFilter } from './components/DateFilter'
+import { DetailControl } from './components/DetailControl'
 import { StatsPanel } from './components/StatsPanel'
 
 export function App(): React.JSX.Element {
@@ -20,6 +22,7 @@ export function App(): React.JSX.Element {
   const [lastImport, setLastImport] = useState<ImportStats | null>(null)
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
   const [showWaypoints, setShowWaypoints] = useState(true)
+  const [detailMode, setDetailMode] = useState<DetailMode>('auto')
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
@@ -104,6 +107,11 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setShowWaypoints(show)
   }, [])
 
+  const handleDetailMode = useCallback((mode: DetailMode): void => {
+    setDetailMode(mode)
+    controllerRef.current?.setDetailMode(mode)
+  }, [])
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -116,6 +124,7 @@ export function App(): React.JSX.Element {
           onToggle={handleToggleCategory}
           onToggleWaypoints={handleToggleWaypoints}
         />
+        <DetailControl mode={detailMode} onChange={handleDetailMode} />
         <StatsPanel
           summary={summary}
           lastImport={lastImport}

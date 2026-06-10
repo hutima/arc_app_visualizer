@@ -3,6 +3,7 @@
  * Pure types only — this module must stay importable from both Node and DOM
  * contexts.
  */
+import type { DetailMode, ResolvedDetail } from './displayDetail'
 
 export interface CategoryInfo {
   name: string
@@ -32,6 +33,8 @@ export interface ViewportQuery {
   /** Inclusive time-range filter; null means unbounded. */
   startTsMs: number | null
   endTsMs: number | null
+  /** Geometry detail; omitted/'auto' follows zoom (shared/displayDetail). */
+  detailMode?: DetailMode
 }
 
 export interface ViewportWaypoint {
@@ -49,9 +52,12 @@ export interface ViewportResultMeta {
   queryMs: number
   /** Binary payload encode time in the main process. */
   encodeMs: number
-  /** True when the segment limit was hit and results were truncated. */
+  /** True when the segment safety cap was hit and results were truncated. */
   truncated: boolean
-  detail: number
+  /** Detail level served: a precomputed level, or 'raw' for all points. */
+  detail: ResolvedDetail
+  /** 1 = full detail; k > 1 = lines thinned to every k-th vertex (endpoints kept). */
+  downsampleStride: number
 }
 
 export interface ViewportResult {

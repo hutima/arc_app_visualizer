@@ -17,7 +17,20 @@ export function openDb(path: string): DatabaseSync {
   db.exec('PRAGMA busy_timeout = 5000')
   db.exec('PRAGMA foreign_keys = ON')
   migrate(db)
+  syncKnownCategoryColors(db)
   return db
+}
+
+/**
+ * The curated palette is code-owned: refresh previously seeded rows whenever
+ * it changes, so existing databases pick up new colors on the next launch.
+ * Categories the palette does not know keep their import-time generated color.
+ */
+function syncKnownCategoryColors(db: DatabaseSync): void {
+  const update = db.prepare('UPDATE categories SET color = ? WHERE name = ? AND color <> ?')
+  for (const [name, color] of Object.entries(KNOWN_CATEGORY_COLORS)) {
+    update.run(color, name, color)
+  }
 }
 
 function migrate(db: DatabaseSync): void {

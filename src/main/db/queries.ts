@@ -6,7 +6,7 @@ import type {
   ViewportQuery,
   ViewportWaypoint
 } from '../../shared/types'
-import { detailForZoom } from '../../shared/displayDetail'
+import { resolveDetail, type ResolvedDetail } from '../../shared/displayDetail'
 
 export interface ViewportSegmentRow {
   id: number
@@ -15,47 +15,163 @@ export interface ViewportSegmentRow {
   coords: Uint8Array
 }
 
+export interface ViewportLimits {
+  /** Hard cap on segments per query — an extreme safety valve, rarely hit. */
+  segments: number
+  /** Soft cap on total points; overflow downsamples lines, never drops them. */
+  points: number
+}
+
 export interface ViewportRowsResult {
   rows: ViewportSegmentRow[]
   truncated: boolean
-  detail: number
+  detail: ResolvedDetail
+  downsampleStride: number
 }
 
 /**
- * Viewport query: bounds intersection + time-range overlap + non-ignored
- * categories, returning the simplified geometry blob for the zoom-matched
- * detail level. Segments without timestamps pass any time filter (transparent
- * rather than hidden).
+ * Shared segment filter: bounds intersection + time-range overlap +
+ * non-ignored categories. Segments without timestamps pass any time filter
+ * (transparent rather than hidden).
+ */
+const VIEWPORT_WHERE = `
+  s.max_lat >= ? AND s.min_lat <= ?
+  AND s.max_lon >= ? AND s.min_lon <= ?
+  AND (? IS NULL OR s.end_ts_ms IS NULL OR s.end_ts_ms >= ?)
+  AND (? IS NULL OR s.start_ts_ms IS NULL OR s.start_ts_ms <= ?)
+  AND s.type NOT IN (SELECT name FROM categories WHERE ignored = 1)
+`
+
+const viewportParams = (q: ViewportQuery): Array<number | null> => [
+  q.minLat, q.maxLat,
+  q.minLon, q.maxLon,
+  q.startTsMs, q.startTsMs,
+  q.endTsMs, q.endTsMs
+]
+
+/**
+ * Viewport query honoring the user's detail mode within a point budget.
+ *
+ * Limiting philosophy: a route must never vanish just because the viewport
+ * got busy. When a result would exceed `limits.points`, auto mode first steps
+ * down to coarser precomputed levels; whatever detail ends up served, lines
+ * are then thinned by a uniform vertex stride (endpoints kept) so every
+ * segment stays on the map, just lighter. Pinned modes ('low'…'all') keep
+ * their level and rely on stride thinning alone.
  */
 export function queryViewportSegments(
   db: DatabaseSync,
   q: ViewportQuery,
-  limit: number
+  limits: ViewportLimits
 ): ViewportRowsResult {
-  const detail = detailForZoom(q.zoom)
-  const stmt = db.prepare(`
+  let detail = resolveDetail(q.detailMode, q.zoom)
+  if ((q.detailMode ?? 'auto') === 'auto' && typeof detail === 'number') {
+    while (detail > 0 && countDisplayPoints(db, q, detail) > limits.points) detail--
+  }
+
+  const { rows, truncated } =
+    detail === 'raw'
+      ? rawRows(db, q, limits.segments)
+      : displayRows(db, q, detail, limits.segments)
+
+  const total = rows.reduce((sum, r) => sum + r.point_count, 0)
+  const stride = total > limits.points ? Math.ceil(total / limits.points) : 1
+  if (stride > 1) {
+    for (const row of rows) decimateRow(row, stride)
+  }
+  return { rows, truncated, detail, downsampleStride: stride }
+}
+
+function countDisplayPoints(db: DatabaseSync, q: ViewportQuery, detail: number): number {
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(d.point_count), 0) AS total
+    FROM segments s
+    JOIN display_geometries d ON d.segment_id = s.id AND d.detail = ?
+    WHERE ${VIEWPORT_WHERE}
+  `).get(detail, ...viewportParams(q)) as { total: number }
+  return row.total
+}
+
+function displayRows(
+  db: DatabaseSync,
+  q: ViewportQuery,
+  detail: number,
+  segmentLimit: number
+): { rows: ViewportSegmentRow[]; truncated: boolean } {
+  const rows = db.prepare(`
     SELECT s.id, s.type, d.point_count, d.coords
     FROM segments s
     JOIN display_geometries d ON d.segment_id = s.id AND d.detail = ?
-    WHERE s.max_lat >= ? AND s.min_lat <= ?
-      AND s.max_lon >= ? AND s.min_lon <= ?
-      AND (? IS NULL OR s.end_ts_ms IS NULL OR s.end_ts_ms >= ?)
-      AND (? IS NULL OR s.start_ts_ms IS NULL OR s.start_ts_ms <= ?)
-      AND s.type NOT IN (SELECT name FROM categories WHERE ignored = 1)
+    WHERE ${VIEWPORT_WHERE}
     LIMIT ?
-  `)
-  const rows = stmt.all(
-    detail,
-    q.minLat, q.maxLat,
-    q.minLon, q.maxLon,
-    q.startTsMs, q.startTsMs,
-    q.endTsMs, q.endTsMs,
-    limit + 1
-  ) as unknown as ViewportSegmentRow[]
+  `).all(detail, ...viewportParams(q), segmentLimit + 1) as unknown as ViewportSegmentRow[]
+  const truncated = rows.length > segmentLimit
+  if (truncated) rows.length = segmentLimit
+  return { rows, truncated }
+}
 
-  const truncated = rows.length > limit
-  if (truncated) rows.length = limit
-  return { rows, truncated, detail }
+/**
+ * 'All points' mode: rebuild each polyline from its clean raw points instead
+ * of the precomputed simplifications. Heavier by design — only runs when the
+ * user explicitly asks for raw detail.
+ */
+function rawRows(
+  db: DatabaseSync,
+  q: ViewportQuery,
+  segmentLimit: number
+): { rows: ViewportSegmentRow[]; truncated: boolean } {
+  const segs = db.prepare(`
+    SELECT s.id, s.type
+    FROM segments s
+    WHERE ${VIEWPORT_WHERE}
+    LIMIT ?
+  `).all(...viewportParams(q), segmentLimit + 1) as unknown as Array<{ id: number; type: string }>
+  const truncated = segs.length > segmentLimit
+  if (truncated) segs.length = segmentLimit
+
+  const pointsStmt = db.prepare(`
+    SELECT lon, lat FROM points
+    WHERE segment_id = ? AND flags = 0 AND lat IS NOT NULL AND lon IS NOT NULL
+    ORDER BY seq
+  `)
+  const rows: ViewportSegmentRow[] = []
+  for (const seg of segs) {
+    const pts = pointsStmt.all(seg.id) as unknown as Array<{ lon: number; lat: number }>
+    if (pts.length < 2) continue // not drawable; same rule as import-time geometry
+    const coords = new Float32Array(pts.length * 2)
+    for (let i = 0; i < pts.length; i++) {
+      coords[i * 2] = pts[i]!.lon
+      coords[i * 2 + 1] = pts[i]!.lat
+    }
+    rows.push({
+      id: seg.id,
+      type: seg.type,
+      point_count: pts.length,
+      coords: new Uint8Array(coords.buffer)
+    })
+  }
+  return { rows, truncated }
+}
+
+/** Thin a polyline to every `stride`-th vertex, always keeping both endpoints. */
+function decimateRow(row: ViewportSegmentRow, stride: number): void {
+  const n = row.point_count
+  if (n <= 2) return
+  // Blobs from SQLite are byte-aligned copies; realign for a Float32 view.
+  const src =
+    row.coords.byteOffset % 4 === 0
+      ? new Float32Array(row.coords.buffer, row.coords.byteOffset, n * 2)
+      : new Float32Array(row.coords.slice().buffer)
+  const kept: number[] = []
+  for (let i = 0; i < n - 1; i += stride) kept.push(i)
+  kept.push(n - 1)
+  const out = new Float32Array(kept.length * 2)
+  for (let i = 0; i < kept.length; i++) {
+    out[i * 2] = src[kept[i]! * 2]!
+    out[i * 2 + 1] = src[kept[i]! * 2 + 1]!
+  }
+  row.point_count = kept.length
+  row.coords = new Uint8Array(out.buffer)
 }
 
 export function queryViewportWaypoints(

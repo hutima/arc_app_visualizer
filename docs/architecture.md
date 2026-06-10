@@ -53,7 +53,8 @@ points          raw archive: (segment_id, seq) PK, ts, lat/lon/ele, flags —
 display_geometries  (segment_id, detail 0|1|2) → Float32 lon/lat blob,
                     Douglas–Peucker at 1e-3 / 1e-4 / 1e-5 deg from CLEAN points
 waypoints       Arc visits: lat/lon, time, name
-categories      name → color, visible (UI state), ignored (query-level)
+categories      name → color, visible (UI state), ignored (query-level);
+                known-category colors re-sync from the code palette on open
 perf_log        import/query timings
 ```
 
@@ -84,19 +85,27 @@ ignore at query time, not a data deletion.
 
 ## Viewport pipeline
 
-1. Renderer debounces `moveend` (200 ms), pads bounds 15%, picks nothing —
-   the **main process** picks the detail level from zoom (`displayDetail.ts`:
-   z<8→0, z<13→1, else 2).
+1. Renderer debounces `moveend` (200 ms), pads bounds 15%, and forwards the
+   user's **Track detail** mode — the **main process** resolves the level
+   (`displayDetail.ts`): 'auto' from zoom (z<8→0, z<13→1, else 2), 'low'/
+   'medium'/'high' pin a precomputed level, 'all' reads clean raw points
+   straight from `points`.
 2. SQL: bounds intersection + time-range overlap (NULL-tolerant) + ignored
-   categories excluded + `LIMIT n+1` to detect truncation.
-3. Rows are packed into one `ArrayBuffer` (`shared/geomCodec.ts`: type table
+   categories excluded + `LIMIT n+1` to detect truncation (a safety valve).
+3. Point budget (`queryLimits.points`): limiting **downsamples, never drops
+   routes**. Auto mode first steps to coarser precomputed levels while a
+   cheap `SUM(point_count)` aggregate stays over budget; whatever level is
+   served (including pinned/raw), lines are then thinned by a uniform vertex
+   stride with endpoints kept, so every segment in the viewport stays
+   visible.
+4. Rows are packed into one `ArrayBuffer` (`shared/geomCodec.ts`: type table
    + per-segment id/type/Float32 coords). Cloning one buffer over IPC is far
    cheaper than cloning nested GeoJSON, and decode is allocation-light.
-4. `MapController` decodes into a single GeoJSON source; per-type color via
+5. `MapController` decodes into a single GeoJSON source; per-type color via
    a `match` expression; visibility via layer filter (no re-query); waypoint
    circles on a second source.
-5. Stats (query/encode/decode/render ms, counts, truncation) surface in the
-   sidebar and `perf_log`.
+6. Stats (query/encode/decode/render ms, counts, detail served, thinning
+   stride, truncation) surface in the sidebar and `perf_log`.
 
 ## Failure behavior
 
