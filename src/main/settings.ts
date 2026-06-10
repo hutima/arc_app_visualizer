@@ -12,8 +12,15 @@ export interface AppSettings {
   basemapStyleUrl: string
   cleaning: CleaningConfig
   queryLimits: {
+    /** Hard segment cap per viewport query (safety valve). */
     segments: number
     waypoints: number
+    /**
+     * Soft point budget per viewport query. Overflowing viewports are served
+     * coarser/thinned lines rather than dropping whole routes; raise this to
+     * see more points at once.
+     */
+    points: number
   }
 }
 
@@ -25,7 +32,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   cleaning: DEFAULT_CLEANING,
   queryLimits: {
     segments: 20000,
-    waypoints: 5000
+    waypoints: 5000,
+    points: 300000
   }
 }
 
@@ -54,7 +62,8 @@ export function loadSettings(userDataDir: string): AppSettings {
       },
       queryLimits: {
         segments: parsed.queryLimits?.segments ?? DEFAULT_SETTINGS.queryLimits.segments,
-        waypoints: parsed.queryLimits?.waypoints ?? DEFAULT_SETTINGS.queryLimits.waypoints
+        waypoints: parsed.queryLimits?.waypoints ?? DEFAULT_SETTINGS.queryLimits.waypoints,
+        points: parsed.queryLimits?.points ?? DEFAULT_SETTINGS.queryLimits.points
       }
     }
   } catch {

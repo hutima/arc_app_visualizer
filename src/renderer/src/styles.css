@@ -148,7 +148,17 @@ button:disabled {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #eab308;
+  background: #f8fafc;
+}
+
+.detail-select {
+  width: 100%;
+  background: #1a2130;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 6px;
+  font-size: 12px;
 }
 
 .category-name {

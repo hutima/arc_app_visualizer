@@ -39,7 +39,9 @@ export function StatsPanel({ summary, lastImport, renderStats, config }: Props):
       {renderStats && (
         <p className="hint">
           Viewport: {renderStats.segmentCount.toLocaleString()} segments /{' '}
-          {renderStats.pointCount.toLocaleString()} pts at detail {renderStats.detail}
+          {renderStats.pointCount.toLocaleString()} pts at detail{' '}
+          {renderStats.detail === 'raw' ? 'raw (all points)' : renderStats.detail}
+          {renderStats.downsampleStride > 1 ? `, thinned ×${renderStats.downsampleStride}` : ''}
           {renderStats.truncated ? ' (truncated)' : ''} — query {ms(renderStats.queryMs)}, encode{' '}
           {ms(renderStats.encodeMs)}, decode {ms(renderStats.decodeMs)}, render{' '}
           {ms(renderStats.renderMs)}

@@ -56,7 +56,8 @@ steps — the SQLite engine ships inside Node/Electron.
 
 Then, in the app: **Import folder…** → select the directory holding your
 weekly `*.gpx` exports → watch progress → **Fit map to data**. Use the type
-checkboxes and date-range presets (`All time`, `Last year`, `90 days`,
+checkboxes, the **Track detail** selector (auto by zoom, pinned levels, or
+all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
 `‹ wk`/`wk ›`) to slice the map.
 
 ## What it does
@@ -76,10 +77,18 @@ checkboxes and date-range presets (`All time`, `Last year`, `90 days`,
   Flagged points are **kept** (never deleted) and excluded only from display
   geometry — cleaning is transparent, reversible, and reprocessable.
 - Precomputes **three simplification levels** (Douglas–Peucker) per segment;
-  the map requests the level matching the current zoom, so world-level views
-  draw ~1–2% of raw points.
-- Renders with MapLibre GL on a dark basemap, one color per activity type
-  (`walking`, `metro`, `car`, …; unknown types get stable generated colors).
+  by default the map requests the level matching the current zoom, so
+  world-level views draw ~1–2% of raw points. A **Track detail** control lets
+  you pin a level or render **every raw clean point** (`All points`) instead.
+- Limits gracefully: when a viewport would exceed the point budget
+  (`queryLimits.points` in `settings.json`, default 300k), auto mode steps to
+  a coarser level and lines are **evenly thinned (endpoints kept)** — routes
+  are never silently dropped to satisfy the budget.
+- Renders with MapLibre GL on a dark basemap, one color per activity type,
+  grouped by mode family so similar transit looks similar: car/taxi share the
+  taxi-yellow family (motorcycle/scooter in oranges), bus joins the
+  violet→pink mass-transit family with metro/tram/train, boat is blue, and
+  airplane has red to itself. Unknown types get stable generated colors.
   Arc's `bogus` category is imported but ignored/hidden by default.
 - Waypoints (Arc "visits") render as dots, toggleable like any type.
 - Viewport-aware: only segments intersecting the (padded) visible bounds and

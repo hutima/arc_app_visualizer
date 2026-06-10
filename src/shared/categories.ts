@@ -1,24 +1,38 @@
 /**
  * Activity categories observed in Arc Timeline exports, with dark-basemap
- * friendly colors. Unknown categories get a deterministic fallback color so
- * future Arc types render sensibly without a schema change.
+ * friendly colors grouped by mode family so similar transit reads as similar:
+ *
+ * - human-powered  → greens/teals (walking, running, cycling, skiing)
+ * - private motor  → taxi-yellow/orange family (car, taxi, motorcycle,
+ *                    scooter) — warm hues, deliberately far from transit
+ * - mass transit   → violet→pink family (bus, metro, tram, train)
+ * - water          → blue (boat)
+ * - air            → red (airplane) — its own color, nothing else is red
+ *
+ * Unknown categories get a deterministic fallback color so future Arc types
+ * render sensibly without a schema change.
  */
 
 export const KNOWN_CATEGORY_COLORS: Record<string, string> = {
+  // human-powered
   walking: '#4fc97e',
   running: '#a3e635',
-  cycling: '#f59e0b',
-  car: '#60a5fa',
-  taxi: '#facc15',
-  bus: '#f97316',
-  tram: '#e879f9',
-  metro: '#c084fc',
-  train: '#f472b6',
-  airplane: '#38bdf8',
-  boat: '#2dd4bf',
-  motorcycle: '#fb7185',
-  scooter: '#d9f99d',
+  cycling: '#2dd4bf',
   skiing: '#93c5fd',
+  // private motor vehicles: car sits beside taxi-yellow, distinct from transit
+  car: '#f59e0b',
+  taxi: '#facc15',
+  motorcycle: '#fb923c',
+  scooter: '#fdba74',
+  // shared / mass transit
+  bus: '#a78bfa',
+  metro: '#c084fc',
+  tram: '#e879f9',
+  train: '#f472b6',
+  // water and air
+  boat: '#38bdf8',
+  airplane: '#ef4444',
+  // non-movement
   stationary: '#9ca3af',
   unknown: '#7d8590',
   bogus: '#6b7280'
@@ -27,7 +41,8 @@ export const KNOWN_CATEGORY_COLORS: Record<string, string> = {
 /** Arc's own junk label; imported for transparency but hidden from queries. */
 export const IGNORED_BY_DEFAULT = new Set(['bogus'])
 
-export const WAYPOINT_COLOR = '#eab308'
+/** Neutral so place dots never read as a (yellow) car/taxi track. */
+export const WAYPOINT_COLOR = '#f8fafc'
 
 /** Deterministic, reasonably bright color for categories we have not seen. */
 export function colorForCategory(name: string): string {

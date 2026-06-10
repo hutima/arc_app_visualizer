@@ -77,8 +77,8 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle('query:viewport', (_event, q: ViewportQuery): ViewportResult => {
     const t0 = performance.now()
-    const { rows, truncated, detail } = queryViewportSegments(
-      ctx.db, q, ctx.settings.queryLimits.segments
+    const { rows, truncated, detail, downsampleStride } = queryViewportSegments(
+      ctx.db, q, ctx.settings.queryLimits
     )
     const waypoints = queryViewportWaypoints(ctx.db, q, ctx.settings.queryLimits.waypoints)
     const queryMs = performance.now() - t0
@@ -105,12 +105,23 @@ export function registerIpc(ctx: IpcContext): void {
     const buffer = encodeGeometry(typeTable, segments)
     const encodeMs = performance.now() - tEncode
 
-    insertPerf(ctx.db, 'query.viewport', queryMs, `segments=${rows.length} points=${pointCount} detail=${detail}`)
+    insertPerf(
+      ctx.db, 'query.viewport', queryMs,
+      `segments=${rows.length} points=${pointCount} detail=${detail} stride=${downsampleStride}`
+    )
 
     return {
       buffer,
       waypoints,
-      meta: { segmentCount: rows.length, pointCount, queryMs, encodeMs, truncated, detail }
+      meta: {
+        segmentCount: rows.length,
+        pointCount,
+        queryMs,
+        encodeMs,
+        truncated,
+        detail,
+        downsampleStride
+      }
     }
   })
 
