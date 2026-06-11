@@ -207,6 +207,49 @@ describe('snapRideToRail', () => {
     const ride = new Float32Array([0, 0.0003, 0.05, -0.0003, 0.1, 0.0004])
     expect(snapRideToRail(ride, graph, () => false)).toBeNull()
   })
+
+  it('matches vertices mid-edge on sparse-node straight track', () => {
+    // One straight edge 1.1 km long: nodes only at the ends, as OSM maps
+    // straight track. Ride vertices sit ~30 m off the rail but hundreds of
+    // meters from both nodes — node-distance matching loses these rides.
+    const g = buildRailGraph(
+      [
+        { id: 1, lat: 0, lon: 0 },
+        { id: 2, lat: 0, lon: 0.01 }
+      ],
+      [{ a: 1, b: 2 }]
+    )
+    const ride = new Float32Array([0.002, 0.0003, 0.008, -0.0003])
+    const c = coordsOf(snapRideToRail(ride, g)!)
+    expect(c).toEqual([0, 0, expect.closeTo(0.01, 6), 0])
+  })
+
+  it('bridges parallel-track ping-pong instead of rejecting the ride', () => {
+    // Two unconnected parallel tracks ~11 m apart (one OSM way per direction).
+    // Noisy anchors alternate between them; the connecting crossover may be
+    // far away, but the straight gap is meters — bridge it, don't give up.
+    const nodes: RailNodeInput[] = []
+    const edges: RailEdgeInput[] = []
+    for (let i = 0; i <= 20; i++) {
+      nodes.push({ id: 100 + i, lat: 0, lon: i * 0.001 })
+      nodes.push({ id: 200 + i, lat: 0.0001, lon: i * 0.001 })
+      if (i > 0) {
+        edges.push({ a: 99 + i, b: 100 + i })
+        edges.push({ a: 199 + i, b: 200 + i })
+      }
+    }
+    const g = buildRailGraph(nodes, edges)
+    // Dense vertices (~55 m apart) hugging track A, every 7th flipping to B.
+    const ride: number[] = []
+    for (let i = 0; i <= 40; i++) {
+      ride.push(i * 0.0005, i % 7 === 3 ? 0.00008 : 0.00002)
+    }
+    const c = coordsOf(snapRideToRail(new Float32Array(ride), g)!)
+    expect(c.length).toBeGreaterThanOrEqual(4)
+    // Every output point lies on one of the two tracks — never off-network.
+    const lats = new Set([0, Math.fround(0.0001)])
+    for (let i = 1; i < c.length; i += 2) expect(lats.has(c[i]!)).toBe(true)
+  })
 })
 
 describe('snapRailTracks', () => {

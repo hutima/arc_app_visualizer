@@ -105,6 +105,8 @@ export interface ViewportResultMeta {
   railAveraged: number
   /** Rail segments snapped to the OSM network (0 = off/no coverage). */
   railSnapped: number
+  /** Rail-typed segments seen by the snapper, so the UI can show "X of Y". */
+  railRides: number
 }
 
 export interface ViewportResult {
