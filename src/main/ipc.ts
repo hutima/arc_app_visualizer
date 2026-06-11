@@ -18,10 +18,10 @@ import {
 import { averageRailTracks } from './db/railAverage'
 import { buildRailGraph, snapRailTracks } from './rail/snapRail'
 import { fetchRailNetwork } from './rail/overpass'
-import { storeRailNetwork, getRailCoverage, loadRailForViewport } from './db/railStore'
+import { addRailNetwork, getRailCoverage, loadRailForViewport } from './db/railStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
-import type { ImportProgress, ViewportQuery, ViewportResult } from '../shared/types'
+import type { ImportProgress, LatLonBBox, ViewportQuery, ViewportResult } from '../shared/types'
 
 export interface IpcContext {
   db: DatabaseSync
@@ -95,7 +95,14 @@ export function registerIpc(ctx: IpcContext): void {
     if (q.snapRail) {
       const net = loadRailForViewport(ctx.db, q)
       if (net.edges.length > 0) {
-        const result = snapRailTracks(rows, buildRailGraph(net.nodes, net.edges))
+        // Coverage gate: only vertices inside a fetched region snap; the rest
+        // of a ride keeps raw GPS (rail is fetched one viewport at a time).
+        const boxes = (getRailCoverage(ctx.db)?.regions ?? []).map((r) => r.bbox)
+        const isCovered = (lon: number, lat: number): boolean =>
+          boxes.some(
+            (b) => lat >= b.minLat && lat <= b.maxLat && lon >= b.minLon && lon <= b.maxLon
+          )
+        const result = snapRailTracks(rows, buildRailGraph(net.nodes, net.edges), isCovered)
         rows = result.rows
         railSnapped = result.snapped
       }
@@ -169,18 +176,26 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
   ipcMain.handle('rail:coverage', () => getRailCoverage(ctx.db))
-  ipcMain.handle('rail:fetch', async () => {
-    const bounds = getDataBounds(ctx.db)
-    if (!bounds) return { ok: false, error: 'no data to fetch a rail network for' }
-    // Small margin so rides ending just outside the data bbox still match.
+  ipcMain.handle('rail:fetch', async (_e, view: LatLonBBox) => {
+    const nums = [view?.minLat, view?.maxLat, view?.minLon, view?.maxLon]
+    if (nums.some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
+      return { ok: false, error: 'no view to fetch' }
+    }
+    // City-sized fetches only: Overpass times out (and the local graph
+    // balloons) on continent-scale rail. Load cities one view at a time.
+    const MAX_SPAN_DEG = 4
+    if (view.maxLat - view.minLat > MAX_SPAN_DEG || view.maxLon - view.minLon > MAX_SPAN_DEG) {
+      return { ok: false, error: 'view too large — zoom in to one city and fetch areas individually' }
+    }
+    // Small margin so rides ending just off-screen still match.
     const pad = 0.02
     const bbox = {
-      minLat: bounds.minLat - pad, minLon: bounds.minLon - pad,
-      maxLat: bounds.maxLat + pad, maxLon: bounds.maxLon + pad
+      minLat: Math.max(-90, view.minLat - pad), minLon: Math.max(-180, view.minLon - pad),
+      maxLat: Math.min(90, view.maxLat + pad), maxLon: Math.min(180, view.maxLon + pad)
     }
     try {
       const rail = await fetchRailNetwork(bbox)
-      const coverage = storeRailNetwork(ctx.db, rail, bbox)
+      const coverage = addRailNetwork(ctx.db, rail, bbox)
       return { ok: true, coverage }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }

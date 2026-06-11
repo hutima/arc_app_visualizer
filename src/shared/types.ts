@@ -52,11 +52,28 @@ export interface ViewportQuery {
   snapRail?: boolean
 }
 
-export interface RailCoverage {
-  bbox: { minLat: number; minLon: number; maxLat: number; maxLon: number }
+export interface LatLonBBox {
+  minLat: number
+  minLon: number
+  maxLat: number
+  maxLon: number
+}
+
+/** One fetched OSM rail region (a past viewport). */
+export interface RailRegion {
+  bbox: LatLonBBox
   fetchedAtMs: number
+}
+
+/**
+ * Everything fetched so far. Regions accumulate one viewport at a time and
+ * gate snapping: rides keep raw GPS wherever they leave fetched areas.
+ */
+export interface RailCoverage {
+  regions: RailRegion[]
   nodeCount: number
   edgeCount: number
+  lastFetchedAtMs: number
 }
 
 export interface ViewportWaypoint {
@@ -170,8 +187,8 @@ export interface ArcApi {
   setBasemapTheme(theme: 'dark' | 'light'): Promise<void>
   /** Saves a rendered map frame; the user picks the destination. */
   exportMapPng(dataUrl: string): Promise<{ saved: boolean; path?: string }>
-  /** One-time OSM rail fetch over the data's extent; stored for offline snap. */
-  fetchRailNetwork(): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
+  /** Fetch OSM rail for the given (on-screen) bbox; regions accumulate. */
+  fetchRailNetwork(bbox: LatLonBBox): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
   getRailCoverage(): Promise<RailCoverage | null>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
 }

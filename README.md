@@ -109,12 +109,13 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   visit wins — so every visited area stays represented; the sidebar shows
   `N of M places` when thinning.
 - **Cleaning — snap rail to OSM (recommended)**: fetch the OpenStreetMap rail
-  network for your data's extent **once** (the app's only network call; stored
-  locally, everything after is offline), then metro/tram/train rides are
-  **map-matched** onto the real alignment and **routed through tunnels** along
-  the rail graph — fixing exactly where GPS is worst, and making repeat rides
-  coincide instead of smearing. Greedy nearest-node + Dijkstra matcher;
-  unmatchable rides are left untouched.
+  network **for the area on screen** (the app's only network call; stored
+  locally, everything after is offline) — pan to each city and fetch it,
+  regions accumulate. Metro/tram/train rides are then **map-matched** onto the
+  real alignment and **routed through tunnels** along the rail graph — fixing
+  exactly where GPS is worst, and making repeat rides coincide instead of
+  smearing. Greedy nearest-node + Dijkstra matcher; rides keep their raw GPS
+  wherever they leave fetched areas, and unmatchable rides are left untouched.
 - **Cleaning fallback — average repeat rail rides** (no network): rides
   between the same two places (either direction) collapse into one **robust
   consensus** track at ~50 m resolution — arc-length resampled, reduced by
