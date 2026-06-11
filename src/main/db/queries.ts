@@ -176,12 +176,15 @@ function decimateRow(row: ViewportSegmentRow, stride: number): void {
 
 export interface ViewportWaypointsResult {
   waypoints: ViewportWaypoint[]
-  /** Waypoints matching the viewport before any thinning. */
+  /** Distinct places matching the viewport (same-name visits merged), before thinning. */
   totalCount: number
 }
 
 /**
  * Waypoints (place visits) for the viewport, within a budget.
+ *
+ * Pipeline: bounds/time filter → merge repeat visits of the same named place
+ * into one averaged dot → if still over budget, thin spatially.
  *
  * Same philosophy as segment limiting: a visited area must never vanish just
  * because the viewport got busy. Arc weekly exports re-list the same places
@@ -208,9 +211,67 @@ export function queryViewportWaypoints(
     q.startTsMs, q.startTsMs,
     q.endTsMs, q.endTsMs
   ) as unknown as ViewportWaypoint[]
-  if (limit <= 0) return { waypoints: [], totalCount: all.length }
-  if (all.length <= limit) return { waypoints: all, totalCount: all.length }
-  return { waypoints: thinWaypoints(all, q, limit), totalCount: all.length }
+  const merged = mergeSameNamePlaces(all)
+  if (limit <= 0) return { waypoints: [], totalCount: merged.length }
+  if (merged.length <= limit) return { waypoints: merged, totalCount: merged.length }
+  return { waypoints: thinWaypoints(merged, q, limit), totalCount: merged.length }
+}
+
+/** Same-name visits within this radius of each other merge (~275 m). */
+const PLACE_MERGE_RADIUS_DEG = 0.0025
+
+interface PlaceCluster {
+  latSum: number
+  lonSum: number
+  count: number
+  /** Most recent member; supplies the merged dot's id/tsMs. */
+  rep: ViewportWaypoint
+}
+
+/**
+ * Arc exports one waypoint per stay, so a well-visited place is hundreds of
+ * GPS-jittered dots. Merge same-name visits into a single dot at their mean
+ * location. Merging is per spatial cluster, not global per name: chain
+ * locations ("Starbucks" in two cities) keep separate dots instead of
+ * averaging into a phantom between them. Unnamed visits pass through as-is.
+ */
+function mergeSameNamePlaces(all: ViewportWaypoint[]): ViewportWaypoint[] {
+  const merged: ViewportWaypoint[] = []
+  const clustersByName = new Map<string, PlaceCluster[]>()
+  // id order ⇒ deterministic clustering regardless of scan order.
+  for (const w of [...all].sort((a, b) => a.id - b.id)) {
+    if (!w.name) {
+      merged.push(w)
+      continue
+    }
+    let clusters = clustersByName.get(w.name)
+    if (!clusters) clustersByName.set(w.name, (clusters = []))
+    const near = clusters.find((c) => {
+      const dLat = w.lat - c.latSum / c.count
+      const dLon = w.lon - c.lonSum / c.count
+      return dLat * dLat + dLon * dLon <= PLACE_MERGE_RADIUS_DEG ** 2
+    })
+    if (near) {
+      near.latSum += w.lat
+      near.lonSum += w.lon
+      near.count++
+      if (moreRecentVisit(w, near.rep)) near.rep = w
+    } else {
+      clusters.push({ latSum: w.lat, lonSum: w.lon, count: 1, rep: w })
+    }
+  }
+  for (const clusters of clustersByName.values()) {
+    for (const c of clusters) {
+      merged.push({
+        id: c.rep.id,
+        lat: c.latSum / c.count,
+        lon: c.lonSum / c.count,
+        tsMs: c.rep.tsMs,
+        name: c.rep.name
+      })
+    }
+  }
+  return merged
 }
 
 /**

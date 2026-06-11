@@ -60,7 +60,7 @@ export interface ViewportResultMeta {
   downsampleStride: number
   /** Places served to the map (after any spatial thinning). */
   waypointCount: number
-  /** Places matching the viewport before thinning. */
+  /** Distinct places matching the viewport (same-name visits merged), before thinning. */
   waypointTotal: number
 }
 
