@@ -6,6 +6,7 @@ import type {
   ViewportQuery,
   ViewportWaypoint
 } from '../../shared/types'
+import { colorForCategory } from '../../shared/categories'
 import { resolveDetail, type ResolvedDetail } from '../../shared/displayDetail'
 
 export interface ViewportSegmentRow {
@@ -317,7 +318,7 @@ function moreRecentVisit(a: ViewportWaypoint, b: ViewportWaypoint): boolean {
 
 export function getCategories(db: DatabaseSync): CategoryInfo[] {
   const rows = db.prepare(`
-    SELECT c.name, c.color, c.visible, c.ignored,
+    SELECT c.name, c.color, c.visible, c.ignored, c.custom,
            COALESCE(s.segment_count, 0) AS segmentCount,
            COALESCE(s.point_count, 0) AS pointCount
     FROM categories c
@@ -331,6 +332,7 @@ export function getCategories(db: DatabaseSync): CategoryInfo[] {
     color: string
     visible: number
     ignored: number
+    custom: number
     segmentCount: number
     pointCount: number
   }>
@@ -339,6 +341,7 @@ export function getCategories(db: DatabaseSync): CategoryInfo[] {
     color: r.color,
     visible: r.visible === 1,
     ignored: r.ignored === 1,
+    custom: r.custom === 1,
     segmentCount: r.segmentCount,
     pointCount: r.pointCount
   }))
@@ -346,6 +349,20 @@ export function getCategories(db: DatabaseSync): CategoryInfo[] {
 
 export function setCategoryVisible(db: DatabaseSync, name: string, visible: boolean): void {
   db.prepare('UPDATE categories SET visible = ? WHERE name = ?').run(visible ? 1 : 0, name)
+}
+
+/**
+ * User-picked category color; null reverts to the default (curated palette
+ * or generated fallback) and re-enables automatic palette refreshes.
+ */
+export function setCategoryColor(db: DatabaseSync, name: string, color: string | null): void {
+  if (color === null) {
+    db.prepare('UPDATE categories SET color = ?, custom = 0 WHERE name = ?')
+      .run(colorForCategory(name), name)
+    return
+  }
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return // only plain hex from the picker
+  db.prepare('UPDATE categories SET color = ?, custom = 1 WHERE name = ?').run(color, name)
 }
 
 export function getSummary(db: DatabaseSync): DatasetSummary {

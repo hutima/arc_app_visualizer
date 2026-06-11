@@ -15,6 +15,7 @@ import {
   queryViewportSegments,
   queryViewportWaypoints,
   getCategories,
+  setCategoryColor,
   getSummary,
   getDataBounds,
   type ViewportSegmentRow
@@ -293,5 +294,26 @@ describe('category colors', () => {
     db = openDb(dbPath)
     const car = getCategories(db).find((c) => c.name === 'car')
     expect(car?.color).toBe(KNOWN_CATEGORY_COLORS.car)
+  })
+
+  it('keeps user-customized colors across reopen, and reset restores the default', () => {
+    setCategoryColor(db, 'car', '#123abc')
+    db.close()
+    db = openDb(dbPath) // palette refresh must not clobber a custom color
+    let car = getCategories(db).find((c) => c.name === 'car')!
+    expect(car.color).toBe('#123abc')
+    expect(car.custom).toBe(true)
+
+    setCategoryColor(db, 'car', null)
+    car = getCategories(db).find((c) => c.name === 'car')!
+    expect(car.color).toBe(KNOWN_CATEGORY_COLORS.car)
+    expect(car.custom).toBe(false)
+  })
+
+  it('rejects malformed colors (picker only ever sends hex)', () => {
+    setCategoryColor(db, 'car', 'red; DROP TABLE categories')
+    expect(getCategories(db).find((c) => c.name === 'car')!.color).toBe(
+      KNOWN_CATEGORY_COLORS.car
+    )
   })
 })

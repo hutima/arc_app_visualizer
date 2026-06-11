@@ -13,6 +13,8 @@ export interface CategoryInfo {
   color: string
   visible: boolean
   ignored: boolean
+  /** True when the user picked this color; exempt from palette refreshes. */
+  custom: boolean
   segmentCount: number
   pointCount: number
 }
@@ -130,6 +132,8 @@ export interface ArcApi {
   queryViewport(q: ViewportQuery): Promise<ViewportResult>
   getCategories(): Promise<CategoryInfo[]>
   setCategoryVisible(name: string, visible: boolean): Promise<void>
+  /** Hex color from the picker; null reverts to the default palette color. */
+  setCategoryColor(name: string, color: string | null): Promise<void>
   getSummary(): Promise<DatasetSummary>
   getDataBounds(): Promise<DataBounds | null>
   getConfig(): Promise<AppConfig>

@@ -8,6 +8,7 @@ import type {
   TrackColorMode
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
+import { colorForCategory } from '../../shared/categories'
 import { MapController, type RenderStats } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
 import { CategoryPanel } from './components/CategoryPanel'
@@ -105,6 +106,20 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setDateRange(startTsMs, endTsMs)
   }, [])
 
+  // Optimistic: the default color is derivable locally via colorForCategory.
+  const handleColorChange = useCallback((name: string, color: string | null): void => {
+    setCategories((prev) => {
+      const next = prev.map((c) =>
+        c.name === name
+          ? { ...c, color: color ?? colorForCategory(name), custom: color !== null }
+          : c
+      )
+      controllerRef.current?.setCategories(next)
+      return next
+    })
+    void window.api.setCategoryColor(name, color)
+  }, [])
+
   const handleToggleWaypoints = useCallback((show: boolean): void => {
     setShowWaypoints(show)
     controllerRef.current?.setShowWaypoints(show)
@@ -131,6 +146,7 @@ export function App(): React.JSX.Element {
           showWaypoints={showWaypoints}
           onToggle={handleToggleCategory}
           onToggleWaypoints={handleToggleWaypoints}
+          onColorChange={handleColorChange}
         />
         <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />

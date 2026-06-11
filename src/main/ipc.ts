@@ -7,6 +7,7 @@ import {
   queryViewportWaypoints,
   getCategories,
   setCategoryVisible,
+  setCategoryColor,
   getSummary,
   getDataBounds,
   getRecentPerf,
@@ -132,6 +133,9 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('categories:get', () => getCategories(ctx.db))
   ipcMain.handle('categories:setVisible', (_e, name: string, visible: boolean) => {
     setCategoryVisible(ctx.db, name, visible)
+  })
+  ipcMain.handle('categories:setColor', (_e, name: string, color: string | null) => {
+    setCategoryColor(ctx.db, name, color)
   })
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
