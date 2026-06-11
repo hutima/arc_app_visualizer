@@ -68,13 +68,16 @@ describe('overpass parsing', () => {
     expect(parseOverpassJson({})).toEqual({ nodes: [], edges: [] })
   })
 
+  const BOX = { minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 }
+  const MIRRORS = ['https://a.example/api/interpreter', 'https://b.example/api/interpreter']
+
   it('sends an identifying User-Agent (Overpass 406s anonymous requests)', async () => {
     const mock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ elements: [] }), { status: 200 })
     )
     vi.stubGlobal('fetch', mock)
     try {
-      await fetchRailNetwork({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 })
+      await fetchRailNetwork(BOX)
       const headers = mock.mock.calls[0]![1].headers as Record<string, string>
       expect(headers['User-Agent']).toMatch(/arc-visualizer/)
       expect(headers.Accept).toBe('application/json')
@@ -83,15 +86,55 @@ describe('overpass parsing', () => {
     }
   })
 
-  it('surfaces the server response text on HTTP failure', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(new Response('<html><body>Too Many Requests</body></html>', { status: 429 }))
-    )
+  it('falls back to a mirror when the primary 504s (busy dispatcher)', async () => {
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('Dispatcher_Client::request_read_and_idx::timeout', { status: 504 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ elements: [] }), { status: 200 }))
+    vi.stubGlobal('fetch', mock)
     try {
-      await expect(fetchRailNetwork({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 })).rejects.toThrow(
-        /Overpass HTTP 429: Too Many Requests/
+      await expect(fetchRailNetwork(BOX, MIRRORS)).resolves.toEqual({ nodes: [], edges: [] })
+      expect(mock).toHaveBeenCalledTimes(2)
+      expect(mock.mock.calls[1]![0]).toBe(MIRRORS[1])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('surfaces the last failure (with host) when every mirror is down', async () => {
+    const mock = vi.fn().mockImplementation(() =>
+      Promise.resolve(new Response('<html><body>Too Many Requests</body></html>', { status: 429 }))
+    )
+    vi.stubGlobal('fetch', mock)
+    try {
+      await expect(fetchRailNetwork(BOX, MIRRORS)).rejects.toThrow(
+        /Overpass HTTP 429 \(b\.example\): Too Many Requests/
       )
+      expect(mock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('does not retry a bad request (our bug, not server load)', async () => {
+    const mock = vi.fn().mockResolvedValue(new Response('parse error', { status: 400 }))
+    vi.stubGlobal('fetch', mock)
+    try {
+      await expect(fetchRailNetwork(BOX, MIRRORS)).rejects.toThrow(/Overpass HTTP 400/)
+      expect(mock).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('falls through to a mirror on a network-level failure', async () => {
+    const mock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ elements: [] }), { status: 200 }))
+    vi.stubGlobal('fetch', mock)
+    try {
+      await expect(fetchRailNetwork(BOX, MIRRORS)).resolves.toEqual({ nodes: [], edges: [] })
     } finally {
       vi.unstubAllGlobals()
     }
