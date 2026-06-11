@@ -66,6 +66,7 @@ export class MapController {
   private colorMode: TrackColorMode = 'type'
   /** Distinct years among segments of the last refresh (0 = undated). */
   private yearsInView: number[] = []
+  private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
   private destroyed = false
@@ -74,18 +75,21 @@ export class MapController {
   static async create(
     container: HTMLElement,
     basemapStyleUrl: string,
+    roadDimOpacity: number,
     onStats: (s: RenderStats) => void
   ): Promise<MapController> {
     const style = await resolveStyle(basemapStyleUrl)
-    return new MapController(container, style, onStats)
+    return new MapController(container, style, roadDimOpacity, onStats)
   }
 
   private constructor(
     container: HTMLElement,
     style: StyleSpecification | string,
+    roadDimOpacity: number,
     onStats: (s: RenderStats) => void
   ) {
     this.onStats = onStats
+    this.roadDimOpacity = roadDimOpacity
     this.map = new maplibregl.Map({
       container,
       style,
@@ -97,9 +101,42 @@ export class MapController {
 
     this.map.on('load', () => {
       this.addSourcesAndLayers()
+      this.dimBasemapRoads()
       void this.refreshNow()
     })
     this.map.on('moveend', () => this.scheduleRefresh())
+  }
+
+  /** Swap the basemap style, then re-add our sources/layers on top of it. */
+  async setBasemap(styleUrl: string): Promise<void> {
+    const style = await resolveStyle(styleUrl)
+    if (this.destroyed) return
+    this.map.setStyle(style)
+    this.map.once('styledata', () => {
+      if (this.destroyed) return
+      this.addSourcesAndLayers()
+      this.dimBasemapRoads()
+      void this.refreshNow()
+    })
+  }
+
+  /**
+   * Streets in the stock Carto styles are bright enough to compete with
+   * tracks. Both carto themes are OpenMapTiles schemas, so dim every line
+   * layer of the `transportation` source-layer; a no-op for styles that
+   * organize roads differently (and for the offline fallback).
+   */
+  private dimBasemapRoads(): void {
+    if (this.roadDimOpacity >= 1) return
+    for (const layer of this.map.getStyle().layers ?? []) {
+      if (layer.type !== 'line') continue
+      if (!('source-layer' in layer) || layer['source-layer'] !== 'transportation') continue
+      try {
+        this.map.setPaintProperty(layer.id, 'line-opacity', this.roadDimOpacity)
+      } catch {
+        // Defensive: never let one odd basemap layer break the app.
+      }
+    }
   }
 
   destroy(): void {
@@ -109,6 +146,7 @@ export class MapController {
   }
 
   private addSourcesAndLayers(): void {
+    if (this.map.getSource(TRACKS_SOURCE)) return // already present (theme re-add)
     this.map.addSource(TRACKS_SOURCE, { type: 'geojson', data: EMPTY_FC })
     this.map.addSource(PLACES_SOURCE, { type: 'geojson', data: EMPTY_FC })
 

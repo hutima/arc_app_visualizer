@@ -7,9 +7,20 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DEFAULT_CLEANING, type CleaningConfig } from './importer/clean'
 
+export type BasemapTheme = 'dark' | 'light'
+
 export interface AppSettings {
-  /** MapLibre style URL. Tile requests go to this host while panning. */
+  /** MapLibre style URL for the dark theme. Tile requests go to this host. */
   basemapStyleUrl: string
+  /** MapLibre style URL for the light theme. */
+  basemapStyleUrlLight: string
+  /** Which of the two styles loads; switchable from the sidebar. */
+  basemapTheme: BasemapTheme
+  /**
+   * line-opacity applied to the basemap's road layers so streets never
+   * compete with tracks. 1 disables dimming.
+   */
+  roadDimOpacity: number
   cleaning: CleaningConfig
   queryLimits: {
     /** Hard segment cap per viewport query (safety valve). */
@@ -26,9 +37,14 @@ export interface AppSettings {
 
 export const CARTO_DARK_STYLE_URL =
   'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json'
+export const CARTO_LIGHT_STYLE_URL =
+  'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json'
 
 export const DEFAULT_SETTINGS: AppSettings = {
   basemapStyleUrl: CARTO_DARK_STYLE_URL,
+  basemapStyleUrlLight: CARTO_LIGHT_STYLE_URL,
+  basemapTheme: 'dark',
+  roadDimOpacity: 0.35,
   cleaning: DEFAULT_CLEANING,
   queryLimits: {
     segments: 20000,
@@ -52,6 +68,10 @@ export function loadSettings(userDataDir: string): AppSettings {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<AppSettings>
     return {
       basemapStyleUrl: parsed.basemapStyleUrl ?? DEFAULT_SETTINGS.basemapStyleUrl,
+      basemapStyleUrlLight:
+        parsed.basemapStyleUrlLight ?? DEFAULT_SETTINGS.basemapStyleUrlLight,
+      basemapTheme: parsed.basemapTheme === 'light' ? 'light' : 'dark',
+      roadDimOpacity: clamp01(parsed.roadDimOpacity ?? DEFAULT_SETTINGS.roadDimOpacity),
       cleaning: {
         maxSpeedMpsDefault:
           parsed.cleaning?.maxSpeedMpsDefault ?? DEFAULT_CLEANING.maxSpeedMpsDefault,
@@ -70,4 +90,11 @@ export function loadSettings(userDataDir: string): AppSettings {
     // Unreadable settings should not brick the app.
     return DEFAULT_SETTINGS
   }
+}
+
+const clamp01 = (v: number): number => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1)
+
+/** Persist in-memory settings (e.g. after a theme switch from the UI). */
+export function saveSettings(path: string, settings: AppSettings): void {
+  writeFileSync(path, JSON.stringify(settings, null, 2))
 }

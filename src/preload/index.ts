@@ -18,6 +18,7 @@ const api: ArcApi = {
   getSummary: () => ipcRenderer.invoke('summary:get'),
   getDataBounds: () => ipcRenderer.invoke('bounds:get'),
   getConfig: () => ipcRenderer.invoke('app:getConfig'),
+  setBasemapTheme: (theme) => ipcRenderer.invoke('settings:setBasemapTheme', theme),
   getRecentPerf: (limit) => ipcRenderer.invoke('perf:recent', limit)
 }
 

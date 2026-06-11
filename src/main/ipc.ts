@@ -14,7 +14,7 @@ import {
   insertPerf
 } from './db/queries'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
-import type { AppSettings } from './settings'
+import { saveSettings, type AppSettings } from './settings'
 import type { ImportProgress, ViewportQuery, ViewportResult } from '../shared/types'
 
 export interface IpcContext {
@@ -141,8 +141,21 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
   ipcMain.handle('perf:recent', (_e, limit: number) => getRecentPerf(ctx.db, Math.min(limit, 200)))
   ipcMain.handle('app:getConfig', () => ({
-    basemapStyleUrl: ctx.settings.basemapStyleUrl,
+    basemapStyleUrl:
+      ctx.settings.basemapTheme === 'light'
+        ? ctx.settings.basemapStyleUrlLight
+        : ctx.settings.basemapStyleUrl,
+    basemapTheme: ctx.settings.basemapTheme,
+    basemapStyles: {
+      dark: ctx.settings.basemapStyleUrl,
+      light: ctx.settings.basemapStyleUrlLight
+    },
+    roadDimOpacity: ctx.settings.roadDimOpacity,
     dbPath: ctx.dbPath,
     settingsPath: ctx.settingsPath
   }))
+  ipcMain.handle('settings:setBasemapTheme', (_e, theme: 'dark' | 'light') => {
+    ctx.settings.basemapTheme = theme === 'light' ? 'light' : 'dark'
+    saveSettings(ctx.settingsPath, ctx.settings)
+  })
 }

@@ -112,7 +112,13 @@ export interface PerfEntry {
 }
 
 export interface AppConfig {
+  /** Style URL of the active theme. */
   basemapStyleUrl: string
+  basemapTheme: 'dark' | 'light'
+  /** Both theme styles, so the renderer can switch without a round trip. */
+  basemapStyles: { dark: string; light: string }
+  /** line-opacity applied to basemap road layers (1 = no dimming). */
+  roadDimOpacity: number
   dbPath: string
   settingsPath: string
 }
@@ -137,5 +143,7 @@ export interface ArcApi {
   getSummary(): Promise<DatasetSummary>
   getDataBounds(): Promise<DataBounds | null>
   getConfig(): Promise<AppConfig>
+  /** Persists the basemap theme choice to settings.json. */
+  setBasemapTheme(theme: 'dark' | 'light'): Promise<void>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
 }

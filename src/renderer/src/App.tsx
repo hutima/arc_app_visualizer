@@ -11,6 +11,7 @@ import type { DetailMode } from '../../shared/displayDetail'
 import { colorForCategory } from '../../shared/categories'
 import { MapController, type RenderStats } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
+import { BasemapControl } from './components/BasemapControl'
 import { CategoryPanel } from './components/CategoryPanel'
 import { ColorModeControl } from './components/ColorModeControl'
 import { DateFilter } from './components/DateFilter'
@@ -51,6 +52,7 @@ export function App(): React.JSX.Element {
       const controller = await MapController.create(
         mapDivRef.current,
         cfg.basemapStyleUrl,
+        cfg.roadDimOpacity,
         (s) => setRenderStats(s)
       )
       if (disposed) {
@@ -135,6 +137,15 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setColorMode(mode)
   }, [])
 
+  const handleBasemapTheme = useCallback((theme: 'dark' | 'light'): void => {
+    setConfig((prev) => {
+      if (!prev) return prev
+      void controllerRef.current?.setBasemap(prev.basemapStyles[theme])
+      return { ...prev, basemapTheme: theme, basemapStyleUrl: prev.basemapStyles[theme] }
+    })
+    void window.api.setBasemapTheme(theme)
+  }, [])
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -150,6 +161,7 @@ export function App(): React.JSX.Element {
         />
         <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />
+        {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
         <StatsPanel
           summary={summary}
           lastImport={lastImport}
