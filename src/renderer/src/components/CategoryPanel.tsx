@@ -7,6 +7,8 @@ interface Props {
   onToggleWaypoints: (show: boolean) => void
   /** Hex color picked by the user; null reverts to the default. */
   onColorChange: (name: string, color: string | null) => void
+  /** Move a type up (-1) or down (+1); top of the list draws on top. */
+  onReorder: (name: string, direction: -1 | 1) => void
 }
 
 /** `<input type="color">` only accepts #rrggbb; generated colors are hsl(). */
@@ -36,7 +38,8 @@ export function CategoryPanel({
   showWaypoints,
   onToggle,
   onToggleWaypoints,
-  onColorChange
+  onColorChange,
+  onReorder
 }: Props): React.JSX.Element {
   // Only show categories that exist in the data; ignored ones (e.g. `bogus`)
   // are listed separately so it's transparent what is being excluded.
@@ -47,8 +50,11 @@ export function CategoryPanel({
     <section className="panel">
       <h2>Types</h2>
       {active.length === 0 && <p className="hint">Import data to see activity types.</p>}
+      {active.length > 1 && (
+        <p className="hint order-hint">Top of the list draws on top of the map.</p>
+      )}
       <ul className="category-list">
-        {active.map((c) => (
+        {active.map((c, i) => (
           <li key={c.name}>
             <label>
               <input
@@ -77,6 +83,32 @@ export function CategoryPanel({
                   ↺
                 </button>
               )}
+              <span className="order-buttons">
+                <button
+                  type="button"
+                  className="order-btn"
+                  title={`draw ${c.name} above`}
+                  disabled={i === 0}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    onReorder(c.name, -1)
+                  }}
+                >
+                  ▲
+                </button>
+                <button
+                  type="button"
+                  className="order-btn"
+                  title={`draw ${c.name} below`}
+                  disabled={i === active.length - 1}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    onReorder(c.name, 1)
+                  }}
+                >
+                  ▼
+                </button>
+              </span>
               <span className="category-count">{c.segmentCount.toLocaleString()}</span>
             </label>
           </li>

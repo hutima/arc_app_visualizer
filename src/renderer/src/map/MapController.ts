@@ -66,6 +66,7 @@ export class MapController {
   private colorMode: TrackColorMode = 'type'
   /** Distinct years among segments of the last refresh (0 = undated). */
   private yearsInView: number[] = []
+  private averageRail = false
   private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
@@ -95,7 +96,9 @@ export class MapController {
       style,
       center: [0, 20],
       zoom: 1.5,
-      attributionControl: { compact: true }
+      attributionControl: { compact: true },
+      // Keeps the WebGL buffer readable after a frame, for PNG export.
+      canvasContextAttributes: { preserveDrawingBuffer: true }
     })
     this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
 
@@ -157,7 +160,11 @@ export class MapController {
         id: TRACKS_LAYER,
         type: 'line',
         source: TRACKS_SOURCE,
-        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        layout: {
+          'line-cap': 'round',
+          'line-join': 'round',
+          'line-sort-key': this.sortKeyExpression()
+        },
         paint: {
           'line-color': this.colorExpression(),
           'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1, 12, 2, 16, 3.5],
@@ -208,6 +215,21 @@ export class MapController {
     return expr as unknown as ExpressionSpecification
   }
 
+  /**
+   * Z-order within the tracks layer follows the panel's type order: the
+   * first listed type paints on top. Higher sort keys draw above lower ones.
+   */
+  private sortKeyExpression(): ExpressionSpecification | number {
+    const active = this.categories.filter((c) => !c.ignored)
+    if (active.length === 0) return 0
+    const expr: unknown[] = ['match', ['get', 'type']]
+    active.forEach((c, i) => {
+      expr.push(c.name, active.length - i)
+    })
+    expr.push(0)
+    return expr as unknown as ExpressionSpecification
+  }
+
   private applyTypeFilter(): void {
     if (!this.map.getLayer(TRACKS_LAYER)) return
     const visible = this.categories.filter((c) => c.visible && !c.ignored).map((c) => c.name)
@@ -224,11 +246,12 @@ export class MapController {
     this.map.setLayoutProperty(PLACES_LAYER, 'visibility', this.showWaypoints ? 'visible' : 'none')
   }
 
-  /** Visibility toggles re-filter existing layers — instant, no re-query. */
+  /** Visibility/order/color changes re-style existing layers — no re-query. */
   setCategories(categories: CategoryInfo[]): void {
     this.categories = categories
     if (!this.map.isStyleLoaded() || !this.map.getLayer(TRACKS_LAYER)) return
     this.map.setPaintProperty(TRACKS_LAYER, 'line-color', this.colorExpression())
+    this.map.setLayoutProperty(TRACKS_LAYER, 'line-sort-key', this.sortKeyExpression())
     this.applyTypeFilter()
   }
 
@@ -249,12 +272,24 @@ export class MapController {
     this.scheduleRefresh(0)
   }
 
+  setAverageRail(on: boolean): void {
+    if (on === this.averageRail) return
+    this.averageRail = on
+    this.scheduleRefresh(0)
+  }
+
   /** Pure repaint — year is already in feature properties, no re-query. */
   setColorMode(mode: TrackColorMode): void {
     if (mode === this.colorMode) return
     this.colorMode = mode
     if (!this.map.isStyleLoaded() || !this.map.getLayer(TRACKS_LAYER)) return
     this.map.setPaintProperty(TRACKS_LAYER, 'line-color', this.colorExpression())
+  }
+
+  /** Current map view (basemap + tracks + places) as a PNG data URL. */
+  exportPng(): string {
+    this.map.redraw()
+    return this.map.getCanvas().toDataURL('image/png')
   }
 
   async fitToData(): Promise<void> {
@@ -290,7 +325,8 @@ export class MapController {
       zoom,
       startTsMs: this.startTsMs,
       endTsMs: this.endTsMs,
-      detailMode: this.detailMode
+      detailMode: this.detailMode,
+      averageRail: this.averageRail
     })
     // A newer query superseded this one while we awaited.
     if (token !== this.queryToken || this.destroyed) return

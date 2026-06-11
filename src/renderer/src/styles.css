@@ -178,6 +178,22 @@ button:disabled {
   border-radius: 4px;
 }
 
+.order-buttons {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.order-btn {
+  padding: 0 3px;
+  font-size: 8px;
+  line-height: 1.5;
+  border-radius: 3px;
+}
+
+.order-hint {
+  margin: 0 0 6px;
+}
+
 .color-mode-row {
   display: flex;
   gap: 14px;

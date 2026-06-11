@@ -42,7 +42,8 @@ export function StatsPanel({ summary, lastImport, renderStats, config }: Props):
           {renderStats.pointCount.toLocaleString()} pts at detail{' '}
           {renderStats.detail === 'raw' ? 'raw (all points)' : renderStats.detail}
           {renderStats.downsampleStride > 1 ? `, thinned ×${renderStats.downsampleStride}` : ''}
-          {renderStats.truncated ? ' (truncated)' : ''} /{' '}
+          {renderStats.truncated ? ' (truncated)' : ''}
+          {renderStats.railAveraged > 0 ? `, ${renderStats.railAveraged} rides averaged` : ''} /{' '}
           {renderStats.waypointCount.toLocaleString()}
           {renderStats.waypointTotal > renderStats.waypointCount
             ? ` of ${renderStats.waypointTotal.toLocaleString()}`

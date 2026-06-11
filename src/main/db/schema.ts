@@ -11,7 +11,8 @@
  * - `points` and `display_geometries` are WITHOUT ROWID, clustered by
  *   (segment_id, ...) so a segment's data is contiguous on disk.
  */
-export const SCHEMA_VERSION = 3 // v2: idx_waypoints_bbox; v3: categories.custom
+// v2: idx_waypoints_bbox; v3: categories.custom; v4: categories.priority
+export const SCHEMA_VERSION = 4
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -101,7 +102,8 @@ CREATE TABLE IF NOT EXISTS categories (
   color   TEXT NOT NULL,
   visible INTEGER NOT NULL DEFAULT 1,
   ignored INTEGER NOT NULL DEFAULT 0,
-  custom  INTEGER NOT NULL DEFAULT 0 -- 1 = user-picked color, never auto-refreshed
+  custom  INTEGER NOT NULL DEFAULT 0, -- 1 = user-picked color, never auto-refreshed
+  priority INTEGER                    -- draw/list order, 0 = top; NULL = unordered
 );
 
 CREATE TABLE IF NOT EXISTS perf_log (

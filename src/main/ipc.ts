@@ -1,5 +1,6 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { Worker } from 'node:worker_threads'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
@@ -8,11 +9,13 @@ import {
   getCategories,
   setCategoryVisible,
   setCategoryColor,
+  setCategoryOrder,
   getSummary,
   getDataBounds,
   getRecentPerf,
   insertPerf
 } from './db/queries'
+import { averageRailTracks } from './db/railAverage'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
 import type { ImportProgress, ViewportQuery, ViewportResult } from '../shared/types'
@@ -78,10 +81,14 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle('query:viewport', (_event, q: ViewportQuery): ViewportResult => {
     const t0 = performance.now()
-    const { rows, truncated, detail, downsampleStride } = queryViewportSegments(
-      ctx.db, q, ctx.settings.queryLimits
-    )
+    const queried = queryViewportSegments(ctx.db, q, ctx.settings.queryLimits)
+    const { truncated, detail, downsampleStride } = queried
     const wp = queryViewportWaypoints(ctx.db, q, ctx.settings.queryLimits.waypoints)
+    // Cleaning (display-only): collapse repeat rail rides between two places.
+    const rail = q.averageRail
+      ? averageRailTracks(queried.rows, wp.waypoints)
+      : { rows: queried.rows, collapsed: 0 }
+    const rows = rail.rows
     const queryMs = performance.now() - t0
 
     const tEncode = performance.now()
@@ -110,7 +117,7 @@ export function registerIpc(ctx: IpcContext): void {
     insertPerf(
       ctx.db, 'query.viewport', queryMs,
       `segments=${rows.length} points=${pointCount} detail=${detail} stride=${downsampleStride}` +
-        ` places=${wp.waypoints.length}/${wp.totalCount}`
+        ` places=${wp.waypoints.length}/${wp.totalCount} railAvg=${rail.collapsed}`
     )
 
     return {
@@ -125,7 +132,8 @@ export function registerIpc(ctx: IpcContext): void {
         detail,
         downsampleStride,
         waypointCount: wp.waypoints.length,
-        waypointTotal: wp.totalCount
+        waypointTotal: wp.totalCount,
+        railAveraged: rail.collapsed
       }
     }
   })
@@ -136,6 +144,11 @@ export function registerIpc(ctx: IpcContext): void {
   })
   ipcMain.handle('categories:setColor', (_e, name: string, color: string | null) => {
     setCategoryColor(ctx.db, name, color)
+  })
+  ipcMain.handle('categories:setOrder', (_e, names: string[]) => {
+    if (Array.isArray(names) && names.every((n) => typeof n === 'string')) {
+      setCategoryOrder(ctx.db, names)
+    }
   })
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
@@ -157,5 +170,19 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('settings:setBasemapTheme', (_e, theme: 'dark' | 'light') => {
     ctx.settings.basemapTheme = theme === 'light' ? 'light' : 'dark'
     saveSettings(ctx.settingsPath, ctx.settings)
+  })
+  ipcMain.handle('export:png', async (event, dataUrl: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const prefix = 'data:image/png;base64,'
+    if (!win || !dataUrl.startsWith(prefix)) return { saved: false }
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')
+    const result = await dialog.showSaveDialog(win, {
+      title: 'Export map as PNG',
+      defaultPath: `arc-map-${stamp}.png`,
+      filters: [{ name: 'PNG image', extensions: ['png'] }]
+    })
+    if (result.canceled || !result.filePath) return { saved: false }
+    writeFileSync(result.filePath, Buffer.from(dataUrl.slice(prefix.length), 'base64'))
+    return { saved: true, path: result.filePath }
   })
 }

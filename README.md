@@ -106,9 +106,19 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   additionally **spatially thinned** — one dot per grid cell, most recent
   visit wins — so every visited area stays represented; the sidebar shows
   `N of M places` when thinning.
+- **Cleaning toggle — average repeat rail rides**: metro/tram/train rides
+  between the same two places (either direction) collapse into one best-fit
+  consensus track sampled at **~50 m resolution** — arc-length resampled,
+  averaged per parameter, then spline-smoothed with endpoints pinned. Rides
+  without a place at both ends are left as-is; display-only, raw points
+  untouched.
+- **Type draw order**: ▲▼ in the Types panel reorders priority — the top
+  type paints above the others (persisted, applies in both color modes).
 - Viewport-aware: only segments intersecting the (padded) visible bounds and
   active date range are queried and shipped to the GPU, as one compact
   binary buffer rather than a giant GeoJSON clone.
+- **Export map as PNG**: saves the current view — basemap, tracks, places —
+  exactly as rendered, via a save dialog.
 - Records performance stats (import duration, points indexed, query/encode/
   decode/render times) in a `perf_log` table and shows them live in the
   sidebar.

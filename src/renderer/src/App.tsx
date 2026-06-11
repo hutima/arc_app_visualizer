@@ -13,6 +13,7 @@ import { MapController, type RenderStats } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
 import { BasemapControl } from './components/BasemapControl'
 import { CategoryPanel } from './components/CategoryPanel'
+import { CleaningControl } from './components/CleaningControl'
 import { ColorModeControl } from './components/ColorModeControl'
 import { DateFilter } from './components/DateFilter'
 import { DetailControl } from './components/DetailControl'
@@ -28,6 +29,7 @@ export function App(): React.JSX.Element {
   const [showWaypoints, setShowWaypoints] = useState(true)
   const [detailMode, setDetailMode] = useState<DetailMode>('auto')
   const [colorMode, setColorMode] = useState<TrackColorMode>('type')
+  const [averageRail, setAverageRail] = useState(false)
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
@@ -108,6 +110,22 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setDateRange(startTsMs, endTsMs)
   }, [])
 
+  // Swap within the active types; the resulting order persists as priority.
+  const handleReorderCategory = useCallback((name: string, direction: -1 | 1): void => {
+    setCategories((prev) => {
+      const activeList = prev.filter((c) => !c.ignored && c.segmentCount > 0)
+      const rest = prev.filter((c) => c.ignored || c.segmentCount === 0)
+      const i = activeList.findIndex((c) => c.name === name)
+      const j = i + direction
+      if (i < 0 || j < 0 || j >= activeList.length) return prev
+      ;[activeList[i], activeList[j]] = [activeList[j]!, activeList[i]!]
+      const next = [...activeList, ...rest]
+      controllerRef.current?.setCategories(next)
+      void window.api.setCategoryOrder(activeList.map((c) => c.name))
+      return next
+    })
+  }, [])
+
   // Optimistic: the default color is derivable locally via colorForCategory.
   const handleColorChange = useCallback((name: string, color: string | null): void => {
     setCategories((prev) => {
@@ -137,6 +155,11 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setColorMode(mode)
   }, [])
 
+  const handleAverageRail = useCallback((on: boolean): void => {
+    setAverageRail(on)
+    controllerRef.current?.setAverageRail(on)
+  }, [])
+
   const handleBasemapTheme = useCallback((theme: 'dark' | 'light'): void => {
     setConfig((prev) => {
       if (!prev) return prev
@@ -158,9 +181,11 @@ export function App(): React.JSX.Element {
           onToggle={handleToggleCategory}
           onToggleWaypoints={handleToggleWaypoints}
           onColorChange={handleColorChange}
+          onReorder={handleReorderCategory}
         />
         <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />
+        <CleaningControl averageRail={averageRail} onChange={handleAverageRail} />
         {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
         <StatsPanel
           summary={summary}
@@ -173,6 +198,15 @@ export function App(): React.JSX.Element {
           onClick={() => void controllerRef.current?.fitToData()}
         >
           Fit map to data
+        </button>
+        <button
+          className="fit-button"
+          onClick={() => {
+            const dataUrl = controllerRef.current?.exportPng()
+            if (dataUrl) void window.api.exportMapPng(dataUrl)
+          }}
+        >
+          Export map as PNG
         </button>
       </aside>
       <main className="map-wrap">

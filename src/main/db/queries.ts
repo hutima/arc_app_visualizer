@@ -19,7 +19,12 @@ export interface ViewportSegmentRow {
 }
 
 export interface ViewportLimits {
-  /** Hard cap on segments per query — an extreme safety valve, rarely hit. */
+  /**
+   * Hard cap on segments per query (safety valve). When it bites, segments
+   * are kept biggest-geometry-first so the valve sheds point-dust, never
+   * whole regions or eras — a multi-year archive is ~100k+ small segments,
+   * and an arbitrary-prefix cut used to hide everything imported after it.
+   */
   segments: number
   /** Soft cap on total points; overflow downsamples lines, never drops them. */
   points: number
@@ -106,6 +111,7 @@ function displayRows(
     FROM segments s
     JOIN display_geometries d ON d.segment_id = s.id AND d.detail = ?
     WHERE ${VIEWPORT_WHERE}
+    ORDER BY d.point_count DESC, s.id ASC
     LIMIT ?
   `).all(detail, ...viewportParams(q), segmentLimit + 1) as unknown as ViewportSegmentRow[]
   const truncated = rows.length > segmentLimit
@@ -127,6 +133,7 @@ function rawRows(
     SELECT s.id, s.type, s.start_ts_ms
     FROM segments s
     WHERE ${VIEWPORT_WHERE}
+    ORDER BY s.clean_point_count DESC, s.id ASC
     LIMIT ?
   `).all(...viewportParams(q), segmentLimit + 1) as unknown as Array<{
     id: number
@@ -316,6 +323,11 @@ function moreRecentVisit(a: ViewportWaypoint, b: ViewportWaypoint): boolean {
   return a.id < b.id
 }
 
+/**
+ * Sidebar/list order doubles as draw priority: first = top of the panel =
+ * painted on top of other types. User-ordered rows (priority set) come
+ * first; never-ordered ones follow by prominence, ignored ones last.
+ */
 export function getCategories(db: DatabaseSync): CategoryInfo[] {
   const rows = db.prepare(`
     SELECT c.name, c.color, c.visible, c.ignored, c.custom,
@@ -326,7 +338,8 @@ export function getCategories(db: DatabaseSync): CategoryInfo[] {
       SELECT type, COUNT(*) AS segment_count, SUM(point_count) AS point_count
       FROM segments GROUP BY type
     ) s ON s.type = c.name
-    ORDER BY c.ignored ASC, segmentCount DESC, c.name ASC
+    ORDER BY c.ignored ASC, (c.priority IS NULL) ASC, c.priority ASC,
+             segmentCount DESC, c.name ASC
   `).all() as unknown as Array<{
     name: string
     color: string
@@ -349,6 +362,19 @@ export function getCategories(db: DatabaseSync): CategoryInfo[] {
 
 export function setCategoryVisible(db: DatabaseSync, name: string, visible: boolean): void {
   db.prepare('UPDATE categories SET visible = ? WHERE name = ?').run(visible ? 1 : 0, name)
+}
+
+/** Persist an explicit type order; index 0 = top of panel = drawn on top. */
+export function setCategoryOrder(db: DatabaseSync, names: string[]): void {
+  const stmt = db.prepare('UPDATE categories SET priority = ? WHERE name = ?')
+  db.exec('BEGIN')
+  try {
+    names.forEach((name, i) => stmt.run(i, name))
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
 }
 
 /**
