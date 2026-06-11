@@ -96,6 +96,37 @@ describe('averageRailTracks', () => {
     expect(rows.filter((r) => r.type === 'car')).toHaveLength(2)
   })
 
+  it('samples the consensus at ~50 m resolution along the route', () => {
+    // ~11.1 km between A and B → roughly one vertex per 50 m.
+    const rides = [row('metro', [0, 0, 0.1, 0]), row('metro', [0, 0, 0.1, 0])]
+    const long = averageRailTracks(rides, PLACES).rows[0]!
+    expect(long.point_count).toBeGreaterThan(150)
+    expect(long.point_count).toBeLessThan(300)
+
+    // ~110 m hop → only a handful of vertices, never fewer than 2.
+    const shortPlaces = [place(1, 0, 0), place(2, 0, 0.001)]
+    const hops = [row('tram', [0, 0, 0.001, 0]), row('tram', [0, 0, 0.001, 0])]
+    const short = averageRailTracks(hops, shortPlaces).rows[0]!
+    expect(short.point_count).toBeGreaterThanOrEqual(2)
+    expect(short.point_count).toBeLessThanOrEqual(5)
+  })
+
+  it('keeps endpoints pinned while smoothing the interior', () => {
+    // One noisy zigzag ride + one straight ride.
+    const zig = row('metro', [0, 0, 0.025, 0.004, 0.05, -0.004, 0.075, 0.004, 0.1, 0])
+    const straight = row('metro', [0, 0, 0.1, 0])
+    const avg = averageRailTracks([zig, straight], PLACES).rows[0]!
+    const c = coordsOf(avg)
+    expect(c[0]).toBeCloseTo(0, 6)
+    expect(c[1]).toBeCloseTo(0, 6)
+    expect(c[c.length - 2]!).toBeCloseTo(0.1, 6)
+    expect(c[c.length - 1]!).toBeCloseTo(0, 6)
+    // Interior stays within half the zigzag amplitude: averaged then smoothed.
+    for (let i = 1; i < c.length / 2 - 1; i++) {
+      expect(Math.abs(c[i * 2 + 1]!)).toBeLessThan(0.002)
+    }
+  })
+
   it('is deterministic regardless of input order', () => {
     const a = row('metro', [0, 0, 0.05, 0.01, 0.1, 0], 1000)
     const b = row('metro', [0, 0, 0.05, -0.01, 0.1, 0], 2000)

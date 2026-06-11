@@ -20,9 +20,10 @@ export function CleaningControl({ averageRail, onChange }: Props): React.JSX.Ele
         <span>Average repeat metro/tram rides</span>
       </label>
       <p className="hint">
-        Rides of the same type between the same two places merge into one
-        averaged track (either direction). Rides without a nearby place at
-        both ends are left as-is. Display only — raw data is untouched.
+        Rides of the same type between the same two places (either direction)
+        merge into one best-fit track at ~50 m resolution. Rides without a
+        nearby place at both ends are left as-is. Display only — raw data is
+        untouched.
       </p>
     </section>
   )

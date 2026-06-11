@@ -4,9 +4,11 @@
  * Metro/tram GPS is noisy (tunnels, scatter), and the same line between the
  * same two stations is ridden again and again — rendering as a smear of
  * jittered polylines. When enabled, rides of one type whose endpoints anchor
- * to the same two places merge into a single consensus track: every member
- * is arc-length resampled to a common vertex count, oriented the same way
- * (A→B and B→A rides combine), and averaged per vertex.
+ * to the same two places merge into a best-fit consensus track at ~50 m
+ * resolution: every member is arc-length resampled to common parameters,
+ * oriented the same way (A→B and B→A rides combine), averaged per parameter
+ * (the least-squares position estimate), then spline-smoothed with endpoints
+ * pinned to kill residual zigzag.
  *
  * "Where possible": a ride only joins a group when BOTH endpoints are within
  * ANCHOR_RADIUS_DEG of a place; unanchored rides, loops (same place at both
@@ -21,8 +23,14 @@ export const RAIL_AVERAGE_TYPES: ReadonlySet<string> = new Set(['metro', 'tram']
 /** Max distance from a track end to a place for the ride to anchor (~440 m). */
 const ANCHOR_RADIUS_DEG = 0.004
 
-/** Resampled vertex count is the group's median, kept within sane bounds. */
-const MAX_AVERAGED_POINTS = 200
+/** Consensus sample spacing: ~50 m (degree-space, like the simplifier). */
+const SAMPLE_RESOLUTION_DEG = 4.5e-4
+
+/** Vertex-count bounds for an averaged track (500 ≈ a 25 km ride at 50 m). */
+const MAX_AVERAGED_POINTS = 500
+
+/** Smoothing passes of the [1,2,1]/4 kernel over the averaged polyline. */
+const SMOOTHING_PASSES = 2
 
 export interface RailAverageResult {
   rows: ViewportSegmentRow[]
@@ -78,15 +86,21 @@ export function averageRailTracks(
 }
 
 function averageGroup(group: Ride[]): ViewportSegmentRow {
-  const counts = group.map((r) => r.row.point_count).sort((x, y) => x - y)
-  const k = Math.min(MAX_AVERAGED_POINTS, Math.max(2, counts[counts.length >> 1]!))
+  // ~50 m sample spacing along the median-length member.
+  const lengths = group.map((r) => arcLength(r.coords)).sort((x, y) => x - y)
+  const median = lengths[lengths.length >> 1]!
+  const k = Math.min(
+    MAX_AVERAGED_POINTS,
+    Math.max(2, Math.round(median / SAMPLE_RESOLUTION_DEG) + 1)
+  )
   const acc = new Float64Array(k * 2)
   for (const ride of group) {
     const pts = resample(ride.coords, k, ride.flipped)
     for (let i = 0; i < acc.length; i++) acc[i]! += pts[i]!
   }
-  const coords = new Float32Array(k * 2)
-  for (let i = 0; i < coords.length; i++) coords[i] = acc[i]! / group.length
+  for (let i = 0; i < acc.length; i++) acc[i]! /= group.length
+  smooth(acc, SMOOTHING_PASSES)
+  const coords = new Float32Array(acc)
   // Deterministic identity: lowest member id; year color follows the most
   // recent ride, matching most-recent-wins elsewhere.
   let id = Infinity
@@ -102,6 +116,36 @@ function averageGroup(group: Ride[]): ViewportSegmentRow {
     start_ts_ms: startTsMs,
     point_count: k,
     coords: new Uint8Array(coords.buffer)
+  }
+}
+
+function arcLength(coords: Float32Array): number {
+  let len = 0
+  for (let i = 2; i < coords.length; i += 2) {
+    len += Math.hypot(coords[i]! - coords[i - 2]!, coords[i + 1]! - coords[i - 1]!)
+  }
+  return len
+}
+
+/**
+ * Spline-like smoothing: binomial [1,2,1]/4 kernel over interior vertices,
+ * endpoints pinned to their places. At ~50 m spacing a couple of passes
+ * approximates a light smoothing-spline fit without overshooting curves.
+ */
+function smooth(pts: Float64Array, passes: number): void {
+  const n = pts.length / 2
+  if (n < 3) return
+  for (let pass = 0; pass < passes; pass++) {
+    let prevX = pts[0]!
+    let prevY = pts[1]!
+    for (let i = 1; i < n - 1; i++) {
+      const curX = pts[i * 2]!
+      const curY = pts[i * 2 + 1]!
+      pts[i * 2] = (prevX + 2 * curX + pts[(i + 1) * 2]!) / 4
+      pts[i * 2 + 1] = (prevY + 2 * curY + pts[(i + 1) * 2 + 1]!) / 4
+      prevX = curX // neighbors read pre-pass values, not freshly smoothed ones
+      prevY = curY
+    }
   }
 }
 
