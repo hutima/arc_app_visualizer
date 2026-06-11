@@ -1,5 +1,6 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { Worker } from 'node:worker_threads'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
@@ -163,5 +164,19 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('settings:setBasemapTheme', (_e, theme: 'dark' | 'light') => {
     ctx.settings.basemapTheme = theme === 'light' ? 'light' : 'dark'
     saveSettings(ctx.settingsPath, ctx.settings)
+  })
+  ipcMain.handle('export:png', async (event, dataUrl: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const prefix = 'data:image/png;base64,'
+    if (!win || !dataUrl.startsWith(prefix)) return { saved: false }
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')
+    const result = await dialog.showSaveDialog(win, {
+      title: 'Export map as PNG',
+      defaultPath: `arc-map-${stamp}.png`,
+      filters: [{ name: 'PNG image', extensions: ['png'] }]
+    })
+    if (result.canceled || !result.filePath) return { saved: false }
+    writeFileSync(result.filePath, Buffer.from(dataUrl.slice(prefix.length), 'base64'))
+    return { saved: true, path: result.filePath }
   })
 }

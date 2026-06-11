@@ -182,6 +182,15 @@ export function App(): React.JSX.Element {
         >
           Fit map to data
         </button>
+        <button
+          className="fit-button"
+          onClick={() => {
+            const dataUrl = controllerRef.current?.exportPng()
+            if (dataUrl) void window.api.exportMapPng(dataUrl)
+          }}
+        >
+          Export map as PNG
+        </button>
       </aside>
       <main className="map-wrap">
         <div ref={mapDivRef} className="map" />

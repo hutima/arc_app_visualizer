@@ -115,6 +115,8 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
 - Viewport-aware: only segments intersecting the (padded) visible bounds and
   active date range are queried and shipped to the GPU, as one compact
   binary buffer rather than a giant GeoJSON clone.
+- **Export map as PNG**: saves the current view — basemap, tracks, places —
+  exactly as rendered, via a save dialog.
 - Records performance stats (import duration, points indexed, query/encode/
   decode/render times) in a `perf_log` table and shows them live in the
   sidebar.

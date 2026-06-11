@@ -96,7 +96,9 @@ export class MapController {
       style,
       center: [0, 20],
       zoom: 1.5,
-      attributionControl: { compact: true }
+      attributionControl: { compact: true },
+      // Keeps the WebGL buffer readable after a frame, for PNG export.
+      canvasContextAttributes: { preserveDrawingBuffer: true }
     })
     this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right')
 
@@ -262,6 +264,12 @@ export class MapController {
     this.colorMode = mode
     if (!this.map.isStyleLoaded() || !this.map.getLayer(TRACKS_LAYER)) return
     this.map.setPaintProperty(TRACKS_LAYER, 'line-color', this.colorExpression())
+  }
+
+  /** Current map view (basemap + tracks + places) as a PNG data URL. */
+  exportPng(): string {
+    this.map.redraw()
+    return this.map.getCanvas().toDataURL('image/png')
   }
 
   async fitToData(): Promise<void> {

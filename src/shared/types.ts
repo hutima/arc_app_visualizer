@@ -152,5 +152,7 @@ export interface ArcApi {
   getConfig(): Promise<AppConfig>
   /** Persists the basemap theme choice to settings.json. */
   setBasemapTheme(theme: 'dark' | 'light'): Promise<void>
+  /** Saves a rendered map frame; the user picks the destination. */
+  exportMapPng(dataUrl: string): Promise<{ saved: boolean; path?: string }>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
 }
