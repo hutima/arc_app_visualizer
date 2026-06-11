@@ -144,6 +144,26 @@ describe('snapRideToRail', () => {
   it('returns null on an empty network', () => {
     expect(snapRideToRail(new Float32Array([0, 0, 0.1, 0]), buildRailGraph([], []))).toBeNull()
   })
+
+  it('snaps only the covered portion; an off-coverage tail keeps raw GPS', () => {
+    // Rail is fetched per-viewport, so a ride can run off the fetched area.
+    const ride = new Float32Array([
+      0, 0.0003, 0.02, -0.0004, 0.04, 0.0003, // inside coverage (lon ≤ 0.05)
+      0.06, 0.0005, 0.08, -0.0005, 0.1, 0.0004 // outside → must stay raw
+    ])
+    const isCovered = (lon: number): boolean => lon <= 0.05
+    const c = coordsOf(snapRideToRail(ride, graph, isCovered)!)
+    // Covered prefix rides the rail: routed nodes 1..5, all exactly on lat 0.
+    expect(c.length / 2).toBe(5 + 3)
+    for (let i = 1; i < 10; i += 2) expect(c[i]).toBe(0)
+    // The tail is byte-identical raw GPS — never truncated or force-matched.
+    expect(c.slice(10)).toEqual([...ride.slice(6)])
+  })
+
+  it('returns null when the whole ride is outside coverage', () => {
+    const ride = new Float32Array([0, 0.0003, 0.05, -0.0003, 0.1, 0.0004])
+    expect(snapRideToRail(ride, graph, () => false)).toBeNull()
+  })
 })
 
 describe('snapRailTracks', () => {

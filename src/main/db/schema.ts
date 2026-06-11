@@ -12,8 +12,9 @@
  *   (segment_id, ...) so a segment's data is contiguous on disk.
  */
 // v2: idx_waypoints_bbox; v3: categories.custom; v4: categories.priority;
-// v5: 'unknown' ignored by default; v6: OSM rail network tables
-export const SCHEMA_VERSION = 6
+// v5: 'unknown' ignored by default; v6: OSM rail network tables;
+// v7: rail regions accumulate (canonical a<b edges, unique (a,b))
+export const SCHEMA_VERSION = 7
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -115,7 +116,8 @@ CREATE TABLE IF NOT EXISTS perf_log (
   detail      TEXT
 );
 
--- OSM rail network for offline snapping (fetched once per region on request).
+-- OSM rail network for offline snapping. Regions are fetched one viewport at
+-- a time and accumulate; edges store a < b so overlapping fetches dedupe.
 -- ids are OSM node ids; geometry is plain lat/lon (no R*Tree dependency).
 CREATE TABLE IF NOT EXISTS rail_nodes (
   id  INTEGER PRIMARY KEY,
@@ -131,8 +133,10 @@ CREATE TABLE IF NOT EXISTS rail_edges (
 );
 CREATE INDEX IF NOT EXISTS idx_rail_edges_bbox
   ON rail_edges(min_lat, max_lat, min_lon, max_lon);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rail_edges_ab ON rail_edges(a, b);
 
--- Bounding boxes already fetched, so the UI can show coverage and skip refetch.
+-- Bounding boxes already fetched: shows coverage, and gates snapping so rides
+-- keep raw GPS wherever they leave fetched areas.
 CREATE TABLE IF NOT EXISTS rail_coverage (
   id          INTEGER PRIMARY KEY,
   min_lat REAL, min_lon REAL, max_lat REAL, max_lon REAL,

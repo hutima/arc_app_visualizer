@@ -306,6 +306,17 @@ export class MapController {
     this.map.setPaintProperty(TRACKS_LAYER, 'line-color', this.colorExpression())
   }
 
+  /** The lat/lon box currently on screen (e.g. to fetch OSM rail for it). */
+  getViewBounds(): { minLat: number; minLon: number; maxLat: number; maxLon: number } {
+    const b = this.map.getBounds()
+    return {
+      minLat: b.getSouth(),
+      minLon: b.getWest(),
+      maxLat: b.getNorth(),
+      maxLon: b.getEast()
+    }
+  }
+
   /** Current map view (basemap + tracks + places) as a PNG data URL. */
   exportPng(): string {
     this.map.redraw()

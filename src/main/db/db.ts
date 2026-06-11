@@ -41,6 +41,14 @@ function migrate(db: DatabaseSync): void {
   if (row.user_version >= SCHEMA_VERSION) return
   db.exec('BEGIN')
   try {
+    // v7: rail edges become canonical (a < b) and unique so overlapping
+    // region fetches dedupe; v6 rows must comply before SCHEMA_SQL can
+    // create the unique index. (SET a = b, b = a reads the old row, so it
+    // swaps.)
+    if (row.user_version === 6) {
+      db.exec('UPDATE rail_edges SET a = b, b = a WHERE a > b')
+      db.exec('DELETE FROM rail_edges WHERE id NOT IN (SELECT MIN(id) FROM rail_edges GROUP BY a, b)')
+    }
     db.exec(SCHEMA_SQL)
     // v3/v4: CREATE IF NOT EXISTS cannot add columns to pre-existing tables.
     ensureColumn(db, 'categories', 'custom', 'custom INTEGER NOT NULL DEFAULT 0')

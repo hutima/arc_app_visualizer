@@ -195,15 +195,19 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setSnapRail(on)
   }, [])
 
+  // Fetches the area currently on screen; regions accumulate per fetch.
   const handleFetchRail = useCallback((): void => {
+    const view = controllerRef.current?.getViewBounds()
+    if (!view) return
     setRailFetching(true)
     setRailError(null)
-    void window.api.fetchRailNetwork().then((res) => {
+    void window.api.fetchRailNetwork(view).then((res) => {
       setRailFetching(false)
       if (res.ok && res.coverage) {
         setRailCoverage(res.coverage)
         setSnapRail(true)
-        controllerRef.current?.setSnapRail(true) // show the result immediately
+        controllerRef.current?.setSnapRail(true)
+        controllerRef.current?.scheduleRefresh(0) // new area snaps immediately
       } else {
         setRailError(res.error ?? 'rail fetch failed')
       }

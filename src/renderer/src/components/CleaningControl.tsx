@@ -43,21 +43,25 @@ export function CleaningControl({
       </label>
       <p className="hint">
         Matches metro/tram/train rides onto real OpenStreetMap rail geometry and
-        routes through tunnels — fixing the spots where GPS is worst. Needs a
-        one-time network fetch; everything after is offline.
+        routes through tunnels — fixing the spots where GPS is worst. Fetch
+        loads the area on screen; pan to each city and fetch it — areas add up,
+        and everything after the fetch is offline. Rides keep their raw GPS
+        wherever they leave fetched areas.
       </p>
       <button type="button" onClick={onFetchRail} disabled={railFetching}>
         {railFetching
-          ? 'Fetching rail network…'
+          ? 'Fetching rail in view…'
           : hasNetwork
-            ? 'Re-fetch rail network'
-            : 'Fetch rail network for my data'}
+            ? 'Add rail in current view'
+            : 'Fetch rail in current view'}
       </button>
       {railCoverage && (
         <p className="hint">
-          OSM rail: {railCoverage.edgeCount.toLocaleString()} segments,{' '}
-          {railCoverage.nodeCount.toLocaleString()} nodes (fetched{' '}
-          {fmtDate(railCoverage.fetchedAtMs)}).
+          OSM rail: {railCoverage.regions.length}{' '}
+          {railCoverage.regions.length === 1 ? 'area' : 'areas'} —{' '}
+          {railCoverage.edgeCount.toLocaleString()} segments,{' '}
+          {railCoverage.nodeCount.toLocaleString()} nodes (updated{' '}
+          {fmtDate(railCoverage.lastFetchedAtMs)}).
         </p>
       )}
       {railError && <p className="hint status-line error">{railError}</p>}

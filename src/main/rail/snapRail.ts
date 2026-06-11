@@ -115,18 +115,77 @@ function nearestNode(g: RailGraph, x: number, y: number): number | null {
 }
 
 /**
- * Snap one ride (interleaved lon,lat display coords) to the rail network.
- * Returns the snapped polyline, or null when the ride can't be matched.
+ * Is this lon/lat inside a fetched coverage region? Rail is fetched one
+ * viewport at a time, so a ride can run off the edge of everything fetched —
+ * vertices outside coverage must keep their raw GPS, never be force-matched
+ * (or worse, dropped).
  */
-export function snapRideToRail(coords: Float32Array, g: RailGraph): Float32Array | null {
+export type CoverageTest = (lon: number, lat: number) => boolean
+
+const FULL_COVERAGE: CoverageTest = () => true
+
+/**
+ * Snap one ride (interleaved lon,lat display coords) to the rail network.
+ * Each in-coverage run of vertices is matched independently; off-coverage
+ * runs (and runs that won't match confidently) pass through raw, so a ride
+ * leaving the fetched area keeps its real tail. Returns the stitched
+ * polyline, or null when nothing snapped (caller keeps the original row).
+ */
+export function snapRideToRail(
+  coords: Float32Array,
+  g: RailGraph,
+  isCovered: CoverageTest = FULL_COVERAGE
+): Float32Array | null {
   if (g.empty) return null
   const n = coords.length / 2
   if (n < 2) return null
 
+  const out: number[] = []
+  const pushLonLat = (lon: number, lat: number): void => {
+    const m = out.length
+    if (m >= 2 && out[m - 2] === lon && out[m - 1] === lat) return
+    out.push(lon, lat)
+  }
+  const pushRaw = (i: number): void => pushLonLat(coords[i * 2]!, coords[i * 2 + 1]!)
+
+  let snappedRuns = 0
+  let i = 0
+  while (i < n) {
+    if (!isCovered(coords[i * 2]!, coords[i * 2 + 1]!)) {
+      pushRaw(i)
+      i++
+      continue
+    }
+    // Maximal in-coverage run [i, end).
+    let end = i + 1
+    while (end < n && isCovered(coords[end * 2]!, coords[end * 2 + 1]!)) end++
+    const path = matchRun(coords, i, end, g)
+    if (path) {
+      snappedRuns++
+      for (const id of path) {
+        const p = g.pos.get(id)!
+        pushLonLat(p.lon, p.lat)
+      }
+    } else {
+      for (let j = i; j < end; j++) pushRaw(j)
+    }
+    i = end
+  }
+
+  if (snappedRuns === 0 || out.length < 4) return null
+  return new Float32Array(out)
+}
+
+/**
+ * Greedy-match vertices [start, end) to a rail node path, or null when the
+ * run can't be matched confidently (too far from rail, or a hop that won't
+ * route sanely).
+ */
+function matchRun(coords: Float32Array, start: number, end: number, g: RailGraph): number[] | null {
   // Anchor sequence: nearest node per vertex, consecutive duplicates dropped.
   const anchors: number[] = []
   let matched = 0
-  for (let i = 0; i < n; i++) {
+  for (let i = start; i < end; i++) {
     const x = coords[i * 2]! * g.refCos
     const y = coords[i * 2 + 1]!
     const node = nearestNode(g, x, y)
@@ -134,7 +193,7 @@ export function snapRideToRail(coords: Float32Array, g: RailGraph): Float32Array
     matched++
     if (anchors.length === 0 || anchors[anchors.length - 1] !== node) anchors.push(node)
   }
-  if (anchors.length < 2 || matched < n * MIN_MATCH_FRACTION) return null
+  if (anchors.length < 2 || matched < (end - start) * MIN_MATCH_FRACTION) return null
 
   // Route along the rail between consecutive anchors, bridging tunnels.
   const path: number[] = [anchors[0]!]
@@ -149,17 +208,7 @@ export function snapRideToRail(coords: Float32Array, g: RailGraph): Float32Array
     if (!seg) return null // a hop that won't route sanely → don't trust the match
     for (let j = 1; j < seg.length; j++) path.push(seg[j]!)
   }
-
-  // Materialize coordinates, dropping consecutive duplicates.
-  const out: number[] = []
-  for (const id of path) {
-    const p = g.pos.get(id)!
-    const m = out.length
-    if (m >= 2 && out[m - 2] === p.lon && out[m - 1] === p.lat) continue
-    out.push(p.lon, p.lat)
-  }
-  if (out.length < 4) return null
-  return new Float32Array(out)
+  return path
 }
 
 /** Shortest node path from src to dst within a distance cutoff, or null. */
@@ -198,7 +247,11 @@ export interface RailSnapResult {
   snapped: number
 }
 
-export function snapRailTracks(rows: ViewportSegmentRow[], g: RailGraph): RailSnapResult {
+export function snapRailTracks(
+  rows: ViewportSegmentRow[],
+  g: RailGraph,
+  isCovered: CoverageTest = FULL_COVERAGE
+): RailSnapResult {
   if (g.empty) return { rows, snapped: 0 }
   const out: ViewportSegmentRow[] = []
   let snapped = 0
@@ -207,7 +260,7 @@ export function snapRailTracks(rows: ViewportSegmentRow[], g: RailGraph): RailSn
       out.push(row)
       continue
     }
-    const snappedCoords = snapRideToRail(floatView(row), g)
+    const snappedCoords = snapRideToRail(floatView(row), g, isCovered)
     if (!snappedCoords) {
       out.push(row)
       continue

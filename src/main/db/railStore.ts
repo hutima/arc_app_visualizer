@@ -1,75 +1,82 @@
 /**
- * Local storage for the OSM rail network: persist a fetched extent, load the
- * edges intersecting a viewport, and report coverage. Keeps the Overpass
- * fetch (rail/overpass) and the matcher (rail/snapRail) decoupled from SQLite.
+ * Local storage for the OSM rail network. Regions are fetched one viewport at
+ * a time and accumulate, so cities can be loaded individually; coverage bboxes
+ * double as the snap gate (rides keep raw GPS outside fetched areas). Keeps
+ * the Overpass fetch (rail/overpass) and the matcher (rail/snapRail) decoupled
+ * from SQLite.
  */
 import type { DatabaseSync } from 'node:sqlite'
 import type { ParsedRail, BBox } from '../rail/overpass'
 import type { RailNodeInput, RailEdgeInput } from '../rail/snapRail'
+import type { RailCoverage } from '../../shared/types'
 
-export interface RailCoverage {
-  bbox: BBox
-  fetchedAtMs: number
-  nodeCount: number
-  edgeCount: number
-}
-
-/** Replace any stored rail network with a freshly fetched one (single region). */
-export function storeRailNetwork(db: DatabaseSync, rail: ParsedRail, bbox: BBox): RailCoverage {
+/**
+ * Add a fetched region to the stored network. Nodes and edges from
+ * overlapping fetches dedupe (OSM ids; canonical a < b edges); coverage
+ * regions made redundant by the new bbox are absorbed into it.
+ */
+export function addRailNetwork(db: DatabaseSync, rail: ParsedRail, bbox: BBox): RailCoverage {
   const coords = new Map(rail.nodes.map((n) => [n.id, n]))
   db.exec('BEGIN')
   try {
-    db.exec('DELETE FROM rail_edges')
-    db.exec('DELETE FROM rail_nodes')
-    db.exec('DELETE FROM rail_coverage')
-
     const insNode = db.prepare('INSERT OR REPLACE INTO rail_nodes (id, lat, lon) VALUES (?, ?, ?)')
     for (const n of rail.nodes) insNode.run(n.id, n.lat, n.lon)
 
     const insEdge = db.prepare(
-      `INSERT INTO rail_edges (a, b, min_lat, max_lat, min_lon, max_lon)
+      `INSERT OR IGNORE INTO rail_edges (a, b, min_lat, max_lat, min_lon, max_lon)
        VALUES (?, ?, ?, ?, ?, ?)`
     )
     for (const e of rail.edges) {
       const a = coords.get(e.a)
       const b = coords.get(e.b)
-      if (!a || !b) continue
+      if (!a || !b || e.a === e.b) continue
       insEdge.run(
-        e.a, e.b,
+        Math.min(e.a, e.b), Math.max(e.a, e.b),
         Math.min(a.lat, b.lat), Math.max(a.lat, b.lat),
         Math.min(a.lon, b.lon), Math.max(a.lon, b.lon)
       )
     }
-    const fetchedAtMs = Date.now()
+
+    // A re-fetch of the same (or a larger) view replaces the rows it covers.
+    db.prepare(
+      `DELETE FROM rail_coverage
+       WHERE min_lat >= ? AND max_lat <= ? AND min_lon >= ? AND max_lon <= ?`
+    ).run(bbox.minLat, bbox.maxLat, bbox.minLon, bbox.maxLon)
     db.prepare(
       `INSERT INTO rail_coverage (min_lat, min_lon, max_lat, max_lon, fetched_at_ms, node_count, edge_count)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(
       bbox.minLat, bbox.minLon, bbox.maxLat, bbox.maxLon,
-      fetchedAtMs, rail.nodes.length, rail.edges.length
+      Date.now(), rail.nodes.length, rail.edges.length
     )
     db.exec('COMMIT')
-    return { bbox, fetchedAtMs, nodeCount: rail.nodes.length, edgeCount: rail.edges.length }
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
   }
+  return getRailCoverage(db)!
 }
 
+/** All fetched regions plus live totals; null when nothing is fetched yet. */
 export function getRailCoverage(db: DatabaseSync): RailCoverage | null {
-  const row = db.prepare(
+  const rows = db.prepare(
     `SELECT min_lat AS minLat, min_lon AS minLon, max_lat AS maxLat, max_lon AS maxLon,
-            fetched_at_ms AS fetchedAtMs, node_count AS nodeCount, edge_count AS edgeCount
-     FROM rail_coverage ORDER BY id DESC LIMIT 1`
-  ).get() as
-    | { minLat: number; minLon: number; maxLat: number; maxLon: number; fetchedAtMs: number; nodeCount: number; edgeCount: number }
-    | undefined
-  if (!row) return null
+            fetched_at_ms AS fetchedAtMs
+     FROM rail_coverage ORDER BY fetched_at_ms ASC, id ASC`
+  ).all() as Array<{ minLat: number; minLon: number; maxLat: number; maxLon: number; fetchedAtMs: number }>
+  if (rows.length === 0) return null
+
+  // Counts come from the tables, not per-region sums: overlaps would double-count.
+  const { n } = db.prepare('SELECT COUNT(*) AS n FROM rail_nodes').get() as { n: number }
+  const { e } = db.prepare('SELECT COUNT(*) AS e FROM rail_edges').get() as { e: number }
   return {
-    bbox: { minLat: row.minLat, minLon: row.minLon, maxLat: row.maxLat, maxLon: row.maxLon },
-    fetchedAtMs: row.fetchedAtMs,
-    nodeCount: row.nodeCount,
-    edgeCount: row.edgeCount
+    regions: rows.map((r) => ({
+      bbox: { minLat: r.minLat, minLon: r.minLon, maxLat: r.maxLat, maxLon: r.maxLon },
+      fetchedAtMs: r.fetchedAtMs
+    })),
+    nodeCount: n,
+    edgeCount: e,
+    lastFetchedAtMs: rows[rows.length - 1]!.fetchedAtMs
   }
 }
 
