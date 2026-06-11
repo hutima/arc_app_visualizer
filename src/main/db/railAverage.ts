@@ -6,9 +6,16 @@
  * jittered polylines. When enabled, rides of one type whose endpoints anchor
  * to the same two places merge into a best-fit consensus track at ~50 m
  * resolution: every member is arc-length resampled to common parameters,
- * oriented the same way (A→B and B→A rides combine), averaged per parameter
- * (the least-squares position estimate), then spline-smoothed with endpoints
- * pinned to kill residual zigzag.
+ * oriented the same way (A→B and B→A rides combine), reduced per parameter to
+ * a robust consensus (component-wise median, not mean), then spline-smoothed
+ * with endpoints pinned to kill residual zigzag.
+ *
+ * Why median + outlier rejection: tunnel GPS occasionally throws a ride wildly
+ * off-route, and a mean would bend the consensus toward it — drawing a "spur"
+ * through empty space where no ride actually went. The median ignores such
+ * excursions, and rides that still disagree with the consensus beyond a robust
+ * threshold are dropped from it and rendered as their own lines instead of
+ * being blended into a phantom path.
  *
  * "Where possible": a ride only joins a group when BOTH endpoints are within
  * ANCHOR_RADIUS_DEG of a place; unanchored rides, loops (same place at both
@@ -31,6 +38,15 @@ const MAX_AVERAGED_POINTS = 500
 
 /** Smoothing passes of the [1,2,1]/4 kernel over the averaged polyline. */
 const SMOOTHING_PASSES = 2
+
+/**
+ * A member is an outlier (different route / tunnel excursion, not noise) when
+ * its peak distance from the consensus exceeds OUTLIER_FACTOR × the median
+ * member distance, and also clears an absolute floor (so a tight cluster never
+ * rejects a member just for being marginally looser). Robust, scale-free.
+ */
+const OUTLIER_FACTOR = 3
+const OUTLIER_ABS_FLOOR_DEG = 1e-3 // ~110 m
 
 export interface RailAverageResult {
   rows: ViewportSegmentRow[]
@@ -79,45 +95,109 @@ export function averageRailTracks(
       out.push(group[0]!.row)
       continue
     }
-    out.push(averageGroup(group))
-    collapsed += group.length
+    const { averaged, passthrough } = averageGroup(group)
+    if (averaged) {
+      out.push(averaged)
+      collapsed += group.length - passthrough.length
+    }
+    for (const row of passthrough) out.push(row)
   }
   return { rows: out, collapsed }
 }
 
-function averageGroup(group: Ride[]): ViewportSegmentRow {
+interface GroupResult {
+  /** The consensus line, or null when the group never reached agreement. */
+  averaged: ViewportSegmentRow | null
+  /** Member rows shown as-is (outliers, or all members when no consensus). */
+  passthrough: ViewportSegmentRow[]
+}
+
+function averageGroup(group: Ride[]): GroupResult {
   // ~50 m sample spacing along the median-length member.
   const lengths = group.map((r) => arcLength(r.coords)).sort((x, y) => x - y)
-  const median = lengths[lengths.length >> 1]!
+  const medianLen = lengths[lengths.length >> 1]!
   const k = Math.min(
     MAX_AVERAGED_POINTS,
-    Math.max(2, Math.round(median / SAMPLE_RESOLUTION_DEG) + 1)
+    Math.max(2, Math.round(medianLen / SAMPLE_RESOLUTION_DEG) + 1)
   )
-  const acc = new Float64Array(k * 2)
-  for (const ride of group) {
-    const pts = resample(ride.coords, k, ride.flipped)
-    for (let i = 0; i < acc.length; i++) acc[i]! += pts[i]!
-  }
-  for (let i = 0; i < acc.length; i++) acc[i]! /= group.length
-  smooth(acc, SMOOTHING_PASSES)
-  const coords = new Float32Array(acc)
-  // Deterministic identity: lowest member id; year color follows the most
-  // recent ride, matching most-recent-wins elsewhere.
+  const resampled = group.map((r) => resample(r.coords, k, r.flipped))
+
+  // Robust consensus, then reject members that disagree with it too much.
+  const consensus0 = medianConsensus(resampled, k)
+  const deviations = resampled.map((pts) => maxDeviation(pts, consensus0, k))
+  const threshold = Math.max(OUTLIER_ABS_FLOOR_DEG, OUTLIER_FACTOR * medianOf(deviations))
+  const inliers: Ride[] = []
+  const inlierPts: Float64Array[] = []
+  const passthrough: ViewportSegmentRow[] = []
+  group.forEach((ride, i) => {
+    if (deviations[i]! <= threshold) {
+      inliers.push(ride)
+      inlierPts.push(resampled[i]!)
+    } else {
+      passthrough.push(ride.row)
+    }
+  })
+  // Too few agree to trust a consensus — show every ride raw instead.
+  if (inliers.length < 2) return { averaged: null, passthrough: group.map((r) => r.row) }
+
+  const consensus = medianConsensus(inlierPts, k)
+  smooth(consensus, SMOOTHING_PASSES)
+  const coords = new Float32Array(consensus)
+  // Deterministic identity: lowest inlier id; year color follows the most
+  // recent inlier ride, matching most-recent-wins elsewhere.
   let id = Infinity
   let startTsMs: number | null = null
-  for (const ride of group) {
+  for (const ride of inliers) {
     id = Math.min(id, ride.row.id)
     const ts = ride.row.start_ts_ms
     if (ts != null && (startTsMs == null || ts > startTsMs)) startTsMs = ts
   }
   return {
-    id,
-    type: group[0]!.row.type,
-    start_ts_ms: startTsMs,
-    point_count: k,
-    coords: new Uint8Array(coords.buffer)
+    averaged: {
+      id,
+      type: group[0]!.row.type,
+      start_ts_ms: startTsMs,
+      point_count: k,
+      coords: new Uint8Array(coords.buffer)
+    },
+    passthrough
   }
 }
+
+/** Component-wise median of resampled members at each of the k parameters. */
+function medianConsensus(members: Float64Array[], k: number): Float64Array {
+  const out = new Float64Array(k * 2)
+  const xs = new Float64Array(members.length)
+  const ys = new Float64Array(members.length)
+  for (let j = 0; j < k; j++) {
+    for (let r = 0; r < members.length; r++) {
+      xs[r] = members[r]![j * 2]!
+      ys[r] = members[r]![j * 2 + 1]!
+    }
+    out[j * 2] = medianSorted(Float64Array.from(xs).sort())
+    out[j * 2 + 1] = medianSorted(Float64Array.from(ys).sort())
+  }
+  return out
+}
+
+/** Peak point-to-point distance between a resampled member and the consensus. */
+function maxDeviation(pts: Float64Array, consensus: Float64Array, k: number): number {
+  let max = 0
+  for (let j = 0; j < k; j++) {
+    const d = Math.hypot(pts[j * 2]! - consensus[j * 2]!, pts[j * 2 + 1]! - consensus[j * 2 + 1]!)
+    if (d > max) max = d
+  }
+  return max
+}
+
+const medianSorted = (sorted: Float64Array): number => {
+  const n = sorted.length
+  const mid = n >> 1
+  return n % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2
+}
+
+const medianOf = (vals: number[]): number =>
+  medianSorted(Float64Array.from(vals).sort())
 
 function arcLength(coords: Float32Array): number {
   let len = 0

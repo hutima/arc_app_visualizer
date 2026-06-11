@@ -42,8 +42,12 @@ export const KNOWN_CATEGORY_COLORS: Record<string, string> = {
   bogus: '#6b7280'
 }
 
-/** Arc's own junk label; imported for transparency but hidden from queries. */
-export const IGNORED_BY_DEFAULT = new Set(['bogus'])
+/**
+ * Imported for transparency but hidden from queries by default: Arc's own
+ * `bogus` junk label, plus `unknown` (untyped tracks) — neither represents a
+ * real activity worth drawing. Both remain toggleable in the ignored list.
+ */
+export const IGNORED_BY_DEFAULT = new Set(['bogus', 'unknown'])
 
 /** Neutral near-white — brighter than the light-grey car/taxi tracks. */
 export const WAYPOINT_COLOR = '#f8fafc'

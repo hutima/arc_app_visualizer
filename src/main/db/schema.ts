@@ -11,8 +11,9 @@
  * - `points` and `display_geometries` are WITHOUT ROWID, clustered by
  *   (segment_id, ...) so a segment's data is contiguous on disk.
  */
-// v2: idx_waypoints_bbox; v3: categories.custom; v4: categories.priority
-export const SCHEMA_VERSION = 4
+// v2: idx_waypoints_bbox; v3: categories.custom; v4: categories.priority;
+// v5: 'unknown' ignored by default
+export const SCHEMA_VERSION = 5
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (

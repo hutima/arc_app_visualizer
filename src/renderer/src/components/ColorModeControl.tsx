@@ -14,6 +14,8 @@ interface Props {
  */
 export function ColorModeControl({ mode, summary, onChange }: Props): React.JSX.Element {
   const years = mode === 'year' ? yearRange(summary?.startTsMs ?? null, summary?.endTsMs ?? null) : []
+  const minYear = years[0]
+  const maxYear = years[years.length - 1]
   return (
     <section className="panel">
       <h2>Color tracks by</h2>
@@ -34,7 +36,10 @@ export function ColorModeControl({ mode, summary, onChange }: Props): React.JSX.
         <ul className="year-legend">
           {years.map((y) => (
             <li key={y}>
-              <span className="swatch" style={{ backgroundColor: colorForYear(y) }} />
+              <span
+                className="swatch"
+                style={{ backgroundColor: colorForYear(y, minYear, maxYear) }}
+              />
               <span className="category-name">{y}</span>
             </li>
           ))}
