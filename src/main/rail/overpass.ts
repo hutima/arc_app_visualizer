@@ -25,6 +25,10 @@ const RAILWAY_TYPES = ['subway', 'tram', 'light_rail', 'rail', 'narrow_gauge', '
 
 const DEFAULT_ENDPOINT = 'https://overpass-api.de/api/interpreter'
 
+// OSM operations policy requires an identifying User-Agent; Node's fetch
+// sends none by default and overpass-api.de rejects that with HTTP 406.
+const USER_AGENT = 'arc-visualizer/0.1.0 (+https://github.com/hutima/arc_app_visualizer)'
+
 export function buildOverpassQuery(bbox: BBox): string {
   const b = `${bbox.minLat},${bbox.minLon},${bbox.maxLat},${bbox.maxLon}`
   const filter = RAILWAY_TYPES.join('|')
@@ -97,9 +101,16 @@ export async function fetchRailNetwork(
   const body = 'data=' + encodeURIComponent(buildOverpassQuery(bbox))
   const res = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+      'User-Agent': USER_AGENT
+    },
     body
   })
-  if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`)
+  if (!res.ok) {
+    const detail = (await res.text().catch(() => '')).replace(/<[^>]+>/g, ' ').trim()
+    throw new Error(`Overpass HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`)
+  }
   return parseOverpassJson(await res.json())
 }
