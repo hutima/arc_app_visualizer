@@ -16,6 +16,9 @@ import {
   insertPerf
 } from './db/queries'
 import { averageRailTracks } from './db/railAverage'
+import { buildRailGraph, snapRailTracks } from './rail/snapRail'
+import { fetchRailNetwork } from './rail/overpass'
+import { storeRailNetwork, getRailCoverage, loadRailForViewport } from './db/railStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
 import type { ImportProgress, ViewportQuery, ViewportResult } from '../shared/types'
@@ -84,11 +87,23 @@ export function registerIpc(ctx: IpcContext): void {
     const queried = queryViewportSegments(ctx.db, q, ctx.settings.queryLimits)
     const { truncated, detail, downsampleStride } = queried
     const wp = queryViewportWaypoints(ctx.db, q, ctx.settings.queryLimits.waypoints)
-    // Cleaning (display-only): collapse repeat rail rides between two places.
+
+    // Cleaning (display-only). Snapping to OSM rail supersedes averaging for
+    // rail rides — snapped rides already coincide on the real alignment.
+    let rows = queried.rows
+    let railSnapped = 0
+    if (q.snapRail) {
+      const net = loadRailForViewport(ctx.db, q)
+      if (net.edges.length > 0) {
+        const result = snapRailTracks(rows, buildRailGraph(net.nodes, net.edges))
+        rows = result.rows
+        railSnapped = result.snapped
+      }
+    }
     const rail = q.averageRail
-      ? averageRailTracks(queried.rows, wp.waypoints)
-      : { rows: queried.rows, collapsed: 0 }
-    const rows = rail.rows
+      ? averageRailTracks(rows, wp.waypoints)
+      : { rows, collapsed: 0 }
+    rows = rail.rows
     const queryMs = performance.now() - t0
 
     const tEncode = performance.now()
@@ -117,7 +132,7 @@ export function registerIpc(ctx: IpcContext): void {
     insertPerf(
       ctx.db, 'query.viewport', queryMs,
       `segments=${rows.length} points=${pointCount} detail=${detail} stride=${downsampleStride}` +
-        ` places=${wp.waypoints.length}/${wp.totalCount} railAvg=${rail.collapsed}`
+        ` places=${wp.waypoints.length}/${wp.totalCount} railAvg=${rail.collapsed} railSnap=${railSnapped}`
     )
 
     return {
@@ -133,7 +148,8 @@ export function registerIpc(ctx: IpcContext): void {
         downsampleStride,
         waypointCount: wp.waypoints.length,
         waypointTotal: wp.totalCount,
-        railAveraged: rail.collapsed
+        railAveraged: rail.collapsed,
+        railSnapped
       }
     }
   })
@@ -152,6 +168,24 @@ export function registerIpc(ctx: IpcContext): void {
   })
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
+  ipcMain.handle('rail:coverage', () => getRailCoverage(ctx.db))
+  ipcMain.handle('rail:fetch', async () => {
+    const bounds = getDataBounds(ctx.db)
+    if (!bounds) return { ok: false, error: 'no data to fetch a rail network for' }
+    // Small margin so rides ending just outside the data bbox still match.
+    const pad = 0.02
+    const bbox = {
+      minLat: bounds.minLat - pad, minLon: bounds.minLon - pad,
+      maxLat: bounds.maxLat + pad, maxLon: bounds.maxLon + pad
+    }
+    try {
+      const rail = await fetchRailNetwork(bbox)
+      const coverage = storeRailNetwork(ctx.db, rail, bbox)
+      return { ok: true, coverage }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   ipcMain.handle('perf:recent', (_e, limit: number) => getRecentPerf(ctx.db, Math.min(limit, 200)))
   ipcMain.handle('app:getConfig', () => ({
     basemapStyleUrl:

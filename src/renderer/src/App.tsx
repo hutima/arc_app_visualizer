@@ -8,7 +8,9 @@ import type {
   TrackColorMode
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
+import type { RailCoverage } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
+import { yearRange } from '../../shared/yearColors'
 import { MapController, type RenderStats } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
 import { BasemapControl } from './components/BasemapControl'
@@ -30,6 +32,10 @@ export function App(): React.JSX.Element {
   const [detailMode, setDetailMode] = useState<DetailMode>('auto')
   const [colorMode, setColorMode] = useState<TrackColorMode>('type')
   const [averageRail, setAverageRail] = useState(false)
+  const [snapRail, setSnapRail] = useState(false)
+  const [railCoverage, setRailCoverage] = useState<RailCoverage | null>(null)
+  const [railFetching, setRailFetching] = useState(false)
+  const [railError, setRailError] = useState<string | null>(null)
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
@@ -63,6 +69,9 @@ export function App(): React.JSX.Element {
       }
       controllerRef.current = controller
       await refreshData()
+      void window.api.getRailCoverage().then((cov) => {
+        if (!disposed) setRailCoverage(cov)
+      })
       const sum = await window.api.getSummary()
       if (!disposed && sum.pointCount > 0) {
         hadDataOnLoadRef.current = true
@@ -75,6 +84,15 @@ export function App(): React.JSX.Element {
       controllerRef.current = null
     }
   }, [refreshData])
+
+  // Feed the dataset's year span to the gradient whenever the summary changes.
+  useEffect(() => {
+    const years = yearRange(summary?.startTsMs ?? null, summary?.endTsMs ?? null)
+    controllerRef.current?.setYearExtent(
+      years.length ? years[0]! : null,
+      years.length ? years[years.length - 1]! : null
+    )
+  }, [summary])
 
   // Import progress events: small objects only; map refresh happens on done.
   useEffect(() => {
@@ -110,18 +128,30 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setDateRange(startTsMs, endTsMs)
   }, [])
 
-  // Swap within the active types; the resulting order persists as priority.
-  const handleReorderCategory = useCallback((name: string, direction: -1 | 1): void => {
+  // Reorder active types to the dragged sequence; persists as priority.
+  const handleReorderCategories = useCallback((orderedNames: string[]): void => {
     setCategories((prev) => {
-      const activeList = prev.filter((c) => !c.ignored && c.segmentCount > 0)
+      const rank = new Map(orderedNames.map((n, i) => [n, i]))
+      const activeList = prev
+        .filter((c) => !c.ignored && c.segmentCount > 0)
+        .sort((a, b) => (rank.get(a.name) ?? 0) - (rank.get(b.name) ?? 0))
       const rest = prev.filter((c) => c.ignored || c.segmentCount === 0)
-      const i = activeList.findIndex((c) => c.name === name)
-      const j = i + direction
-      if (i < 0 || j < 0 || j >= activeList.length) return prev
-      ;[activeList[i], activeList[j]] = [activeList[j]!, activeList[i]!]
       const next = [...activeList, ...rest]
       controllerRef.current?.setCategories(next)
-      void window.api.setCategoryOrder(activeList.map((c) => c.name))
+      void window.api.setCategoryOrder(orderedNames)
+      return next
+    })
+  }, [])
+
+  const handleToggleAllCategories = useCallback((visible: boolean): void => {
+    setCategories((prev) => {
+      const next = prev.map((c) =>
+        !c.ignored && c.segmentCount > 0 ? { ...c, visible } : c
+      )
+      controllerRef.current?.setCategories(next)
+      for (const c of prev) {
+        if (!c.ignored && c.segmentCount > 0) void window.api.setCategoryVisible(c.name, visible)
+      }
       return next
     })
   }, [])
@@ -160,6 +190,26 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setAverageRail(on)
   }, [])
 
+  const handleSnapRail = useCallback((on: boolean): void => {
+    setSnapRail(on)
+    controllerRef.current?.setSnapRail(on)
+  }, [])
+
+  const handleFetchRail = useCallback((): void => {
+    setRailFetching(true)
+    setRailError(null)
+    void window.api.fetchRailNetwork().then((res) => {
+      setRailFetching(false)
+      if (res.ok && res.coverage) {
+        setRailCoverage(res.coverage)
+        setSnapRail(true)
+        controllerRef.current?.setSnapRail(true) // show the result immediately
+      } else {
+        setRailError(res.error ?? 'rail fetch failed')
+      }
+    })
+  }, [])
+
   const handleBasemapTheme = useCallback((theme: 'dark' | 'light'): void => {
     setConfig((prev) => {
       if (!prev) return prev
@@ -181,11 +231,21 @@ export function App(): React.JSX.Element {
           onToggle={handleToggleCategory}
           onToggleWaypoints={handleToggleWaypoints}
           onColorChange={handleColorChange}
-          onReorder={handleReorderCategory}
+          onReorder={handleReorderCategories}
+          onToggleAll={handleToggleAllCategories}
         />
         <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />
-        <CleaningControl averageRail={averageRail} onChange={handleAverageRail} />
+        <CleaningControl
+          averageRail={averageRail}
+          snapRail={snapRail}
+          railCoverage={railCoverage}
+          railFetching={railFetching}
+          railError={railError}
+          onChangeAverage={handleAverageRail}
+          onChangeSnap={handleSnapRail}
+          onFetchRail={handleFetchRail}
+        />
         {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
         <StatsPanel
           summary={summary}

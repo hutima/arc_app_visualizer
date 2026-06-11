@@ -94,11 +94,13 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   to itself. Car and taxi are deliberately **light grey** — visually
   de-emphasized as the least environmentally friendly modes. Unknown types
   get stable generated colors.
-  Arc's `bogus` category is imported but ignored/hidden by default.
-- **Color tracks by year** instead of type (sidebar toggle): each calendar
-  year gets a stable golden-angle hue with a legend; type checkboxes still
-  filter what shows. Click any type's **color swatch** to pick a custom
-  color (persisted across launches; ↺ reverts to the default).
+  Arc's `bogus` label and untyped `unknown` tracks are imported but
+  ignored/hidden by default.
+- **Color tracks by year** instead of type (sidebar toggle): a sequential
+  brightness **gradient** maps oldest→newest (most recent year brightest),
+  with a legend; type checkboxes still filter what shows. Click any type's
+  **color swatch** to pick a custom color (persisted across launches; ↺
+  reverts to the default).
 - Waypoints (Arc "visits") render as dots, toggleable like any type. Repeat
   visits of the same named place merge into **one dot at their average
   location** (per locality — chain names in different cities stay separate).
@@ -106,14 +108,24 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   additionally **spatially thinned** — one dot per grid cell, most recent
   visit wins — so every visited area stays represented; the sidebar shows
   `N of M places` when thinning.
-- **Cleaning toggle — average repeat rail rides**: metro/tram/train rides
-  between the same two places (either direction) collapse into one best-fit
-  consensus track sampled at **~50 m resolution** — arc-length resampled,
-  averaged per parameter, then spline-smoothed with endpoints pinned. Rides
-  without a place at both ends are left as-is; display-only, raw points
-  untouched.
-- **Type draw order**: ▲▼ in the Types panel reorders priority — the top
-  type paints above the others (persisted, applies in both color modes).
+- **Cleaning — snap rail to OSM (recommended)**: fetch the OpenStreetMap rail
+  network for your data's extent **once** (the app's only network call; stored
+  locally, everything after is offline), then metro/tram/train rides are
+  **map-matched** onto the real alignment and **routed through tunnels** along
+  the rail graph — fixing exactly where GPS is worst, and making repeat rides
+  coincide instead of smearing. Greedy nearest-node + Dijkstra matcher;
+  unmatchable rides are left untouched.
+- **Cleaning fallback — average repeat rail rides** (no network): rides
+  between the same two places (either direction) collapse into one **robust
+  consensus** track at ~50 m resolution — arc-length resampled, reduced by
+  component-wise **median** (not mean) so a noisy tunnel excursion can't bend
+  the line, then spline-smoothed with endpoints pinned. Rides that still
+  disagree with the consensus are kept as their own lines rather than blended
+  into a phantom path; rides without a place at both ends are left as-is.
+  Display-only, raw points untouched.
+- **Type draw order**: drag ⠿ in the Types panel to reorder priority — the
+  top type paints above the others (persisted, applies in both color modes).
+  A **Select all** checkbox toggles every type at once.
 - Viewport-aware: only segments intersecting the (padded) visible bounds and
   active date range are queried and shipped to the GPU, as one compact
   binary buffer rather than a giant GeoJSON clone.

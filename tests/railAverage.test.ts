@@ -127,6 +127,22 @@ describe('averageRailTracks', () => {
     }
   })
 
+  it('rejects a wild tunnel excursion instead of bending the consensus to it', () => {
+    // Three rides hug the real A→B line; one spikes far north mid-route.
+    const a = row('metro', [0, 0, 0.05, 0.001, 0.1, 0])
+    const b = row('metro', [0, 0, 0.05, -0.001, 0.1, 0])
+    const c = row('metro', [0, 0, 0.05, 0, 0.1, 0])
+    const spur = row('metro', [0, 0, 0.05, 0.05, 0.1, 0]) // ~5.5 km off-route
+    const { rows, collapsed } = averageRailTracks([a, b, c, spur], PLACES)
+
+    // The three in agreement collapse; the excursion is kept as its own line.
+    expect(collapsed).toBe(3)
+    const avg = rows.find((r) => r.id === Math.min(a.id, b.id, c.id))!
+    const mid = coordsOf(avg)[Math.floor(coordsOf(avg).length / 4) * 2 + 1]!
+    expect(Math.abs(mid)).toBeLessThan(0.01) // consensus stays on the real path
+    expect(rows.some((r) => r.id === spur.id)).toBe(true) // excursion still drawn
+  })
+
   it('is deterministic regardless of input order', () => {
     const a = row('metro', [0, 0, 0.05, 0.01, 0.1, 0], 1000)
     const b = row('metro', [0, 0, 0.05, -0.01, 0.1, 0], 2000)

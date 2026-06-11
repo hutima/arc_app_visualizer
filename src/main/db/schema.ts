@@ -11,8 +11,9 @@
  * - `points` and `display_geometries` are WITHOUT ROWID, clustered by
  *   (segment_id, ...) so a segment's data is contiguous on disk.
  */
-// v2: idx_waypoints_bbox; v3: categories.custom; v4: categories.priority
-export const SCHEMA_VERSION = 4
+// v2: idx_waypoints_bbox; v3: categories.custom; v4: categories.priority;
+// v5: 'unknown' ignored by default; v6: OSM rail network tables
+export const SCHEMA_VERSION = 6
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -112,5 +113,31 @@ CREATE TABLE IF NOT EXISTS perf_log (
   op          TEXT NOT NULL,
   duration_ms REAL NOT NULL,
   detail      TEXT
+);
+
+-- OSM rail network for offline snapping (fetched once per region on request).
+-- ids are OSM node ids; geometry is plain lat/lon (no R*Tree dependency).
+CREATE TABLE IF NOT EXISTS rail_nodes (
+  id  INTEGER PRIMARY KEY,
+  lat REAL NOT NULL,
+  lon REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS rail_edges (
+  id INTEGER PRIMARY KEY,
+  a  INTEGER NOT NULL,
+  b  INTEGER NOT NULL,
+  min_lat REAL, min_lon REAL, max_lat REAL, max_lon REAL
+);
+CREATE INDEX IF NOT EXISTS idx_rail_edges_bbox
+  ON rail_edges(min_lat, max_lat, min_lon, max_lon);
+
+-- Bounding boxes already fetched, so the UI can show coverage and skip refetch.
+CREATE TABLE IF NOT EXISTS rail_coverage (
+  id          INTEGER PRIMARY KEY,
+  min_lat REAL, min_lon REAL, max_lat REAL, max_lon REAL,
+  fetched_at_ms INTEGER NOT NULL,
+  node_count  INTEGER NOT NULL,
+  edge_count  INTEGER NOT NULL
 );
 `

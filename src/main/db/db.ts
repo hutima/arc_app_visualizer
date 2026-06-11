@@ -46,6 +46,9 @@ function migrate(db: DatabaseSync): void {
     ensureColumn(db, 'categories', 'custom', 'custom INTEGER NOT NULL DEFAULT 0')
     ensureColumn(db, 'categories', 'priority', 'priority INTEGER')
     seedCategories(db)
+    // v5: 'unknown' joins 'bogus' as excluded-by-default (existing databases
+    // seeded it visible before this rule existed).
+    db.prepare("UPDATE categories SET ignored = 1, visible = 0 WHERE name = 'unknown'").run()
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     db.exec('COMMIT')
   } catch (err) {

@@ -66,7 +66,10 @@ export class MapController {
   private colorMode: TrackColorMode = 'type'
   /** Distinct years among segments of the last refresh (0 = undated). */
   private yearsInView: number[] = []
+  /** Dataset year span [min, max] driving the gradient; null until known. */
+  private yearExtent: [number, number] | null = null
   private averageRail = false
+  private snapRail = false
   private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
@@ -199,9 +202,10 @@ export class MapController {
   private colorExpression(): ExpressionSpecification | string {
     if (this.colorMode === 'year') {
       if (this.yearsInView.length === 0) return UNDATED_YEAR_COLOR
+      const [min, max] = this.yearExtent ?? [undefined, undefined]
       const expr: unknown[] = ['match', ['get', 'year']]
       for (const y of this.yearsInView) {
-        expr.push(y, colorForYear(y))
+        expr.push(y, colorForYear(y, min, max))
       }
       expr.push(UNDATED_YEAR_COLOR)
       return expr as unknown as ExpressionSpecification
@@ -278,10 +282,26 @@ export class MapController {
     this.scheduleRefresh(0)
   }
 
+  setSnapRail(on: boolean): void {
+    if (on === this.snapRail) return
+    this.snapRail = on
+    this.scheduleRefresh(0)
+  }
+
   /** Pure repaint — year is already in feature properties, no re-query. */
   setColorMode(mode: TrackColorMode): void {
     if (mode === this.colorMode) return
     this.colorMode = mode
+    if (!this.map.isStyleLoaded() || !this.map.getLayer(TRACKS_LAYER)) return
+    this.map.setPaintProperty(TRACKS_LAYER, 'line-color', this.colorExpression())
+  }
+
+  /** Dataset year span for the gradient; repaints if year mode is active. */
+  setYearExtent(min: number | null, max: number | null): void {
+    const next = min != null && max != null ? ([min, max] as [number, number]) : null
+    if (next?.[0] === this.yearExtent?.[0] && next?.[1] === this.yearExtent?.[1]) return
+    this.yearExtent = next
+    if (this.colorMode !== 'year') return
     if (!this.map.isStyleLoaded() || !this.map.getLayer(TRACKS_LAYER)) return
     this.map.setPaintProperty(TRACKS_LAYER, 'line-color', this.colorExpression())
   }
@@ -326,7 +346,8 @@ export class MapController {
       startTsMs: this.startTsMs,
       endTsMs: this.endTsMs,
       detailMode: this.detailMode,
-      averageRail: this.averageRail
+      averageRail: this.averageRail,
+      snapRail: this.snapRail
     })
     // A newer query superseded this one while we awaited.
     if (token !== this.queryToken || this.destroyed) return

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { CategoryInfo } from '../../../shared/types'
 
 interface Props {
@@ -7,8 +8,10 @@ interface Props {
   onToggleWaypoints: (show: boolean) => void
   /** Hex color picked by the user; null reverts to the default. */
   onColorChange: (name: string, color: string | null) => void
-  /** Move a type up (-1) or down (+1); top of the list draws on top. */
-  onReorder: (name: string, direction: -1 | 1) => void
+  /** New active-type order (first = top of list = drawn on top). */
+  onReorder: (orderedNames: string[]) => void
+  /** Show or hide every active type at once. */
+  onToggleAll: (visible: boolean) => void
 }
 
 /** `<input type="color">` only accepts #rrggbb; generated colors are hsl(). */
@@ -39,23 +42,67 @@ export function CategoryPanel({
   onToggle,
   onToggleWaypoints,
   onColorChange,
-  onReorder
+  onReorder,
+  onToggleAll
 }: Props): React.JSX.Element {
   // Only show categories that exist in the data; ignored ones (e.g. `bogus`)
   // are listed separately so it's transparent what is being excluded.
   const active = categories.filter((c) => !c.ignored && c.segmentCount > 0)
   const ignored = categories.filter((c) => c.ignored && c.segmentCount > 0)
 
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+
+  const drop = (target: number): void => {
+    if (dragIndex !== null && dragIndex !== target) {
+      const next = [...active]
+      const [moved] = next.splice(dragIndex, 1)
+      next.splice(target, 0, moved!)
+      onReorder(next.map((c) => c.name))
+    }
+    setDragIndex(null)
+  }
+
+  const allVisible = active.length > 0 && active.every((c) => c.visible)
+  const noneVisible = active.every((c) => !c.visible)
+
   return (
     <section className="panel">
       <h2>Types</h2>
       {active.length === 0 && <p className="hint">Import data to see activity types.</p>}
       {active.length > 1 && (
-        <p className="hint order-hint">Top of the list draws on top of the map.</p>
+        <>
+          <label className="select-all">
+            <input
+              type="checkbox"
+              checked={allVisible}
+              ref={(el) => {
+                if (el) el.indeterminate = !allVisible && !noneVisible
+              }}
+              onChange={(e) => onToggleAll(e.target.checked)}
+            />
+            <span className="category-name">Select all</span>
+          </label>
+          <p className="hint order-hint">Drag ⠿ to reorder; the top type draws on top.</p>
+        </>
       )}
       <ul className="category-list">
         {active.map((c, i) => (
-          <li key={c.name}>
+          <li
+            key={c.name}
+            className={dragIndex === i ? 'cat-row dragging' : 'cat-row'}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={() => drop(i)}
+          >
+            <span
+              className="drag-handle"
+              draggable
+              onDragStart={() => setDragIndex(i)}
+              onDragEnd={() => setDragIndex(null)}
+              title="drag to reorder"
+              aria-label={`reorder ${c.name}`}
+            >
+              ⠿
+            </span>
             <label>
               <input
                 type="checkbox"
@@ -83,37 +130,12 @@ export function CategoryPanel({
                   ↺
                 </button>
               )}
-              <span className="order-buttons">
-                <button
-                  type="button"
-                  className="order-btn"
-                  title={`draw ${c.name} above`}
-                  disabled={i === 0}
-                  onClick={(e) => {
-                    e.preventDefault()
-                    onReorder(c.name, -1)
-                  }}
-                >
-                  ▲
-                </button>
-                <button
-                  type="button"
-                  className="order-btn"
-                  title={`draw ${c.name} below`}
-                  disabled={i === active.length - 1}
-                  onClick={(e) => {
-                    e.preventDefault()
-                    onReorder(c.name, 1)
-                  }}
-                >
-                  ▼
-                </button>
-              </span>
               <span className="category-count">{c.segmentCount.toLocaleString()}</span>
             </label>
           </li>
         ))}
-        <li>
+        <li className="cat-row">
+          <span className="drag-handle drag-handle-placeholder" />
           <label>
             <input
               type="checkbox"

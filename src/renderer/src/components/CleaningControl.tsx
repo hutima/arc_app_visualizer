@@ -1,29 +1,78 @@
+import type { RailCoverage } from '../../../shared/types'
+
 interface Props {
   averageRail: boolean
-  onChange: (on: boolean) => void
+  snapRail: boolean
+  railCoverage: RailCoverage | null
+  railFetching: boolean
+  railError: string | null
+  onChangeAverage: (on: boolean) => void
+  onChangeSnap: (on: boolean) => void
+  onFetchRail: () => void
 }
 
+const fmtDate = (ms: number): string => new Date(ms).toLocaleDateString()
+
 /**
- * Display-time cleaning toggles. Nothing here ever touches raw points —
- * each option re-queries and transforms what the map shows.
+ * Display-time cleaning toggles. Nothing here ever touches raw points — each
+ * option re-queries and transforms what the map shows.
  */
-export function CleaningControl({ averageRail, onChange }: Props): React.JSX.Element {
+export function CleaningControl({
+  averageRail,
+  snapRail,
+  railCoverage,
+  railFetching,
+  railError,
+  onChangeAverage,
+  onChangeSnap,
+  onFetchRail
+}: Props): React.JSX.Element {
+  const hasNetwork = railCoverage !== null
   return (
     <section className="panel">
       <h2>Cleaning</h2>
+
       <label className="color-mode-option">
         <input
           type="checkbox"
-          checked={averageRail}
-          onChange={(e) => onChange(e.target.checked)}
+          checked={snapRail}
+          disabled={!hasNetwork}
+          onChange={(e) => onChangeSnap(e.target.checked)}
         />
-        <span>Average repeat metro/tram/train rides</span>
+        <span>Snap rail to OSM tracks</span>
       </label>
       <p className="hint">
-        Rides of the same type between the same two places (either direction)
-        merge into one best-fit track at ~50 m resolution. Rides without a
-        nearby place at both ends are left as-is. Display only — raw data is
-        untouched.
+        Matches metro/tram/train rides onto real OpenStreetMap rail geometry and
+        routes through tunnels — fixing the spots where GPS is worst. Needs a
+        one-time network fetch; everything after is offline.
+      </p>
+      <button type="button" onClick={onFetchRail} disabled={railFetching}>
+        {railFetching
+          ? 'Fetching rail network…'
+          : hasNetwork
+            ? 'Re-fetch rail network'
+            : 'Fetch rail network for my data'}
+      </button>
+      {railCoverage && (
+        <p className="hint">
+          OSM rail: {railCoverage.edgeCount.toLocaleString()} segments,{' '}
+          {railCoverage.nodeCount.toLocaleString()} nodes (fetched{' '}
+          {fmtDate(railCoverage.fetchedAtMs)}).
+        </p>
+      )}
+      {railError && <p className="hint status-line error">{railError}</p>}
+
+      <label className="color-mode-option cleaning-divider">
+        <input
+          type="checkbox"
+          checked={averageRail}
+          onChange={(e) => onChangeAverage(e.target.checked)}
+        />
+        <span>Average repeat rides (no OSM)</span>
+      </label>
+      <p className="hint">
+        Fallback when no rail network is fetched: rides of the same type between
+        the same two places merge into one best-fit track at ~50 m resolution.
       </p>
     </section>
   )

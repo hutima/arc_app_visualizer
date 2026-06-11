@@ -110,6 +110,7 @@ describe('import pipeline', () => {
     const names = new Map(cats.map((c) => [c.name, c]))
     expect(names.get('hovercraft')?.color).toMatch(/^(#|hsl)/)
     expect(names.get('bogus')?.ignored).toBe(true)
+    expect(names.get('unknown')?.ignored).toBe(true) // untyped tracks hidden by default
     expect(names.get('walking')?.ignored).toBe(false)
   })
 })
