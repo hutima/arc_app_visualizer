@@ -58,6 +58,10 @@ export interface ViewportResultMeta {
   detail: ResolvedDetail
   /** 1 = full detail; k > 1 = lines thinned to every k-th vertex (endpoints kept). */
   downsampleStride: number
+  /** Places served to the map (after any spatial thinning). */
+  waypointCount: number
+  /** Places matching the viewport before thinning. */
+  waypointTotal: number
 }
 
 export interface ViewportResult {

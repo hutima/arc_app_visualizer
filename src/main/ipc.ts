@@ -80,7 +80,7 @@ export function registerIpc(ctx: IpcContext): void {
     const { rows, truncated, detail, downsampleStride } = queryViewportSegments(
       ctx.db, q, ctx.settings.queryLimits
     )
-    const waypoints = queryViewportWaypoints(ctx.db, q, ctx.settings.queryLimits.waypoints)
+    const wp = queryViewportWaypoints(ctx.db, q, ctx.settings.queryLimits.waypoints)
     const queryMs = performance.now() - t0
 
     const tEncode = performance.now()
@@ -107,12 +107,13 @@ export function registerIpc(ctx: IpcContext): void {
 
     insertPerf(
       ctx.db, 'query.viewport', queryMs,
-      `segments=${rows.length} points=${pointCount} detail=${detail} stride=${downsampleStride}`
+      `segments=${rows.length} points=${pointCount} detail=${detail} stride=${downsampleStride}` +
+        ` places=${wp.waypoints.length}/${wp.totalCount}`
     )
 
     return {
       buffer,
-      waypoints,
+      waypoints: wp.waypoints,
       meta: {
         segmentCount: rows.length,
         pointCount,
@@ -120,7 +121,9 @@ export function registerIpc(ctx: IpcContext): void {
         encodeMs,
         truncated,
         detail,
-        downsampleStride
+        downsampleStride,
+        waypointCount: wp.waypoints.length,
+        waypointTotal: wp.totalCount
       }
     }
   })

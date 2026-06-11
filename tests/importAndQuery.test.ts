@@ -172,9 +172,10 @@ describe('viewport queries', () => {
   })
 
   it('returns waypoints in the viewport', () => {
-    const wpts = queryViewportWaypoints(db, VIEWPORT_ALL, 100)
-    expect(wpts).toHaveLength(3)
-    expect(wpts.map((w) => w.name)).toContain('Synthetic Place Alpha')
+    const { waypoints, totalCount } = queryViewportWaypoints(db, VIEWPORT_ALL, 100)
+    expect(waypoints).toHaveLength(3)
+    expect(totalCount).toBe(3)
+    expect(waypoints.map((w) => w.name)).toContain('Synthetic Place Alpha')
   })
 
   it('truncates and reports when the segment safety cap is hit', () => {

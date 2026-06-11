@@ -174,26 +174,77 @@ function decimateRow(row: ViewportSegmentRow, stride: number): void {
   row.coords = new Uint8Array(out.buffer)
 }
 
+export interface ViewportWaypointsResult {
+  waypoints: ViewportWaypoint[]
+  /** Waypoints matching the viewport before any thinning. */
+  totalCount: number
+}
+
+/**
+ * Waypoints (place visits) for the viewport, within a budget.
+ *
+ * Same philosophy as segment limiting: a visited area must never vanish just
+ * because the viewport got busy. Arc weekly exports re-list the same places
+ * every week, so multi-year datasets blow past any flat row cap; a bare LIMIT
+ * with no ORDER BY served the first rows in import order and silently dropped
+ * every region visited after the cap. Instead, when over budget, waypoints
+ * snap to a world-anchored grid with one representative (the most recent
+ * visit) per cell, coarsening the grid until the result fits.
+ */
 export function queryViewportWaypoints(
   db: DatabaseSync,
   q: ViewportQuery,
   limit: number
-): ViewportWaypoint[] {
-  const stmt = db.prepare(`
+): ViewportWaypointsResult {
+  const all = db.prepare(`
     SELECT id, lat, lon, ts_ms AS tsMs, name
     FROM waypoints
     WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
       AND (? IS NULL OR ts_ms IS NULL OR ts_ms >= ?)
       AND (? IS NULL OR ts_ms IS NULL OR ts_ms <= ?)
-    LIMIT ?
-  `)
-  return stmt.all(
+  `).all(
     q.minLat, q.maxLat,
     q.minLon, q.maxLon,
     q.startTsMs, q.startTsMs,
-    q.endTsMs, q.endTsMs,
-    limit
+    q.endTsMs, q.endTsMs
   ) as unknown as ViewportWaypoint[]
+  if (limit <= 0) return { waypoints: [], totalCount: all.length }
+  if (all.length <= limit) return { waypoints: all, totalCount: all.length }
+  return { waypoints: thinWaypoints(all, q, limit), totalCount: all.length }
+}
+
+/**
+ * One waypoint per grid cell, coarsening until under budget. Cells are
+ * power-of-two fractions of the world (not viewport-relative), so surviving
+ * dots stay put while panning; within a cell the most recent visit wins
+ * (ties to the lowest id) — deterministic across refreshes.
+ */
+function thinWaypoints(
+  all: ViewportWaypoint[],
+  q: ViewportQuery,
+  limit: number
+): ViewportWaypoint[] {
+  const span = Math.max(q.maxLat - q.minLat, q.maxLon - q.minLon, 1e-9)
+  // Finest grid worth trying: ~256 cells across the viewport.
+  let k = Math.max(0, Math.floor(Math.log2((360 / span) * 256)))
+  for (;;) {
+    const cell = 360 / 2 ** k
+    const best = new Map<string, ViewportWaypoint>()
+    for (const w of all) {
+      const key = `${Math.floor(w.lat / cell)}:${Math.floor(w.lon / cell)}`
+      const cur = best.get(key)
+      if (!cur || moreRecentVisit(w, cur)) best.set(key, w)
+    }
+    if (best.size <= limit || k === 0) return [...best.values()]
+    k--
+  }
+}
+
+function moreRecentVisit(a: ViewportWaypoint, b: ViewportWaypoint): boolean {
+  const ta = a.tsMs ?? -Infinity
+  const tb = b.tsMs ?? -Infinity
+  if (ta !== tb) return ta > tb
+  return a.id < b.id
 }
 
 export function getCategories(db: DatabaseSync): CategoryInfo[] {

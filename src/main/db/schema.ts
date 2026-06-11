@@ -11,7 +11,7 @@
  * - `points` and `display_geometries` are WITHOUT ROWID, clustered by
  *   (segment_id, ...) so a segment's data is contiguous on disk.
  */
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2 // v2: idx_waypoints_bbox
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS waypoints (
   lon     REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_waypoints_file ON waypoints(file_id);
+-- Viewport waypoint queries fetch all rows in bounds (then thin in JS).
+CREATE INDEX IF NOT EXISTS idx_waypoints_bbox ON waypoints(lat, lon);
 
 CREATE TABLE IF NOT EXISTS categories (
   name    TEXT PRIMARY KEY,

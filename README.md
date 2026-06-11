@@ -90,7 +90,10 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   violet→pink mass-transit family with metro/tram/train, boat is blue, and
   airplane has red to itself. Unknown types get stable generated colors.
   Arc's `bogus` category is imported but ignored/hidden by default.
-- Waypoints (Arc "visits") render as dots, toggleable like any type.
+- Waypoints (Arc "visits") render as dots, toggleable like any type. Over the
+  waypoint budget (`queryLimits.waypoints`, default 5k) they are **spatially
+  thinned** — one dot per grid cell, most recent visit wins — so every visited
+  area stays represented; the sidebar shows `N of M places` when thinning.
 - Viewport-aware: only segments intersecting the (padded) visible bounds and
   active date range are queried and shipped to the GPU, as one compact
   binary buffer rather than a giant GeoJSON clone.
