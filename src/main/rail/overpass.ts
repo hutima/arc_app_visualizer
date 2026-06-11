@@ -23,11 +23,23 @@ export interface ParsedRail {
 /** Rail kinds we match against; excludes sidings/yards/abandoned by default. */
 const RAILWAY_TYPES = ['subway', 'tram', 'light_rail', 'rail', 'narrow_gauge', 'monorail']
 
-const DEFAULT_ENDPOINT = 'https://overpass-api.de/api/interpreter'
+/**
+ * Public Overpass instances, tried in order. The primary is busy — under
+ * load its dispatcher rejects jobs with HTTP 504 ("Dispatcher_Client …
+ * timeout") — so server-side failures fall through to mirrors.
+ */
+const DEFAULT_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter'
+]
 
 // OSM operations policy requires an identifying User-Agent; Node's fetch
 // sends none by default and overpass-api.de rejects that with HTTP 406.
 const USER_AGENT = 'arc-visualizer/0.1.0 (+https://github.com/hutima/arc_app_visualizer)'
+
+/** Worth trying another mirror: rate limit or server-side failure. */
+const isRetryable = (status: number): boolean => status === 429 || status >= 500
 
 export function buildOverpassQuery(bbox: BBox): string {
   const b = `${bbox.minLat},${bbox.minLon},${bbox.maxLat},${bbox.maxLon}`
@@ -91,26 +103,41 @@ export function parseOverpassJson(json: unknown): ParsedRail {
 }
 
 /**
- * Fetch + parse a rail network for the bbox. Network-only; callers handle the
- * stored result. Throws on network/HTTP failure so the UI can surface it.
+ * Fetch + parse a rail network for the bbox, falling back across mirrors on
+ * rate limits, 5xx, and network failures (a bad request fails immediately).
+ * Network-only; callers handle the stored result. Throws the last failure so
+ * the UI can surface it.
  */
 export async function fetchRailNetwork(
   bbox: BBox,
-  endpoint: string = DEFAULT_ENDPOINT
+  endpoints: readonly string[] = DEFAULT_ENDPOINTS
 ): Promise<ParsedRail> {
   const body = 'data=' + encodeURIComponent(buildOverpassQuery(bbox))
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Accept: 'application/json',
-      'User-Agent': USER_AGENT
-    },
-    body
-  })
-  if (!res.ok) {
+  let lastError: Error | null = null
+  for (const endpoint of endpoints) {
+    const host = new URL(endpoint).host
+    let res: Response
+    try {
+      res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+          'User-Agent': USER_AGENT
+        },
+        body
+      })
+    } catch (err) {
+      lastError = new Error(`${host}: ${err instanceof Error ? err.message : String(err)}`)
+      continue
+    }
+    if (res.ok) return parseOverpassJson(await res.json())
     const detail = (await res.text().catch(() => '')).replace(/<[^>]+>/g, ' ').trim()
-    throw new Error(`Overpass HTTP ${res.status}${detail ? `: ${detail.slice(0, 200)}` : ''}`)
+    const error = new Error(
+      `Overpass HTTP ${res.status} (${host})${detail ? `: ${detail.slice(0, 200)}` : ''}`
+    )
+    if (!isRetryable(res.status)) throw error
+    lastError = error
   }
-  return parseOverpassJson(await res.json())
+  throw lastError ?? new Error('no Overpass endpoint configured')
 }
