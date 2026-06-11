@@ -268,9 +268,12 @@ describe('data bounds', () => {
 
 // Keep last: reopens the shared db handle.
 describe('category colors', () => {
-  it('groups mode families: car beside taxi, bus with transit, airplane unique', () => {
+  it('mode family colors: car+taxi de-emphasized grey, kayaking with boat, airplane unique', () => {
     const cats = new Map(getCategories(db).map((c) => [c.name, c.color]))
     expect(cats.get('car')).toBe(KNOWN_CATEGORY_COLORS.car)
+    expect(KNOWN_CATEGORY_COLORS.car).toBe('#d1d5db') // eco de-emphasis: grey, not warm
+    expect(KNOWN_CATEGORY_COLORS.taxi).toBe('#cbd5e1') // grey family beside car
+    expect(KNOWN_CATEGORY_COLORS.kayaking).toBe('#7dd3fc') // water family beside boat
     expect(cats.get('bus')).toBe(KNOWN_CATEGORY_COLORS.bus)
     // Airplane's red is reserved: no other known category may use it.
     const reds = Object.entries(KNOWN_CATEGORY_COLORS)

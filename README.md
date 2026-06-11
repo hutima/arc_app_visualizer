@@ -85,10 +85,12 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   a coarser level and lines are **evenly thinned (endpoints kept)** — routes
   are never silently dropped to satisfy the budget.
 - Renders with MapLibre GL on a dark basemap, one color per activity type,
-  grouped by mode family so similar transit looks similar: car/taxi share the
-  taxi-yellow family (motorcycle/scooter in oranges), bus joins the
-  violet→pink mass-transit family with metro/tram/train, boat is blue, and
-  airplane has red to itself. Unknown types get stable generated colors.
+  grouped by mode family so similar transit looks similar: motorcycle/scooter
+  in warm oranges, bus joins the violet→pink mass-transit family with
+  metro/tram/train, boat and kayaking share the blues, and airplane has red
+  to itself. Car and taxi are deliberately **light grey** — visually
+  de-emphasized as the least environmentally friendly modes. Unknown types
+  get stable generated colors.
   Arc's `bogus` category is imported but ignored/hidden by default.
 - Waypoints (Arc "visits") render as dots, toggleable like any type. Over the
   waypoint budget (`queryLimits.waypoints`, default 5k) they are **spatially
