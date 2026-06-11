@@ -66,6 +66,7 @@ export class MapController {
   private colorMode: TrackColorMode = 'type'
   /** Distinct years among segments of the last refresh (0 = undated). */
   private yearsInView: number[] = []
+  private averageRail = false
   private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
@@ -249,6 +250,12 @@ export class MapController {
     this.scheduleRefresh(0)
   }
 
+  setAverageRail(on: boolean): void {
+    if (on === this.averageRail) return
+    this.averageRail = on
+    this.scheduleRefresh(0)
+  }
+
   /** Pure repaint — year is already in feature properties, no re-query. */
   setColorMode(mode: TrackColorMode): void {
     if (mode === this.colorMode) return
@@ -290,7 +297,8 @@ export class MapController {
       zoom,
       startTsMs: this.startTsMs,
       endTsMs: this.endTsMs,
-      detailMode: this.detailMode
+      detailMode: this.detailMode,
+      averageRail: this.averageRail
     })
     // A newer query superseded this one while we awaited.
     if (token !== this.queryToken || this.destroyed) return

@@ -106,6 +106,10 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   additionally **spatially thinned** — one dot per grid cell, most recent
   visit wins — so every visited area stays represented; the sidebar shows
   `N of M places` when thinning.
+- **Cleaning toggle — average repeat rail rides**: metro/tram rides between
+  the same two places (either direction) collapse into one consensus track,
+  arc-length resampled and averaged per vertex. Rides without a place at
+  both ends are left as-is; display-only, raw points untouched.
 - Viewport-aware: only segments intersecting the (padded) visible bounds and
   active date range are queried and shipped to the GPU, as one compact
   binary buffer rather than a giant GeoJSON clone.

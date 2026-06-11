@@ -13,6 +13,7 @@ import {
   getRecentPerf,
   insertPerf
 } from './db/queries'
+import { averageRailTracks } from './db/railAverage'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
 import type { ImportProgress, ViewportQuery, ViewportResult } from '../shared/types'
@@ -78,10 +79,14 @@ export function registerIpc(ctx: IpcContext): void {
 
   ipcMain.handle('query:viewport', (_event, q: ViewportQuery): ViewportResult => {
     const t0 = performance.now()
-    const { rows, truncated, detail, downsampleStride } = queryViewportSegments(
-      ctx.db, q, ctx.settings.queryLimits
-    )
+    const queried = queryViewportSegments(ctx.db, q, ctx.settings.queryLimits)
+    const { truncated, detail, downsampleStride } = queried
     const wp = queryViewportWaypoints(ctx.db, q, ctx.settings.queryLimits.waypoints)
+    // Cleaning (display-only): collapse repeat rail rides between two places.
+    const rail = q.averageRail
+      ? averageRailTracks(queried.rows, wp.waypoints)
+      : { rows: queried.rows, collapsed: 0 }
+    const rows = rail.rows
     const queryMs = performance.now() - t0
 
     const tEncode = performance.now()
@@ -110,7 +115,7 @@ export function registerIpc(ctx: IpcContext): void {
     insertPerf(
       ctx.db, 'query.viewport', queryMs,
       `segments=${rows.length} points=${pointCount} detail=${detail} stride=${downsampleStride}` +
-        ` places=${wp.waypoints.length}/${wp.totalCount}`
+        ` places=${wp.waypoints.length}/${wp.totalCount} railAvg=${rail.collapsed}`
     )
 
     return {
@@ -125,7 +130,8 @@ export function registerIpc(ctx: IpcContext): void {
         detail,
         downsampleStride,
         waypointCount: wp.waypoints.length,
-        waypointTotal: wp.totalCount
+        waypointTotal: wp.totalCount,
+        railAveraged: rail.collapsed
       }
     }
   })

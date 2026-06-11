@@ -40,6 +40,11 @@ export interface ViewportQuery {
   endTsMs: number | null
   /** Geometry detail; omitted/'auto' follows zoom (shared/displayDetail). */
   detailMode?: DetailMode
+  /**
+   * Cleaning toggle: average repeat metro/tram rides between the same two
+   * places into one consensus track (display-only).
+   */
+  averageRail?: boolean
 }
 
 export interface ViewportWaypoint {
@@ -67,6 +72,8 @@ export interface ViewportResultMeta {
   waypointCount: number
   /** Distinct places matching the viewport (same-name visits merged), before thinning. */
   waypointTotal: number
+  /** Rail segments collapsed into averaged consensus tracks (0 = off/none). */
+  railAveraged: number
 }
 
 export interface ViewportResult {

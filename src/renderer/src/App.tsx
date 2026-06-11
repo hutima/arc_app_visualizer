@@ -13,6 +13,7 @@ import { MapController, type RenderStats } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
 import { BasemapControl } from './components/BasemapControl'
 import { CategoryPanel } from './components/CategoryPanel'
+import { CleaningControl } from './components/CleaningControl'
 import { ColorModeControl } from './components/ColorModeControl'
 import { DateFilter } from './components/DateFilter'
 import { DetailControl } from './components/DetailControl'
@@ -28,6 +29,7 @@ export function App(): React.JSX.Element {
   const [showWaypoints, setShowWaypoints] = useState(true)
   const [detailMode, setDetailMode] = useState<DetailMode>('auto')
   const [colorMode, setColorMode] = useState<TrackColorMode>('type')
+  const [averageRail, setAverageRail] = useState(false)
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
@@ -137,6 +139,11 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setColorMode(mode)
   }, [])
 
+  const handleAverageRail = useCallback((on: boolean): void => {
+    setAverageRail(on)
+    controllerRef.current?.setAverageRail(on)
+  }, [])
+
   const handleBasemapTheme = useCallback((theme: 'dark' | 'light'): void => {
     setConfig((prev) => {
       if (!prev) return prev
@@ -161,6 +168,7 @@ export function App(): React.JSX.Element {
         />
         <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />
+        <CleaningControl averageRail={averageRail} onChange={handleAverageRail} />
         {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
         <StatsPanel
           summary={summary}
