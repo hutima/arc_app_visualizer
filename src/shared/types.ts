@@ -147,6 +147,8 @@ export interface ArcApi {
   setCategoryVisible(name: string, visible: boolean): Promise<void>
   /** Hex color from the picker; null reverts to the default palette color. */
   setCategoryColor(name: string, color: string | null): Promise<void>
+  /** Persist type order; index 0 = top of the panel = drawn on top. */
+  setCategoryOrder(names: string[]): Promise<void>
   getSummary(): Promise<DatasetSummary>
   getDataBounds(): Promise<DataBounds | null>
   getConfig(): Promise<AppConfig>

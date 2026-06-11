@@ -9,6 +9,7 @@ import {
   getCategories,
   setCategoryVisible,
   setCategoryColor,
+  setCategoryOrder,
   getSummary,
   getDataBounds,
   getRecentPerf,
@@ -143,6 +144,11 @@ export function registerIpc(ctx: IpcContext): void {
   })
   ipcMain.handle('categories:setColor', (_e, name: string, color: string | null) => {
     setCategoryColor(ctx.db, name, color)
+  })
+  ipcMain.handle('categories:setOrder', (_e, names: string[]) => {
+    if (Array.isArray(names) && names.every((n) => typeof n === 'string')) {
+      setCategoryOrder(ctx.db, names)
+    }
   })
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))

@@ -18,7 +18,7 @@
 import type { ViewportSegmentRow } from './queries'
 import type { ViewportWaypoint } from '../../shared/types'
 
-export const RAIL_AVERAGE_TYPES: ReadonlySet<string> = new Set(['metro', 'tram'])
+export const RAIL_AVERAGE_TYPES: ReadonlySet<string> = new Set(['metro', 'tram', 'train'])
 
 /** Max distance from a track end to a place for the ride to anchor (~440 m). */
 const ANCHOR_RADIUS_DEG = 0.004

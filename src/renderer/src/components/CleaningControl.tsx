@@ -17,7 +17,7 @@ export function CleaningControl({ averageRail, onChange }: Props): React.JSX.Ele
           checked={averageRail}
           onChange={(e) => onChange(e.target.checked)}
         />
-        <span>Average repeat metro/tram rides</span>
+        <span>Average repeat metro/tram/train rides</span>
       </label>
       <p className="hint">
         Rides of the same type between the same two places (either direction)

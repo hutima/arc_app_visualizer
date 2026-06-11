@@ -110,6 +110,22 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setDateRange(startTsMs, endTsMs)
   }, [])
 
+  // Swap within the active types; the resulting order persists as priority.
+  const handleReorderCategory = useCallback((name: string, direction: -1 | 1): void => {
+    setCategories((prev) => {
+      const activeList = prev.filter((c) => !c.ignored && c.segmentCount > 0)
+      const rest = prev.filter((c) => c.ignored || c.segmentCount === 0)
+      const i = activeList.findIndex((c) => c.name === name)
+      const j = i + direction
+      if (i < 0 || j < 0 || j >= activeList.length) return prev
+      ;[activeList[i], activeList[j]] = [activeList[j]!, activeList[i]!]
+      const next = [...activeList, ...rest]
+      controllerRef.current?.setCategories(next)
+      void window.api.setCategoryOrder(activeList.map((c) => c.name))
+      return next
+    })
+  }, [])
+
   // Optimistic: the default color is derivable locally via colorForCategory.
   const handleColorChange = useCallback((name: string, color: string | null): void => {
     setCategories((prev) => {
@@ -165,6 +181,7 @@ export function App(): React.JSX.Element {
           onToggle={handleToggleCategory}
           onToggleWaypoints={handleToggleWaypoints}
           onColorChange={handleColorChange}
+          onReorder={handleReorderCategory}
         />
         <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />

@@ -47,10 +47,24 @@ export const DEFAULT_SETTINGS: AppSettings = {
   roadDimOpacity: 0.35,
   cleaning: DEFAULT_CLEANING,
   queryLimits: {
-    segments: 20000,
+    segments: 100000,
     waypoints: 5000,
     points: 300000
   }
+}
+
+/**
+ * 20000 was the originally written-to-disk default and silently hid most of
+ * a multi-year archive (~100k+ segments) at wide zooms. Treat a stored 20000
+ * as "never customized" and lift it to the current default.
+ */
+const LEGACY_SEGMENT_CAP = 20000
+
+function upgradedSegmentCap(stored: number | undefined): number {
+  if (stored === undefined || stored === LEGACY_SEGMENT_CAP) {
+    return DEFAULT_SETTINGS.queryLimits.segments
+  }
+  return stored
 }
 
 export function settingsPath(userDataDir: string): string {
@@ -81,7 +95,7 @@ export function loadSettings(userDataDir: string): AppSettings {
         }
       },
       queryLimits: {
-        segments: parsed.queryLimits?.segments ?? DEFAULT_SETTINGS.queryLimits.segments,
+        segments: upgradedSegmentCap(parsed.queryLimits?.segments),
         waypoints: parsed.queryLimits?.waypoints ?? DEFAULT_SETTINGS.queryLimits.waypoints,
         points: parsed.queryLimits?.points ?? DEFAULT_SETTINGS.queryLimits.points
       }

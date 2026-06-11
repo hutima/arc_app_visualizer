@@ -42,8 +42,9 @@ function migrate(db: DatabaseSync): void {
   db.exec('BEGIN')
   try {
     db.exec(SCHEMA_SQL)
-    // v3: CREATE IF NOT EXISTS cannot add columns to pre-existing tables.
+    // v3/v4: CREATE IF NOT EXISTS cannot add columns to pre-existing tables.
     ensureColumn(db, 'categories', 'custom', 'custom INTEGER NOT NULL DEFAULT 0')
+    ensureColumn(db, 'categories', 'priority', 'priority INTEGER')
     seedCategories(db)
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     db.exec('COMMIT')

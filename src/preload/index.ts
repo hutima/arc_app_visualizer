@@ -15,6 +15,7 @@ const api: ArcApi = {
     ipcRenderer.invoke('categories:setVisible', name, visible),
   setCategoryColor: (name, color) =>
     ipcRenderer.invoke('categories:setColor', name, color),
+  setCategoryOrder: (names) => ipcRenderer.invoke('categories:setOrder', names),
   getSummary: () => ipcRenderer.invoke('summary:get'),
   getDataBounds: () => ipcRenderer.invoke('bounds:get'),
   getConfig: () => ipcRenderer.invoke('app:getConfig'),

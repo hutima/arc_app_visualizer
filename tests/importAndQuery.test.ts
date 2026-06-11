@@ -16,6 +16,7 @@ import {
   queryViewportWaypoints,
   getCategories,
   setCategoryColor,
+  setCategoryOrder,
   getSummary,
   getDataBounds,
   type ViewportSegmentRow
@@ -179,10 +180,18 @@ describe('viewport queries', () => {
     expect(waypoints.map((w) => w.name)).toContain('Synthetic Place Alpha')
   })
 
-  it('truncates and reports when the segment safety cap is hit', () => {
+  it('truncates biggest-geometry-first when the segment safety cap is hit', () => {
+    const full = queryViewportSegments(db, VIEWPORT_ALL, LIMITS).rows
     const { rows, truncated } = queryViewportSegments(db, VIEWPORT_ALL, { ...LIMITS, segments: 2 })
     expect(rows).toHaveLength(2)
     expect(truncated).toBe(true)
+    // The valve sheds point-dust, not whole eras: keeps the largest rows,
+    // deterministically (never an arbitrary chronological prefix).
+    const expected = [...full]
+      .sort((a, b) => b.point_count - a.point_count || a.id - b.id)
+      .slice(0, 2)
+      .map((r) => r.id)
+    expect(rows.map((r) => r.id)).toEqual(expected)
   })
 })
 
@@ -264,6 +273,22 @@ describe('data bounds', () => {
     expect(b).not.toBeNull()
     expect(b.maxLat).toBeLessThan(0.05) // metro spike (0.5) and lat=95 excluded
     expect(b.minLat).toBeGreaterThan(0)
+  })
+})
+
+describe('category draw order', () => {
+  it('persists an explicit type order ahead of prominence ordering', () => {
+    const activeNames = (): string[] =>
+      getCategories(db)
+        .filter((c) => !c.ignored && c.segmentCount > 0)
+        .map((c) => c.name)
+    const reversed = [...activeNames()].reverse()
+    setCategoryOrder(db, reversed)
+    expect(activeNames()).toEqual(reversed)
+    // Never-ordered categories (NULL priority) stay after the ordered ones.
+    const all = getCategories(db).filter((c) => !c.ignored)
+    const lastOrdered = Math.max(...reversed.map((n) => all.findIndex((c) => c.name === n)))
+    expect(lastOrdered).toBe(reversed.length - 1)
   })
 })
 
