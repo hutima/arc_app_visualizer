@@ -11,6 +11,8 @@ import { resolveDetail, type ResolvedDetail } from '../../shared/displayDetail'
 export interface ViewportSegmentRow {
   id: number
   type: string
+  /** Segment start time; drives year coloring. Null = undated. */
+  start_ts_ms: number | null
   point_count: number
   coords: Uint8Array
 }
@@ -99,7 +101,7 @@ function displayRows(
   segmentLimit: number
 ): { rows: ViewportSegmentRow[]; truncated: boolean } {
   const rows = db.prepare(`
-    SELECT s.id, s.type, d.point_count, d.coords
+    SELECT s.id, s.type, s.start_ts_ms, d.point_count, d.coords
     FROM segments s
     JOIN display_geometries d ON d.segment_id = s.id AND d.detail = ?
     WHERE ${VIEWPORT_WHERE}
@@ -121,11 +123,15 @@ function rawRows(
   segmentLimit: number
 ): { rows: ViewportSegmentRow[]; truncated: boolean } {
   const segs = db.prepare(`
-    SELECT s.id, s.type
+    SELECT s.id, s.type, s.start_ts_ms
     FROM segments s
     WHERE ${VIEWPORT_WHERE}
     LIMIT ?
-  `).all(...viewportParams(q), segmentLimit + 1) as unknown as Array<{ id: number; type: string }>
+  `).all(...viewportParams(q), segmentLimit + 1) as unknown as Array<{
+    id: number
+    type: string
+    start_ts_ms: number | null
+  }>
   const truncated = segs.length > segmentLimit
   if (truncated) segs.length = segmentLimit
 
@@ -146,6 +152,7 @@ function rawRows(
     rows.push({
       id: seg.id,
       type: seg.type,
+      start_ts_ms: seg.start_ts_ms,
       point_count: pts.length,
       coords: new Uint8Array(coords.buffer)
     })

@@ -5,6 +5,9 @@
  */
 import type { DetailMode, ResolvedDetail } from './displayDetail'
 
+/** Track line coloring: by activity type (default) or by calendar year. */
+export type TrackColorMode = 'type' | 'year'
+
 export interface CategoryInfo {
   name: string
   color: string

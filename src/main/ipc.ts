@@ -100,7 +100,8 @@ export function registerIpc(ctx: IpcContext): void {
         r.coords.byteOffset % 4 === 0
           ? new Float32Array(r.coords.buffer, r.coords.byteOffset, r.coords.byteLength / 4)
           : new Float32Array(r.coords.slice().buffer)
-      return { id: r.id, typeIndex: idx, coords }
+      const year = r.start_ts_ms == null ? 0 : new Date(r.start_ts_ms).getUTCFullYear()
+      return { id: r.id, typeIndex: idx, year, coords }
     })
     const buffer = encodeGeometry(typeTable, segments)
     const encodeMs = performance.now() - tEncode

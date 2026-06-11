@@ -6,22 +6,25 @@
  * state — the renderer decodes straight into Float32Array views.
  *
  * Layout (little-endian, every field 4-byte aligned):
- *   u32 magic 'ARC1' (0x41524331)
+ *   u32 magic 'ARC2' (0x41524332)
  *   u32 segmentCount
  *   u32 typeTableByteLength            (UTF-8 JSON string[], unpadded length)
  *   u8[typeTableByteLength]            (+ zero padding to a 4-byte boundary)
  *   repeat segmentCount times:
  *     u32 segmentId
  *     u32 typeIndex                    (into the type table)
+ *     u32 year                         (calendar year of segment start; 0 = undated)
  *     u32 pointCount
  *     f32[2 * pointCount]              (lon, lat pairs)
  */
 
-export const GEOM_MAGIC = 0x41524331
+export const GEOM_MAGIC = 0x41524332
 
 export interface EncodedSegment {
   id: number
   typeIndex: number
+  /** Calendar year of the segment's start timestamp; 0 when undated. */
+  year: number
   /** Interleaved [lon, lat, lon, lat, ...] */
   coords: Float32Array
 }
@@ -38,7 +41,7 @@ export function encodeGeometry(typeTable: string[], segments: EncodedSegment[]):
   const typeJson = new TextEncoder().encode(JSON.stringify(typeTable))
   const typeLenPadded = pad4(typeJson.byteLength)
   let total = 12 + typeLenPadded
-  for (const s of segments) total += 12 + s.coords.byteLength
+  for (const s of segments) total += 16 + s.coords.byteLength
 
   const buffer = new ArrayBuffer(total)
   const view = new DataView(buffer)
@@ -54,9 +57,10 @@ export function encodeGeometry(typeTable: string[], segments: EncodedSegment[]):
   for (const s of segments) {
     view.setUint32(offset, s.id, true)
     view.setUint32(offset + 4, s.typeIndex, true)
-    view.setUint32(offset + 8, s.coords.length / 2, true)
-    bytes.set(new Uint8Array(s.coords.buffer, s.coords.byteOffset, s.coords.byteLength), offset + 12)
-    offset += 12 + s.coords.byteLength
+    view.setUint32(offset + 8, s.year, true)
+    view.setUint32(offset + 12, s.coords.length / 2, true)
+    bytes.set(new Uint8Array(s.coords.buffer, s.coords.byteOffset, s.coords.byteLength), offset + 16)
+    offset += 16 + s.coords.byteLength
   }
   return buffer
 }
@@ -77,11 +81,12 @@ export function decodeGeometry(buffer: ArrayBuffer): DecodedGeometry {
   for (let i = 0; i < segmentCount; i++) {
     const id = view.getUint32(offset, true)
     const typeIndex = view.getUint32(offset + 4, true)
-    const pointCount = view.getUint32(offset + 8, true)
-    const coords = new Float32Array(buffer, offset + 12, pointCount * 2)
-    segments.push({ id, typeIndex, coords })
+    const year = view.getUint32(offset + 8, true)
+    const pointCount = view.getUint32(offset + 12, true)
+    const coords = new Float32Array(buffer, offset + 16, pointCount * 2)
+    segments.push({ id, typeIndex, year, coords })
     totalPoints += pointCount
-    offset += 12 + pointCount * 8
+    offset += 16 + pointCount * 8
   }
   return { typeTable, segments, totalPoints }
 }

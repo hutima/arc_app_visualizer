@@ -4,12 +4,14 @@ import type {
   CategoryInfo,
   DatasetSummary,
   ImportProgress,
-  ImportStats
+  ImportStats,
+  TrackColorMode
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
 import { MapController, type RenderStats } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
 import { CategoryPanel } from './components/CategoryPanel'
+import { ColorModeControl } from './components/ColorModeControl'
 import { DateFilter } from './components/DateFilter'
 import { DetailControl } from './components/DetailControl'
 import { StatsPanel } from './components/StatsPanel'
@@ -23,6 +25,7 @@ export function App(): React.JSX.Element {
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
   const [showWaypoints, setShowWaypoints] = useState(true)
   const [detailMode, setDetailMode] = useState<DetailMode>('auto')
+  const [colorMode, setColorMode] = useState<TrackColorMode>('type')
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
@@ -112,6 +115,11 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setDetailMode(mode)
   }, [])
 
+  const handleColorMode = useCallback((mode: TrackColorMode): void => {
+    setColorMode(mode)
+    controllerRef.current?.setColorMode(mode)
+  }, [])
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -124,6 +132,7 @@ export function App(): React.JSX.Element {
           onToggle={handleToggleCategory}
           onToggleWaypoints={handleToggleWaypoints}
         />
+        <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />
         <StatsPanel
           summary={summary}
