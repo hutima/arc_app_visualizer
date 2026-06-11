@@ -5,11 +5,16 @@
  */
 import type { DetailMode, ResolvedDetail } from './displayDetail'
 
+/** Track line coloring: by activity type (default) or by calendar year. */
+export type TrackColorMode = 'type' | 'year'
+
 export interface CategoryInfo {
   name: string
   color: string
   visible: boolean
   ignored: boolean
+  /** True when the user picked this color; exempt from palette refreshes. */
+  custom: boolean
   segmentCount: number
   pointCount: number
 }
@@ -58,6 +63,10 @@ export interface ViewportResultMeta {
   detail: ResolvedDetail
   /** 1 = full detail; k > 1 = lines thinned to every k-th vertex (endpoints kept). */
   downsampleStride: number
+  /** Places served to the map (after any spatial thinning). */
+  waypointCount: number
+  /** Distinct places matching the viewport (same-name visits merged), before thinning. */
+  waypointTotal: number
 }
 
 export interface ViewportResult {
@@ -103,7 +112,13 @@ export interface PerfEntry {
 }
 
 export interface AppConfig {
+  /** Style URL of the active theme. */
   basemapStyleUrl: string
+  basemapTheme: 'dark' | 'light'
+  /** Both theme styles, so the renderer can switch without a round trip. */
+  basemapStyles: { dark: string; light: string }
+  /** line-opacity applied to basemap road layers (1 = no dimming). */
+  roadDimOpacity: number
   dbPath: string
   settingsPath: string
 }
@@ -123,8 +138,12 @@ export interface ArcApi {
   queryViewport(q: ViewportQuery): Promise<ViewportResult>
   getCategories(): Promise<CategoryInfo[]>
   setCategoryVisible(name: string, visible: boolean): Promise<void>
+  /** Hex color from the picker; null reverts to the default palette color. */
+  setCategoryColor(name: string, color: string | null): Promise<void>
   getSummary(): Promise<DatasetSummary>
   getDataBounds(): Promise<DataBounds | null>
   getConfig(): Promise<AppConfig>
+  /** Persists the basemap theme choice to settings.json. */
+  setBasemapTheme(theme: 'dark' | 'light'): Promise<void>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
 }

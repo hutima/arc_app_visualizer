@@ -6,11 +6,14 @@ import type {
   ViewportQuery,
   ViewportWaypoint
 } from '../../shared/types'
+import { colorForCategory } from '../../shared/categories'
 import { resolveDetail, type ResolvedDetail } from '../../shared/displayDetail'
 
 export interface ViewportSegmentRow {
   id: number
   type: string
+  /** Segment start time; drives year coloring. Null = undated. */
+  start_ts_ms: number | null
   point_count: number
   coords: Uint8Array
 }
@@ -99,7 +102,7 @@ function displayRows(
   segmentLimit: number
 ): { rows: ViewportSegmentRow[]; truncated: boolean } {
   const rows = db.prepare(`
-    SELECT s.id, s.type, d.point_count, d.coords
+    SELECT s.id, s.type, s.start_ts_ms, d.point_count, d.coords
     FROM segments s
     JOIN display_geometries d ON d.segment_id = s.id AND d.detail = ?
     WHERE ${VIEWPORT_WHERE}
@@ -121,11 +124,15 @@ function rawRows(
   segmentLimit: number
 ): { rows: ViewportSegmentRow[]; truncated: boolean } {
   const segs = db.prepare(`
-    SELECT s.id, s.type
+    SELECT s.id, s.type, s.start_ts_ms
     FROM segments s
     WHERE ${VIEWPORT_WHERE}
     LIMIT ?
-  `).all(...viewportParams(q), segmentLimit + 1) as unknown as Array<{ id: number; type: string }>
+  `).all(...viewportParams(q), segmentLimit + 1) as unknown as Array<{
+    id: number
+    type: string
+    start_ts_ms: number | null
+  }>
   const truncated = segs.length > segmentLimit
   if (truncated) segs.length = segmentLimit
 
@@ -146,6 +153,7 @@ function rawRows(
     rows.push({
       id: seg.id,
       type: seg.type,
+      start_ts_ms: seg.start_ts_ms,
       point_count: pts.length,
       coords: new Uint8Array(coords.buffer)
     })
@@ -174,31 +182,143 @@ function decimateRow(row: ViewportSegmentRow, stride: number): void {
   row.coords = new Uint8Array(out.buffer)
 }
 
+export interface ViewportWaypointsResult {
+  waypoints: ViewportWaypoint[]
+  /** Distinct places matching the viewport (same-name visits merged), before thinning. */
+  totalCount: number
+}
+
+/**
+ * Waypoints (place visits) for the viewport, within a budget.
+ *
+ * Pipeline: bounds/time filter → merge repeat visits of the same named place
+ * into one averaged dot → if still over budget, thin spatially.
+ *
+ * Same philosophy as segment limiting: a visited area must never vanish just
+ * because the viewport got busy. Arc weekly exports re-list the same places
+ * every week, so multi-year datasets blow past any flat row cap; a bare LIMIT
+ * with no ORDER BY served the first rows in import order and silently dropped
+ * every region visited after the cap. Instead, when over budget, waypoints
+ * snap to a world-anchored grid with one representative (the most recent
+ * visit) per cell, coarsening the grid until the result fits.
+ */
 export function queryViewportWaypoints(
   db: DatabaseSync,
   q: ViewportQuery,
   limit: number
-): ViewportWaypoint[] {
-  const stmt = db.prepare(`
+): ViewportWaypointsResult {
+  const all = db.prepare(`
     SELECT id, lat, lon, ts_ms AS tsMs, name
     FROM waypoints
     WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
       AND (? IS NULL OR ts_ms IS NULL OR ts_ms >= ?)
       AND (? IS NULL OR ts_ms IS NULL OR ts_ms <= ?)
-    LIMIT ?
-  `)
-  return stmt.all(
+  `).all(
     q.minLat, q.maxLat,
     q.minLon, q.maxLon,
     q.startTsMs, q.startTsMs,
-    q.endTsMs, q.endTsMs,
-    limit
+    q.endTsMs, q.endTsMs
   ) as unknown as ViewportWaypoint[]
+  const merged = mergeSameNamePlaces(all)
+  if (limit <= 0) return { waypoints: [], totalCount: merged.length }
+  if (merged.length <= limit) return { waypoints: merged, totalCount: merged.length }
+  return { waypoints: thinWaypoints(merged, q, limit), totalCount: merged.length }
+}
+
+/** Same-name visits within this radius of each other merge (~275 m). */
+const PLACE_MERGE_RADIUS_DEG = 0.0025
+
+interface PlaceCluster {
+  latSum: number
+  lonSum: number
+  count: number
+  /** Most recent member; supplies the merged dot's id/tsMs. */
+  rep: ViewportWaypoint
+}
+
+/**
+ * Arc exports one waypoint per stay, so a well-visited place is hundreds of
+ * GPS-jittered dots. Merge same-name visits into a single dot at their mean
+ * location. Merging is per spatial cluster, not global per name: chain
+ * locations ("Starbucks" in two cities) keep separate dots instead of
+ * averaging into a phantom between them. Unnamed visits pass through as-is.
+ */
+function mergeSameNamePlaces(all: ViewportWaypoint[]): ViewportWaypoint[] {
+  const merged: ViewportWaypoint[] = []
+  const clustersByName = new Map<string, PlaceCluster[]>()
+  // id order ⇒ deterministic clustering regardless of scan order.
+  for (const w of [...all].sort((a, b) => a.id - b.id)) {
+    if (!w.name) {
+      merged.push(w)
+      continue
+    }
+    let clusters = clustersByName.get(w.name)
+    if (!clusters) clustersByName.set(w.name, (clusters = []))
+    const near = clusters.find((c) => {
+      const dLat = w.lat - c.latSum / c.count
+      const dLon = w.lon - c.lonSum / c.count
+      return dLat * dLat + dLon * dLon <= PLACE_MERGE_RADIUS_DEG ** 2
+    })
+    if (near) {
+      near.latSum += w.lat
+      near.lonSum += w.lon
+      near.count++
+      if (moreRecentVisit(w, near.rep)) near.rep = w
+    } else {
+      clusters.push({ latSum: w.lat, lonSum: w.lon, count: 1, rep: w })
+    }
+  }
+  for (const clusters of clustersByName.values()) {
+    for (const c of clusters) {
+      merged.push({
+        id: c.rep.id,
+        lat: c.latSum / c.count,
+        lon: c.lonSum / c.count,
+        tsMs: c.rep.tsMs,
+        name: c.rep.name
+      })
+    }
+  }
+  return merged
+}
+
+/**
+ * One waypoint per grid cell, coarsening until under budget. Cells are
+ * power-of-two fractions of the world (not viewport-relative), so surviving
+ * dots stay put while panning; within a cell the most recent visit wins
+ * (ties to the lowest id) — deterministic across refreshes.
+ */
+function thinWaypoints(
+  all: ViewportWaypoint[],
+  q: ViewportQuery,
+  limit: number
+): ViewportWaypoint[] {
+  const span = Math.max(q.maxLat - q.minLat, q.maxLon - q.minLon, 1e-9)
+  // Finest grid worth trying: ~256 cells across the viewport.
+  let k = Math.max(0, Math.floor(Math.log2((360 / span) * 256)))
+  for (;;) {
+    const cell = 360 / 2 ** k
+    const best = new Map<string, ViewportWaypoint>()
+    for (const w of all) {
+      const key = `${Math.floor(w.lat / cell)}:${Math.floor(w.lon / cell)}`
+      const cur = best.get(key)
+      if (!cur || moreRecentVisit(w, cur)) best.set(key, w)
+    }
+    if (best.size <= limit || k === 0) return [...best.values()]
+    k--
+  }
+}
+
+function moreRecentVisit(a: ViewportWaypoint, b: ViewportWaypoint): boolean {
+  const ta = a.tsMs ?? -Infinity
+  const tb = b.tsMs ?? -Infinity
+  if (ta !== tb) return ta > tb
+  return a.id < b.id
 }
 
 export function getCategories(db: DatabaseSync): CategoryInfo[] {
   const rows = db.prepare(`
-    SELECT c.name, c.color, c.visible, c.ignored,
+    SELECT c.name, c.color, c.visible, c.ignored, c.custom,
            COALESCE(s.segment_count, 0) AS segmentCount,
            COALESCE(s.point_count, 0) AS pointCount
     FROM categories c
@@ -212,6 +332,7 @@ export function getCategories(db: DatabaseSync): CategoryInfo[] {
     color: string
     visible: number
     ignored: number
+    custom: number
     segmentCount: number
     pointCount: number
   }>
@@ -220,6 +341,7 @@ export function getCategories(db: DatabaseSync): CategoryInfo[] {
     color: r.color,
     visible: r.visible === 1,
     ignored: r.ignored === 1,
+    custom: r.custom === 1,
     segmentCount: r.segmentCount,
     pointCount: r.pointCount
   }))
@@ -227,6 +349,20 @@ export function getCategories(db: DatabaseSync): CategoryInfo[] {
 
 export function setCategoryVisible(db: DatabaseSync, name: string, visible: boolean): void {
   db.prepare('UPDATE categories SET visible = ? WHERE name = ?').run(visible ? 1 : 0, name)
+}
+
+/**
+ * User-picked category color; null reverts to the default (curated palette
+ * or generated fallback) and re-enables automatic palette refreshes.
+ */
+export function setCategoryColor(db: DatabaseSync, name: string, color: string | null): void {
+  if (color === null) {
+    db.prepare('UPDATE categories SET color = ?, custom = 0 WHERE name = ?')
+      .run(colorForCategory(name), name)
+    return
+  }
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return // only plain hex from the picker
+  db.prepare('UPDATE categories SET color = ?, custom = 1 WHERE name = ?').run(color, name)
 }
 
 export function getSummary(db: DatabaseSync): DatasetSummary {

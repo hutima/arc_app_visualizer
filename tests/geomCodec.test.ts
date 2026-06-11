@@ -5,8 +5,8 @@ describe('geomCodec', () => {
   it('round-trips segments and the type table', () => {
     const typeTable = ['walking', 'métro 🚇'] // exercise multi-byte UTF-8
     const segments = [
-      { id: 1, typeIndex: 0, coords: new Float32Array([0.001, 0.002, 0.003, 0.004]) },
-      { id: 999999, typeIndex: 1, coords: new Float32Array([10.5, -20.25]) }
+      { id: 1, typeIndex: 0, year: 2024, coords: new Float32Array([0.001, 0.002, 0.003, 0.004]) },
+      { id: 999999, typeIndex: 1, year: 0, coords: new Float32Array([10.5, -20.25]) }
     ]
     const buffer = encodeGeometry(typeTable, segments)
     const decoded = decodeGeometry(buffer)
@@ -16,6 +16,8 @@ describe('geomCodec', () => {
     expect(decoded.totalPoints).toBe(3)
     expect(decoded.segments[0]!.id).toBe(1)
     expect(decoded.segments[0]!.typeIndex).toBe(0)
+    expect(decoded.segments[0]!.year).toBe(2024)
+    expect(decoded.segments[1]!.year).toBe(0) // undated
     expect([...decoded.segments[0]!.coords]).toEqual([
       new Float32Array([0.001])[0]!,
       new Float32Array([0.002])[0]!,
@@ -39,7 +41,7 @@ describe('geomCodec', () => {
   it('works with unaligned source views (copies survive)', () => {
     const typeTable = ['a']
     const coords = new Float32Array([1.5, 2.5, 3.5, 4.5])
-    const buffer = encodeGeometry(typeTable, [{ id: 7, typeIndex: 0, coords }])
+    const buffer = encodeGeometry(typeTable, [{ id: 7, typeIndex: 0, year: 2020, coords }])
     // Decoding must not depend on external alignment assumptions.
     const copy = buffer.slice(0)
     const decoded = decodeGeometry(copy)

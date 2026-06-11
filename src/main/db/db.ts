@@ -24,10 +24,13 @@ export function openDb(path: string): DatabaseSync {
 /**
  * The curated palette is code-owned: refresh previously seeded rows whenever
  * it changes, so existing databases pick up new colors on the next launch.
- * Categories the palette does not know keep their import-time generated color.
+ * Categories the palette does not know keep their import-time generated
+ * color, and user-customized colors (custom = 1) are never touched.
  */
 function syncKnownCategoryColors(db: DatabaseSync): void {
-  const update = db.prepare('UPDATE categories SET color = ? WHERE name = ? AND color <> ?')
+  const update = db.prepare(
+    'UPDATE categories SET color = ? WHERE name = ? AND color <> ? AND custom = 0'
+  )
   for (const [name, color] of Object.entries(KNOWN_CATEGORY_COLORS)) {
     update.run(color, name, color)
   }
@@ -39,12 +42,21 @@ function migrate(db: DatabaseSync): void {
   db.exec('BEGIN')
   try {
     db.exec(SCHEMA_SQL)
+    // v3: CREATE IF NOT EXISTS cannot add columns to pre-existing tables.
+    ensureColumn(db, 'categories', 'custom', 'custom INTEGER NOT NULL DEFAULT 0')
     seedCategories(db)
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
+  }
+}
+
+function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`)
   }
 }
 

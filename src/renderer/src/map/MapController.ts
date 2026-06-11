@@ -17,8 +17,9 @@ import type {
 import type { Feature, FeatureCollection } from 'geojson'
 import { decodeGeometry } from '../../../shared/geomCodec'
 import { WAYPOINT_COLOR } from '../../../shared/categories'
+import { colorForYear, UNDATED_YEAR_COLOR } from '../../../shared/yearColors'
 import type { DetailMode } from '../../../shared/displayDetail'
-import type { CategoryInfo, ViewportResultMeta } from '../../../shared/types'
+import type { CategoryInfo, TrackColorMode, ViewportResultMeta } from '../../../shared/types'
 
 export interface RenderStats extends ViewportResultMeta {
   decodeMs: number
@@ -62,6 +63,10 @@ export class MapController {
   private categories: CategoryInfo[] = []
   private showWaypoints = true
   private detailMode: DetailMode = 'auto'
+  private colorMode: TrackColorMode = 'type'
+  /** Distinct years among segments of the last refresh (0 = undated). */
+  private yearsInView: number[] = []
+  private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
   private destroyed = false
@@ -70,18 +75,21 @@ export class MapController {
   static async create(
     container: HTMLElement,
     basemapStyleUrl: string,
+    roadDimOpacity: number,
     onStats: (s: RenderStats) => void
   ): Promise<MapController> {
     const style = await resolveStyle(basemapStyleUrl)
-    return new MapController(container, style, onStats)
+    return new MapController(container, style, roadDimOpacity, onStats)
   }
 
   private constructor(
     container: HTMLElement,
     style: StyleSpecification | string,
+    roadDimOpacity: number,
     onStats: (s: RenderStats) => void
   ) {
     this.onStats = onStats
+    this.roadDimOpacity = roadDimOpacity
     this.map = new maplibregl.Map({
       container,
       style,
@@ -93,9 +101,42 @@ export class MapController {
 
     this.map.on('load', () => {
       this.addSourcesAndLayers()
+      this.dimBasemapRoads()
       void this.refreshNow()
     })
     this.map.on('moveend', () => this.scheduleRefresh())
+  }
+
+  /** Swap the basemap style, then re-add our sources/layers on top of it. */
+  async setBasemap(styleUrl: string): Promise<void> {
+    const style = await resolveStyle(styleUrl)
+    if (this.destroyed) return
+    this.map.setStyle(style)
+    this.map.once('styledata', () => {
+      if (this.destroyed) return
+      this.addSourcesAndLayers()
+      this.dimBasemapRoads()
+      void this.refreshNow()
+    })
+  }
+
+  /**
+   * Streets in the stock Carto styles are bright enough to compete with
+   * tracks. Both carto themes are OpenMapTiles schemas, so dim every line
+   * layer of the `transportation` source-layer; a no-op for styles that
+   * organize roads differently (and for the offline fallback).
+   */
+  private dimBasemapRoads(): void {
+    if (this.roadDimOpacity >= 1) return
+    for (const layer of this.map.getStyle().layers ?? []) {
+      if (layer.type !== 'line') continue
+      if (!('source-layer' in layer) || layer['source-layer'] !== 'transportation') continue
+      try {
+        this.map.setPaintProperty(layer.id, 'line-opacity', this.roadDimOpacity)
+      } catch {
+        // Defensive: never let one odd basemap layer break the app.
+      }
+    }
   }
 
   destroy(): void {
@@ -105,6 +146,7 @@ export class MapController {
   }
 
   private addSourcesAndLayers(): void {
+    if (this.map.getSource(TRACKS_SOURCE)) return // already present (theme re-add)
     this.map.addSource(TRACKS_SOURCE, { type: 'geojson', data: EMPTY_FC })
     this.map.addSource(PLACES_SOURCE, { type: 'geojson', data: EMPTY_FC })
 
@@ -148,6 +190,15 @@ export class MapController {
   }
 
   private colorExpression(): ExpressionSpecification | string {
+    if (this.colorMode === 'year') {
+      if (this.yearsInView.length === 0) return UNDATED_YEAR_COLOR
+      const expr: unknown[] = ['match', ['get', 'year']]
+      for (const y of this.yearsInView) {
+        expr.push(y, colorForYear(y))
+      }
+      expr.push(UNDATED_YEAR_COLOR)
+      return expr as unknown as ExpressionSpecification
+    }
     if (this.categories.length === 0) return '#888888'
     const expr: unknown[] = ['match', ['get', 'type']]
     for (const c of this.categories) {
@@ -198,6 +249,14 @@ export class MapController {
     this.scheduleRefresh(0)
   }
 
+  /** Pure repaint — year is already in feature properties, no re-query. */
+  setColorMode(mode: TrackColorMode): void {
+    if (mode === this.colorMode) return
+    this.colorMode = mode
+    if (!this.map.isStyleLoaded() || !this.map.getLayer(TRACKS_LAYER)) return
+    this.map.setPaintProperty(TRACKS_LAYER, 'line-color', this.colorExpression())
+  }
+
   async fitToData(): Promise<void> {
     const b = await window.api.getDataBounds()
     if (!b || this.destroyed) return
@@ -238,18 +297,21 @@ export class MapController {
 
     const tDecode = performance.now()
     const decoded = decodeGeometry(result.buffer)
+    const years = new Set<number>()
     const features: Feature[] = decoded.segments.map((s) => {
       const coordinates: number[][] = new Array(s.coords.length / 2)
       for (let i = 0; i < coordinates.length; i++) {
         coordinates[i] = [s.coords[i * 2]!, s.coords[i * 2 + 1]!]
       }
+      years.add(s.year)
       return {
         type: 'Feature',
         id: s.id,
-        properties: { type: decoded.typeTable[s.typeIndex]! },
+        properties: { type: decoded.typeTable[s.typeIndex]!, year: s.year },
         geometry: { type: 'LineString', coordinates }
       }
     })
+    this.yearsInView = [...years].sort((a, b) => a - b)
     const placeFeatures: Feature[] = result.waypoints.map((w) => ({
       type: 'Feature',
       id: w.id,
@@ -263,6 +325,10 @@ export class MapController {
     const placesSource = this.map.getSource(PLACES_SOURCE) as GeoJSONSource | undefined
     tracksSource?.setData({ type: 'FeatureCollection', features })
     placesSource?.setData({ type: 'FeatureCollection', features: placeFeatures })
+    // Year mode's match expression depends on the years now in view.
+    if (this.colorMode === 'year' && this.map.getLayer(TRACKS_LAYER)) {
+      this.map.setPaintProperty(TRACKS_LAYER, 'line-color', this.colorExpression())
+    }
 
     this.map.once('idle', () => {
       if (this.destroyed) return

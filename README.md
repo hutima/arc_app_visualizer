@@ -84,13 +84,28 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   (`queryLimits.points` in `settings.json`, default 300k), auto mode steps to
   a coarser level and lines are **evenly thinned (endpoints kept)** — routes
   are never silently dropped to satisfy the budget.
-- Renders with MapLibre GL on a dark basemap, one color per activity type,
-  grouped by mode family so similar transit looks similar: car/taxi share the
-  taxi-yellow family (motorcycle/scooter in oranges), bus joins the
-  violet→pink mass-transit family with metro/tram/train, boat is blue, and
-  airplane has red to itself. Unknown types get stable generated colors.
+- Renders with MapLibre GL on a dark or light basemap (sidebar selector,
+  persisted in `settings.json`); basemap streets are dimmed
+  (`roadDimOpacity`, default 0.35, `1` disables) so they never compete with
+  tracks. One color per activity type,
+  grouped by mode family so similar transit looks similar: motorcycle/scooter
+  in warm oranges, bus joins the violet→pink mass-transit family with
+  metro/tram/train, boat and kayaking share the blues, and airplane has red
+  to itself. Car and taxi are deliberately **light grey** — visually
+  de-emphasized as the least environmentally friendly modes. Unknown types
+  get stable generated colors.
   Arc's `bogus` category is imported but ignored/hidden by default.
-- Waypoints (Arc "visits") render as dots, toggleable like any type.
+- **Color tracks by year** instead of type (sidebar toggle): each calendar
+  year gets a stable golden-angle hue with a legend; type checkboxes still
+  filter what shows. Click any type's **color swatch** to pick a custom
+  color (persisted across launches; ↺ reverts to the default).
+- Waypoints (Arc "visits") render as dots, toggleable like any type. Repeat
+  visits of the same named place merge into **one dot at their average
+  location** (per locality — chain names in different cities stay separate).
+  Over the waypoint budget (`queryLimits.waypoints`, default 5k) places are
+  additionally **spatially thinned** — one dot per grid cell, most recent
+  visit wins — so every visited area stays represented; the sidebar shows
+  `N of M places` when thinning.
 - Viewport-aware: only segments intersecting the (padded) visible bounds and
   active date range are queried and shipped to the GPU, as one compact
   binary buffer rather than a giant GeoJSON clone.

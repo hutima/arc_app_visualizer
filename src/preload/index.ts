@@ -13,9 +13,12 @@ const api: ArcApi = {
   getCategories: () => ipcRenderer.invoke('categories:get'),
   setCategoryVisible: (name, visible) =>
     ipcRenderer.invoke('categories:setVisible', name, visible),
+  setCategoryColor: (name, color) =>
+    ipcRenderer.invoke('categories:setColor', name, color),
   getSummary: () => ipcRenderer.invoke('summary:get'),
   getDataBounds: () => ipcRenderer.invoke('bounds:get'),
   getConfig: () => ipcRenderer.invoke('app:getConfig'),
+  setBasemapTheme: (theme) => ipcRenderer.invoke('settings:setBasemapTheme', theme),
   getRecentPerf: (limit) => ipcRenderer.invoke('perf:recent', limit)
 }
 

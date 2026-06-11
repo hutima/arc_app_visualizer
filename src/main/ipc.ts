@@ -7,13 +7,14 @@ import {
   queryViewportWaypoints,
   getCategories,
   setCategoryVisible,
+  setCategoryColor,
   getSummary,
   getDataBounds,
   getRecentPerf,
   insertPerf
 } from './db/queries'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
-import type { AppSettings } from './settings'
+import { saveSettings, type AppSettings } from './settings'
 import type { ImportProgress, ViewportQuery, ViewportResult } from '../shared/types'
 
 export interface IpcContext {
@@ -80,7 +81,7 @@ export function registerIpc(ctx: IpcContext): void {
     const { rows, truncated, detail, downsampleStride } = queryViewportSegments(
       ctx.db, q, ctx.settings.queryLimits
     )
-    const waypoints = queryViewportWaypoints(ctx.db, q, ctx.settings.queryLimits.waypoints)
+    const wp = queryViewportWaypoints(ctx.db, q, ctx.settings.queryLimits.waypoints)
     const queryMs = performance.now() - t0
 
     const tEncode = performance.now()
@@ -100,19 +101,21 @@ export function registerIpc(ctx: IpcContext): void {
         r.coords.byteOffset % 4 === 0
           ? new Float32Array(r.coords.buffer, r.coords.byteOffset, r.coords.byteLength / 4)
           : new Float32Array(r.coords.slice().buffer)
-      return { id: r.id, typeIndex: idx, coords }
+      const year = r.start_ts_ms == null ? 0 : new Date(r.start_ts_ms).getUTCFullYear()
+      return { id: r.id, typeIndex: idx, year, coords }
     })
     const buffer = encodeGeometry(typeTable, segments)
     const encodeMs = performance.now() - tEncode
 
     insertPerf(
       ctx.db, 'query.viewport', queryMs,
-      `segments=${rows.length} points=${pointCount} detail=${detail} stride=${downsampleStride}`
+      `segments=${rows.length} points=${pointCount} detail=${detail} stride=${downsampleStride}` +
+        ` places=${wp.waypoints.length}/${wp.totalCount}`
     )
 
     return {
       buffer,
-      waypoints,
+      waypoints: wp.waypoints,
       meta: {
         segmentCount: rows.length,
         pointCount,
@@ -120,7 +123,9 @@ export function registerIpc(ctx: IpcContext): void {
         encodeMs,
         truncated,
         detail,
-        downsampleStride
+        downsampleStride,
+        waypointCount: wp.waypoints.length,
+        waypointTotal: wp.totalCount
       }
     }
   })
@@ -129,12 +134,28 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('categories:setVisible', (_e, name: string, visible: boolean) => {
     setCategoryVisible(ctx.db, name, visible)
   })
+  ipcMain.handle('categories:setColor', (_e, name: string, color: string | null) => {
+    setCategoryColor(ctx.db, name, color)
+  })
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
   ipcMain.handle('perf:recent', (_e, limit: number) => getRecentPerf(ctx.db, Math.min(limit, 200)))
   ipcMain.handle('app:getConfig', () => ({
-    basemapStyleUrl: ctx.settings.basemapStyleUrl,
+    basemapStyleUrl:
+      ctx.settings.basemapTheme === 'light'
+        ? ctx.settings.basemapStyleUrlLight
+        : ctx.settings.basemapStyleUrl,
+    basemapTheme: ctx.settings.basemapTheme,
+    basemapStyles: {
+      dark: ctx.settings.basemapStyleUrl,
+      light: ctx.settings.basemapStyleUrlLight
+    },
+    roadDimOpacity: ctx.settings.roadDimOpacity,
     dbPath: ctx.dbPath,
     settingsPath: ctx.settingsPath
   }))
+  ipcMain.handle('settings:setBasemapTheme', (_e, theme: 'dark' | 'light') => {
+    ctx.settings.basemapTheme = theme === 'light' ? 'light' : 'dark'
+    saveSettings(ctx.settingsPath, ctx.settings)
+  })
 }

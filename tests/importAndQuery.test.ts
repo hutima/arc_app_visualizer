@@ -15,6 +15,7 @@ import {
   queryViewportSegments,
   queryViewportWaypoints,
   getCategories,
+  setCategoryColor,
   getSummary,
   getDataBounds,
   type ViewportSegmentRow
@@ -172,9 +173,10 @@ describe('viewport queries', () => {
   })
 
   it('returns waypoints in the viewport', () => {
-    const wpts = queryViewportWaypoints(db, VIEWPORT_ALL, 100)
-    expect(wpts).toHaveLength(3)
-    expect(wpts.map((w) => w.name)).toContain('Synthetic Place Alpha')
+    const { waypoints, totalCount } = queryViewportWaypoints(db, VIEWPORT_ALL, 100)
+    expect(waypoints).toHaveLength(3)
+    expect(totalCount).toBe(3)
+    expect(waypoints.map((w) => w.name)).toContain('Synthetic Place Alpha')
   })
 
   it('truncates and reports when the segment safety cap is hit', () => {
@@ -267,9 +269,12 @@ describe('data bounds', () => {
 
 // Keep last: reopens the shared db handle.
 describe('category colors', () => {
-  it('groups mode families: car beside taxi, bus with transit, airplane unique', () => {
+  it('mode family colors: car+taxi de-emphasized grey, kayaking with boat, airplane unique', () => {
     const cats = new Map(getCategories(db).map((c) => [c.name, c.color]))
     expect(cats.get('car')).toBe(KNOWN_CATEGORY_COLORS.car)
+    expect(KNOWN_CATEGORY_COLORS.car).toBe('#d1d5db') // eco de-emphasis: grey, not warm
+    expect(KNOWN_CATEGORY_COLORS.taxi).toBe('#cbd5e1') // grey family beside car
+    expect(KNOWN_CATEGORY_COLORS.kayaking).toBe('#7dd3fc') // water family beside boat
     expect(cats.get('bus')).toBe(KNOWN_CATEGORY_COLORS.bus)
     // Airplane's red is reserved: no other known category may use it.
     const reds = Object.entries(KNOWN_CATEGORY_COLORS)
@@ -289,5 +294,26 @@ describe('category colors', () => {
     db = openDb(dbPath)
     const car = getCategories(db).find((c) => c.name === 'car')
     expect(car?.color).toBe(KNOWN_CATEGORY_COLORS.car)
+  })
+
+  it('keeps user-customized colors across reopen, and reset restores the default', () => {
+    setCategoryColor(db, 'car', '#123abc')
+    db.close()
+    db = openDb(dbPath) // palette refresh must not clobber a custom color
+    let car = getCategories(db).find((c) => c.name === 'car')!
+    expect(car.color).toBe('#123abc')
+    expect(car.custom).toBe(true)
+
+    setCategoryColor(db, 'car', null)
+    car = getCategories(db).find((c) => c.name === 'car')!
+    expect(car.color).toBe(KNOWN_CATEGORY_COLORS.car)
+    expect(car.custom).toBe(false)
+  })
+
+  it('rejects malformed colors (picker only ever sends hex)', () => {
+    setCategoryColor(db, 'car', 'red; DROP TABLE categories')
+    expect(getCategories(db).find((c) => c.name === 'car')!.color).toBe(
+      KNOWN_CATEGORY_COLORS.car
+    )
   })
 })

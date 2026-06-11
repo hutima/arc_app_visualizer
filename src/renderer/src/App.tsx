@@ -4,12 +4,16 @@ import type {
   CategoryInfo,
   DatasetSummary,
   ImportProgress,
-  ImportStats
+  ImportStats,
+  TrackColorMode
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
+import { colorForCategory } from '../../shared/categories'
 import { MapController, type RenderStats } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
+import { BasemapControl } from './components/BasemapControl'
 import { CategoryPanel } from './components/CategoryPanel'
+import { ColorModeControl } from './components/ColorModeControl'
 import { DateFilter } from './components/DateFilter'
 import { DetailControl } from './components/DetailControl'
 import { StatsPanel } from './components/StatsPanel'
@@ -23,6 +27,7 @@ export function App(): React.JSX.Element {
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
   const [showWaypoints, setShowWaypoints] = useState(true)
   const [detailMode, setDetailMode] = useState<DetailMode>('auto')
+  const [colorMode, setColorMode] = useState<TrackColorMode>('type')
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
@@ -47,6 +52,7 @@ export function App(): React.JSX.Element {
       const controller = await MapController.create(
         mapDivRef.current,
         cfg.basemapStyleUrl,
+        cfg.roadDimOpacity,
         (s) => setRenderStats(s)
       )
       if (disposed) {
@@ -102,6 +108,20 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setDateRange(startTsMs, endTsMs)
   }, [])
 
+  // Optimistic: the default color is derivable locally via colorForCategory.
+  const handleColorChange = useCallback((name: string, color: string | null): void => {
+    setCategories((prev) => {
+      const next = prev.map((c) =>
+        c.name === name
+          ? { ...c, color: color ?? colorForCategory(name), custom: color !== null }
+          : c
+      )
+      controllerRef.current?.setCategories(next)
+      return next
+    })
+    void window.api.setCategoryColor(name, color)
+  }, [])
+
   const handleToggleWaypoints = useCallback((show: boolean): void => {
     setShowWaypoints(show)
     controllerRef.current?.setShowWaypoints(show)
@@ -110,6 +130,20 @@ export function App(): React.JSX.Element {
   const handleDetailMode = useCallback((mode: DetailMode): void => {
     setDetailMode(mode)
     controllerRef.current?.setDetailMode(mode)
+  }, [])
+
+  const handleColorMode = useCallback((mode: TrackColorMode): void => {
+    setColorMode(mode)
+    controllerRef.current?.setColorMode(mode)
+  }, [])
+
+  const handleBasemapTheme = useCallback((theme: 'dark' | 'light'): void => {
+    setConfig((prev) => {
+      if (!prev) return prev
+      void controllerRef.current?.setBasemap(prev.basemapStyles[theme])
+      return { ...prev, basemapTheme: theme, basemapStyleUrl: prev.basemapStyles[theme] }
+    })
+    void window.api.setBasemapTheme(theme)
   }, [])
 
   return (
@@ -123,8 +157,11 @@ export function App(): React.JSX.Element {
           showWaypoints={showWaypoints}
           onToggle={handleToggleCategory}
           onToggleWaypoints={handleToggleWaypoints}
+          onColorChange={handleColorChange}
         />
+        <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />
+        {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
         <StatsPanel
           summary={summary}
           lastImport={lastImport}
