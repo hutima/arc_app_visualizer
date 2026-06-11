@@ -45,6 +45,18 @@ export interface ViewportQuery {
    * places into one consensus track (display-only).
    */
   averageRail?: boolean
+  /**
+   * Cleaning toggle: snap rail rides onto the fetched OSM rail network,
+   * routing through tunnel gaps (display-only; needs a fetched network).
+   */
+  snapRail?: boolean
+}
+
+export interface RailCoverage {
+  bbox: { minLat: number; minLon: number; maxLat: number; maxLon: number }
+  fetchedAtMs: number
+  nodeCount: number
+  edgeCount: number
 }
 
 export interface ViewportWaypoint {
@@ -74,6 +86,8 @@ export interface ViewportResultMeta {
   waypointTotal: number
   /** Rail segments collapsed into averaged consensus tracks (0 = off/none). */
   railAveraged: number
+  /** Rail segments snapped to the OSM network (0 = off/no coverage). */
+  railSnapped: number
 }
 
 export interface ViewportResult {
@@ -156,5 +170,8 @@ export interface ArcApi {
   setBasemapTheme(theme: 'dark' | 'light'): Promise<void>
   /** Saves a rendered map frame; the user picks the destination. */
   exportMapPng(dataUrl: string): Promise<{ saved: boolean; path?: string }>
+  /** One-time OSM rail fetch over the data's extent; stored for offline snap. */
+  fetchRailNetwork(): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
+  getRailCoverage(): Promise<RailCoverage | null>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
 }

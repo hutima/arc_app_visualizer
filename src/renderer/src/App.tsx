@@ -8,6 +8,7 @@ import type {
   TrackColorMode
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
+import type { RailCoverage } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { yearRange } from '../../shared/yearColors'
 import { MapController, type RenderStats } from './map/MapController'
@@ -31,6 +32,10 @@ export function App(): React.JSX.Element {
   const [detailMode, setDetailMode] = useState<DetailMode>('auto')
   const [colorMode, setColorMode] = useState<TrackColorMode>('type')
   const [averageRail, setAverageRail] = useState(false)
+  const [snapRail, setSnapRail] = useState(false)
+  const [railCoverage, setRailCoverage] = useState<RailCoverage | null>(null)
+  const [railFetching, setRailFetching] = useState(false)
+  const [railError, setRailError] = useState<string | null>(null)
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
@@ -64,6 +69,9 @@ export function App(): React.JSX.Element {
       }
       controllerRef.current = controller
       await refreshData()
+      void window.api.getRailCoverage().then((cov) => {
+        if (!disposed) setRailCoverage(cov)
+      })
       const sum = await window.api.getSummary()
       if (!disposed && sum.pointCount > 0) {
         hadDataOnLoadRef.current = true
@@ -182,6 +190,26 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setAverageRail(on)
   }, [])
 
+  const handleSnapRail = useCallback((on: boolean): void => {
+    setSnapRail(on)
+    controllerRef.current?.setSnapRail(on)
+  }, [])
+
+  const handleFetchRail = useCallback((): void => {
+    setRailFetching(true)
+    setRailError(null)
+    void window.api.fetchRailNetwork().then((res) => {
+      setRailFetching(false)
+      if (res.ok && res.coverage) {
+        setRailCoverage(res.coverage)
+        setSnapRail(true)
+        controllerRef.current?.setSnapRail(true) // show the result immediately
+      } else {
+        setRailError(res.error ?? 'rail fetch failed')
+      }
+    })
+  }, [])
+
   const handleBasemapTheme = useCallback((theme: 'dark' | 'light'): void => {
     setConfig((prev) => {
       if (!prev) return prev
@@ -208,7 +236,16 @@ export function App(): React.JSX.Element {
         />
         <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />
-        <CleaningControl averageRail={averageRail} onChange={handleAverageRail} />
+        <CleaningControl
+          averageRail={averageRail}
+          snapRail={snapRail}
+          railCoverage={railCoverage}
+          railFetching={railFetching}
+          railError={railError}
+          onChangeAverage={handleAverageRail}
+          onChangeSnap={handleSnapRail}
+          onFetchRail={handleFetchRail}
+        />
         {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
         <StatsPanel
           summary={summary}

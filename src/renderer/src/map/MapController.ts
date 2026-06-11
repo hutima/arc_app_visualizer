@@ -69,6 +69,7 @@ export class MapController {
   /** Dataset year span [min, max] driving the gradient; null until known. */
   private yearExtent: [number, number] | null = null
   private averageRail = false
+  private snapRail = false
   private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
@@ -281,6 +282,12 @@ export class MapController {
     this.scheduleRefresh(0)
   }
 
+  setSnapRail(on: boolean): void {
+    if (on === this.snapRail) return
+    this.snapRail = on
+    this.scheduleRefresh(0)
+  }
+
   /** Pure repaint — year is already in feature properties, no re-query. */
   setColorMode(mode: TrackColorMode): void {
     if (mode === this.colorMode) return
@@ -339,7 +346,8 @@ export class MapController {
       startTsMs: this.startTsMs,
       endTsMs: this.endTsMs,
       detailMode: this.detailMode,
-      averageRail: this.averageRail
+      averageRail: this.averageRail,
+      snapRail: this.snapRail
     })
     // A newer query superseded this one while we awaited.
     if (token !== this.queryToken || this.destroyed) return

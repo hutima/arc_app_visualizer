@@ -43,6 +43,7 @@ export function StatsPanel({ summary, lastImport, renderStats, config }: Props):
           {renderStats.detail === 'raw' ? 'raw (all points)' : renderStats.detail}
           {renderStats.downsampleStride > 1 ? `, thinned ×${renderStats.downsampleStride}` : ''}
           {renderStats.truncated ? ' (truncated)' : ''}
+          {renderStats.railSnapped > 0 ? `, ${renderStats.railSnapped} rides snapped` : ''}
           {renderStats.railAveraged > 0 ? `, ${renderStats.railAveraged} rides averaged` : ''} /{' '}
           {renderStats.waypointCount.toLocaleString()}
           {renderStats.waypointTotal > renderStats.waypointCount

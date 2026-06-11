@@ -20,6 +20,8 @@ const api: ArcApi = {
   getDataBounds: () => ipcRenderer.invoke('bounds:get'),
   getConfig: () => ipcRenderer.invoke('app:getConfig'),
   setBasemapTheme: (theme) => ipcRenderer.invoke('settings:setBasemapTheme', theme),
+  fetchRailNetwork: () => ipcRenderer.invoke('rail:fetch'),
+  getRailCoverage: () => ipcRenderer.invoke('rail:coverage'),
   exportMapPng: (dataUrl) => ipcRenderer.invoke('export:png', dataUrl),
   getRecentPerf: (limit) => ipcRenderer.invoke('perf:recent', limit)
 }

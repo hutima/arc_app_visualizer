@@ -223,6 +223,12 @@ button:disabled {
   opacity: 0.45;
 }
 
+.cleaning-divider {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
 .color-mode-row {
   display: flex;
   gap: 14px;
