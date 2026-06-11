@@ -92,6 +92,7 @@ export function registerIpc(ctx: IpcContext): void {
     // rail rides — snapped rides already coincide on the real alignment.
     let rows = queried.rows
     let railSnapped = 0
+    let railRides = 0
     if (q.snapRail) {
       const net = loadRailForViewport(ctx.db, q)
       if (net.edges.length > 0) {
@@ -105,6 +106,7 @@ export function registerIpc(ctx: IpcContext): void {
         const result = snapRailTracks(rows, buildRailGraph(net.nodes, net.edges), isCovered)
         rows = result.rows
         railSnapped = result.snapped
+        railRides = result.railRides
       }
     }
     const rail = q.averageRail
@@ -139,7 +141,8 @@ export function registerIpc(ctx: IpcContext): void {
     insertPerf(
       ctx.db, 'query.viewport', queryMs,
       `segments=${rows.length} points=${pointCount} detail=${detail} stride=${downsampleStride}` +
-        ` places=${wp.waypoints.length}/${wp.totalCount} railAvg=${rail.collapsed} railSnap=${railSnapped}`
+        ` places=${wp.waypoints.length}/${wp.totalCount} railAvg=${rail.collapsed}` +
+        ` railSnap=${railSnapped}/${railRides}`
     )
 
     return {
@@ -156,7 +159,8 @@ export function registerIpc(ctx: IpcContext): void {
         waypointCount: wp.waypoints.length,
         waypointTotal: wp.totalCount,
         railAveraged: rail.collapsed,
-        railSnapped
+        railSnapped,
+        railRides
       }
     }
   })

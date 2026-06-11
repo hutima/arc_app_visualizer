@@ -8,12 +8,15 @@
  * with the real alignment, and making every repeat ride coincide (the smear
  * collapses without merging identities).
  *
- * v1 is a greedy node matcher: snap each ride vertex to the nearest rail node,
- * then Dijkstra between consecutive anchors to bridge gaps (tunnels). A ride
- * that can't be matched confidently (too far from rail, or a hop that won't
- * route sanely) is left untouched. Raw points are never modified — this runs
- * on display geometry per viewport query. A full HMM matcher can replace the
- * greedy core later without changing the call sites.
+ * v1 is a greedy matcher: anchor each ride vertex to the nearest rail *edge*
+ * (point-to-segment distance — OSM nodes are sparse on straight track, so
+ * node distance alone misses most of the network), then Dijkstra between
+ * consecutive anchors to bridge gaps (tunnels). A hop that won't route but
+ * spans only a few meters (parallel-track ping-pong) is bridged straight; a
+ * ride that can't be matched confidently (too far from rail, or a long hop
+ * that won't route) is left untouched. Raw points are never modified — this
+ * runs on display geometry per viewport query. A full HMM matcher can
+ * replace the greedy core later without changing the call sites.
  */
 import type { ViewportSegmentRow } from '../db/queries'
 
@@ -30,19 +33,27 @@ export interface RailEdgeInput {
   b: number
 }
 
-/** Snap a ride vertex to rail within ~70 m. */
-const SNAP_RADIUS_DEG = 6.5e-4
+/** Snap a ride vertex to rail within ~100 m (of the track, not just nodes). */
+const SNAP_RADIUS_DEG = 9e-4
 /** A routed hop may be at most this multiple of the straight anchor distance… */
 const GAP_FACTOR = 4
 /** …plus this slack (~330 m), so short hops aren't over-constrained. */
 const GAP_SLACK_DEG = 3e-3
-/** Give up on a ride unless at least this fraction of its vertices matched. */
-const MIN_MATCH_FRACTION = 0.55
+/**
+ * An unroutable hop no longer than this (~150 m) is bridged straight instead
+ * of failing the run: adjacent parallel tracks (one way per direction) make
+ * noisy anchors ping-pong across rails whose connecting crossover is far away.
+ */
+const SOFT_BRIDGE_DEG = 1.4e-3
+/** Give up on a run unless at least this fraction of its vertices matched. */
+const MIN_MATCH_FRACTION = 0.5
 
 export interface RailGraph {
   /** Projected coords keyed by node id: X = lon·cos(refLat), Y = lat. */
   pos: Map<number, { x: number; y: number; lon: number; lat: number }>
   adj: Map<number, Array<{ to: number; w: number }>>
+  /** Edges with both endpoints present; `grid` buckets hold indices into it. */
+  edges: RailEdgeInput[]
   grid: Map<string, number[]>
   cell: number
   refCos: number
@@ -51,10 +62,10 @@ export interface RailGraph {
 
 const cellKey = (cx: number, cy: number): string => `${cx}:${cy}`
 
-/** Build the routing graph + node spatial index from OSM nodes and edges. */
+/** Build the routing graph + edge spatial index from OSM nodes and edges. */
 export function buildRailGraph(nodes: RailNodeInput[], edges: RailEdgeInput[]): RailGraph {
   if (nodes.length === 0) {
-    return { pos: new Map(), adj: new Map(), grid: new Map(), cell: SNAP_RADIUS_DEG, refCos: 1, empty: true }
+    return { pos: new Map(), adj: new Map(), edges: [], grid: new Map(), cell: SNAP_RADIUS_DEG, refCos: 1, empty: true }
   }
   let latSum = 0
   for (const n of nodes) latSum += n.lat
@@ -71,6 +82,7 @@ export function buildRailGraph(nodes: RailNodeInput[], edges: RailEdgeInput[]): 
     if (!list) adj.set(a, (list = []))
     list.push({ to: b, w })
   }
+  const kept: RailEdgeInput[] = []
   for (const e of edges) {
     const pa = pos.get(e.a)
     const pb = pos.get(e.b)
@@ -78,21 +90,40 @@ export function buildRailGraph(nodes: RailNodeInput[], edges: RailEdgeInput[]): 
     const w = Math.hypot(pa.x - pb.x, pa.y - pb.y)
     link(e.a, e.b, w)
     link(e.b, e.a, w)
+    kept.push(e)
   }
 
-  // Index nodes into a grid sized so a 3×3 neighborhood covers the snap radius.
+  // Index edges into a grid sized so a 3×3 neighborhood covers the snap
+  // radius: an edge is registered in every cell its bbox touches, so any
+  // segment passing within the radius of a vertex is found.
   const cell = SNAP_RADIUS_DEG
   const grid = new Map<string, number[]>()
-  for (const [id, p] of pos) {
-    const key = cellKey(Math.floor(p.x / cell), Math.floor(p.y / cell))
-    const bucket = grid.get(key)
-    if (bucket) bucket.push(id)
-    else grid.set(key, [id])
+  for (let i = 0; i < kept.length; i++) {
+    const pa = pos.get(kept[i]!.a)!
+    const pb = pos.get(kept[i]!.b)!
+    const x0 = Math.floor(Math.min(pa.x, pb.x) / cell)
+    const x1 = Math.floor(Math.max(pa.x, pb.x) / cell)
+    const y0 = Math.floor(Math.min(pa.y, pb.y) / cell)
+    const y1 = Math.floor(Math.max(pa.y, pb.y) / cell)
+    for (let cx = x0; cx <= x1; cx++) {
+      for (let cy = y0; cy <= y1; cy++) {
+        const key = cellKey(cx, cy)
+        const bucket = grid.get(key)
+        if (bucket) bucket.push(i)
+        else grid.set(key, [i])
+      }
+    }
   }
-  return { pos, adj, grid, cell, refCos, empty: pos.size === 0 }
+  return { pos, adj, edges: kept, grid, cell, refCos, empty: pos.size === 0 }
 }
 
-function nearestNode(g: RailGraph, x: number, y: number): number | null {
+/**
+ * Anchor a projected point to the rail: nearest edge by point-to-segment
+ * distance (within the snap radius), returning the endpoint node nearer to
+ * the projection. Nodes are sparse on straight track, so node distance alone
+ * would miss vertices sitting right on the rail.
+ */
+function nearestAnchor(g: RailGraph, x: number, y: number): number | null {
   const cx = Math.floor(x / g.cell)
   const cy = Math.floor(y / g.cell)
   let best: number | null = null
@@ -101,11 +132,19 @@ function nearestNode(g: RailGraph, x: number, y: number): number | null {
     for (let dy = -1; dy <= 1; dy++) {
       const bucket = g.grid.get(cellKey(cx + dx, cy + dy))
       if (!bucket) continue
-      for (const id of bucket) {
-        const p = g.pos.get(id)!
-        const d = (p.x - x) ** 2 + (p.y - y) ** 2
-        if (d < bestD || (d === bestD && best !== null && id < best)) {
-          best = id
+      for (const ei of bucket) {
+        const e = g.edges[ei]!
+        const pa = g.pos.get(e.a)!
+        const pb = g.pos.get(e.b)!
+        const vx = pb.x - pa.x
+        const vy = pb.y - pa.y
+        const len2 = vx * vx + vy * vy
+        let t = len2 === 0 ? 0 : ((x - pa.x) * vx + (y - pa.y) * vy) / len2
+        t = t < 0 ? 0 : t > 1 ? 1 : t
+        const d = (pa.x + t * vx - x) ** 2 + (pa.y + t * vy - y) ** 2
+        const anchor = t < 0.5 ? e.a : e.b
+        if (d < bestD || (d === bestD && best !== null && anchor < best)) {
+          best = anchor
           bestD = d
         }
       }
@@ -178,17 +217,17 @@ export function snapRideToRail(
 
 /**
  * Greedy-match vertices [start, end) to a rail node path, or null when the
- * run can't be matched confidently (too far from rail, or a hop that won't
- * route sanely).
+ * run can't be matched confidently (too far from rail, or a long hop that
+ * won't route sanely).
  */
 function matchRun(coords: Float32Array, start: number, end: number, g: RailGraph): number[] | null {
-  // Anchor sequence: nearest node per vertex, consecutive duplicates dropped.
+  // Anchor sequence: nearest edge per vertex, consecutive duplicates dropped.
   const anchors: number[] = []
   let matched = 0
   for (let i = start; i < end; i++) {
     const x = coords[i * 2]! * g.refCos
     const y = coords[i * 2 + 1]!
-    const node = nearestNode(g, x, y)
+    const node = nearestAnchor(g, x, y)
     if (node === null) continue
     matched++
     if (anchors.length === 0 || anchors[anchors.length - 1] !== node) anchors.push(node)
@@ -205,8 +244,13 @@ function matchRun(coords: Float32Array, start: number, end: number, g: RailGraph
     const b = g.pos.get(to)!
     const straight = Math.hypot(a.x - b.x, a.y - b.y)
     const seg = dijkstra(g, from, to, GAP_FACTOR * straight + GAP_SLACK_DEG)
-    if (!seg) return null // a hop that won't route sanely → don't trust the match
-    for (let j = 1; j < seg.length; j++) path.push(seg[j]!)
+    if (seg) {
+      for (let j = 1; j < seg.length; j++) path.push(seg[j]!)
+    } else if (straight <= SOFT_BRIDGE_DEG) {
+      path.push(to) // parallel-track ping-pong: bridge the few meters straight
+    } else {
+      return null // a long hop that won't route sanely → don't trust the match
+    }
   }
   return path
 }
@@ -245,6 +289,8 @@ export interface RailSnapResult {
   rows: ViewportSegmentRow[]
   /** Rail rides successfully snapped to OSM geometry. */
   snapped: number
+  /** Rail-typed rides seen (snapped + passed through), for "X of Y" stats. */
+  railRides: number
 }
 
 export function snapRailTracks(
@@ -252,14 +298,16 @@ export function snapRailTracks(
   g: RailGraph,
   isCovered: CoverageTest = FULL_COVERAGE
 ): RailSnapResult {
-  if (g.empty) return { rows, snapped: 0 }
+  if (g.empty) return { rows, snapped: 0, railRides: 0 }
   const out: ViewportSegmentRow[] = []
   let snapped = 0
+  let railRides = 0
   for (const row of rows) {
     if (!RAIL_SNAP_TYPES.has(row.type) || row.point_count < 2) {
       out.push(row)
       continue
     }
+    railRides++
     const snappedCoords = snapRideToRail(floatView(row), g, isCovered)
     if (!snappedCoords) {
       out.push(row)
@@ -274,7 +322,7 @@ export function snapRailTracks(
       coords: new Uint8Array(snappedCoords.buffer)
     })
   }
-  return { rows: out, snapped }
+  return { rows: out, snapped, railRides }
 }
 
 function floatView(row: ViewportSegmentRow): Float32Array {
