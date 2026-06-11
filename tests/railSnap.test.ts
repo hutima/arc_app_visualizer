@@ -3,8 +3,8 @@
  * map-matcher that snaps rail rides onto the network and routes through
  * tunnel gaps.
  */
-import { describe, it, expect } from 'vitest'
-import { buildOverpassQuery, parseOverpassJson } from '../src/main/rail/overpass'
+import { describe, it, expect, vi } from 'vitest'
+import { buildOverpassQuery, parseOverpassJson, fetchRailNetwork } from '../src/main/rail/overpass'
 import {
   buildRailGraph,
   snapRideToRail,
@@ -66,6 +66,35 @@ describe('overpass parsing', () => {
   it('returns empty for malformed input', () => {
     expect(parseOverpassJson(null)).toEqual({ nodes: [], edges: [] })
     expect(parseOverpassJson({})).toEqual({ nodes: [], edges: [] })
+  })
+
+  it('sends an identifying User-Agent (Overpass 406s anonymous requests)', async () => {
+    const mock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ elements: [] }), { status: 200 })
+    )
+    vi.stubGlobal('fetch', mock)
+    try {
+      await fetchRailNetwork({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 })
+      const headers = mock.mock.calls[0]![1].headers as Record<string, string>
+      expect(headers['User-Agent']).toMatch(/arc-visualizer/)
+      expect(headers.Accept).toBe('application/json')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('surfaces the server response text on HTTP failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response('<html><body>Too Many Requests</body></html>', { status: 429 }))
+    )
+    try {
+      await expect(fetchRailNetwork({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 })).rejects.toThrow(
+        /Overpass HTTP 429: Too Many Requests/
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
 
