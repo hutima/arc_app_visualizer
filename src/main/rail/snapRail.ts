@@ -119,6 +119,11 @@ const cellKey = (cx: number, cy: number): string => `${cx}:${cy}`
  * Build the routing graph + edge spatial index from OSM nodes and edges.
  * Tuning ranges (user-adjustable, meters) set the anchor snap radius and how
  * far apart unconnected nodes may be while still linked for transfers.
+ *
+ * Only nodes referenced by a kept edge participate: per-mode graphs receive
+ * every stored node but a kind-filtered edge list, and an edge-less node must
+ * not exist here — transfer edges would otherwise chain across a parallel
+ * line's orphaned nodes and route a metro ride along commuter/freight track.
  */
 export function buildRailGraph(
   nodes: RailNodeInput[],
@@ -126,16 +131,32 @@ export function buildRailGraph(
   tuning: RailTuning = DEFAULT_RAIL_TUNING
 ): RailGraph {
   const snapRadiusDeg = tuning.snapRadiusM / M_PER_DEG
-  if (nodes.length === 0) {
-    return { pos: new Map(), adj: new Map(), edges: [], grid: new Map(), cell: snapRadiusDeg, refCos: 1, empty: true }
+  const emptyGraph = (): RailGraph => ({
+    pos: new Map(), adj: new Map(), edges: [], grid: new Map(), cell: snapRadiusDeg, refCos: 1, empty: true
+  })
+  if (nodes.length === 0) return emptyGraph()
+
+  const byId = new Map<number, RailNodeInput>()
+  for (const n of nodes) byId.set(n.id, n)
+
+  const kept: RailEdgeInput[] = []
+  const used = new Set<number>()
+  for (const e of edges) {
+    if (e.a === e.b || !byId.has(e.a) || !byId.has(e.b)) continue
+    kept.push(e)
+    used.add(e.a)
+    used.add(e.b)
   }
+  if (used.size === 0) return emptyGraph()
+
   let latSum = 0
-  for (const n of nodes) latSum += n.lat
-  const refCos = Math.max(0.1, Math.cos(((latSum / nodes.length) * Math.PI) / 180))
+  for (const id of used) latSum += byId.get(id)!.lat
+  const refCos = Math.max(0.1, Math.cos(((latSum / used.size) * Math.PI) / 180))
 
   const pos = new Map<number, { x: number; y: number; lon: number; lat: number }>()
-  for (const n of nodes) {
-    pos.set(n.id, { x: n.lon * refCos, y: n.lat, lon: n.lon, lat: n.lat })
+  for (const id of used) {
+    const n = byId.get(id)!
+    pos.set(id, { x: n.lon * refCos, y: n.lat, lon: n.lon, lat: n.lat })
   }
 
   const adj = new Map<number, Array<{ to: number; w: number }>>()
@@ -144,15 +165,12 @@ export function buildRailGraph(
     if (!list) adj.set(a, (list = []))
     list.push({ to: b, w })
   }
-  const kept: RailEdgeInput[] = []
-  for (const e of edges) {
-    const pa = pos.get(e.a)
-    const pb = pos.get(e.b)
-    if (!pa || !pb || e.a === e.b) continue
+  for (const e of kept) {
+    const pa = pos.get(e.a)!
+    const pb = pos.get(e.b)!
     const w = Math.hypot(pa.x - pb.x, pa.y - pb.y)
     link(e.a, e.b, w)
     link(e.b, e.a, w)
-    kept.push(e)
   }
   addTransferEdges(pos, adj, link, tuning.transferRadiusM / M_PER_DEG)
 
@@ -177,14 +195,15 @@ export function buildRailGraph(
       }
     }
   }
-  return { pos, adj, edges: kept, grid, cell, refCos, empty: pos.size === 0 }
+  return { pos, adj, edges: kept, grid, cell, refCos, empty: false }
 }
 
 /**
  * Link distinct nodes within the transfer radius that the track doesn't
  * already connect: interchange platforms and at-grade crossings that OSM maps
  * as separate, unconnected ways. Weighted by real distance, so a transfer is
- * only taken when it genuinely shortens the path.
+ * only taken when it genuinely shortens the path. `pos` holds only this
+ * graph's own (mode-filtered) network, so transfers never cross modes.
  */
 function addTransferEdges(
   pos: Map<number, { x: number; y: number; lon: number; lat: number }>,
