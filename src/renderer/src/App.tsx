@@ -8,7 +8,7 @@ import type {
   TrackColorMode
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
-import type { RailCoverage } from '../../shared/types'
+import type { RailCoverage, RailMatchProgress } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { yearRange } from '../../shared/yearColors'
 import { MapController, type RenderStats } from './map/MapController'
@@ -35,6 +35,8 @@ export function App(): React.JSX.Element {
   const [snapRail, setSnapRail] = useState(false)
   const [railCoverage, setRailCoverage] = useState<RailCoverage | null>(null)
   const [railFetching, setRailFetching] = useState(false)
+  const [railRebuilding, setRailRebuilding] = useState(false)
+  const [railProgress, setRailProgress] = useState<RailMatchProgress | null>(null)
   const [railError, setRailError] = useState<string | null>(null)
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
@@ -190,19 +192,45 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setAverageRail(on)
   }, [])
 
-  const handleSnapRail = useCallback((on: boolean): void => {
-    setSnapRail(on)
-    controllerRef.current?.setSnapRail(on)
-  }, [])
+  const handleSnapRail = useCallback(
+    (on: boolean): void => {
+      setSnapRail(on)
+      controllerRef.current?.setSnapRail(on)
+      // Enabling snap with coverage but no cached matches (e.g. a fetch from an
+      // older version): build them now so the toggle actually shows something.
+      if (on && railCoverage && railCoverage.matchedRides === 0 && !railRebuilding && !railFetching) {
+        setRailRebuilding(true)
+        setRailError(null)
+        setRailProgress(null)
+        void window.api.rebuildRailMatches().then((res) => {
+          setRailRebuilding(false)
+          setRailProgress(null)
+          if (res.ok && res.coverage) {
+            setRailCoverage(res.coverage)
+            controllerRef.current?.scheduleRefresh(0)
+          } else if (res.error) {
+            setRailError(res.error)
+          }
+        })
+      }
+    },
+    [railCoverage, railRebuilding, railFetching]
+  )
 
-  // Fetches the area currently on screen; regions accumulate per fetch.
+  // Stream of the post-fetch map-matching pass.
+  useEffect(() => window.api.onRailProgress((p) => setRailProgress(p)), [])
+
+  // Fetch the area on screen (regions accumulate), then cache its matched
+  // geometry; both phases report through railFetching / railProgress.
   const handleFetchRail = useCallback((): void => {
     const view = controllerRef.current?.getViewBounds()
     if (!view) return
     setRailFetching(true)
     setRailError(null)
+    setRailProgress(null)
     void window.api.fetchRailNetwork(view).then((res) => {
       setRailFetching(false)
+      setRailProgress(null)
       if (res.ok && res.coverage) {
         setRailCoverage(res.coverage)
         setSnapRail(true)
@@ -245,6 +273,8 @@ export function App(): React.JSX.Element {
           snapRail={snapRail}
           railCoverage={railCoverage}
           railFetching={railFetching}
+          railRebuilding={railRebuilding}
+          railProgress={railProgress}
           railError={railError}
           onChangeAverage={handleAverageRail}
           onChangeSnap={handleSnapRail}

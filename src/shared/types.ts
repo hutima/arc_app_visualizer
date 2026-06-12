@@ -73,7 +73,16 @@ export interface RailCoverage {
   regions: RailRegion[]
   nodeCount: number
   edgeCount: number
+  /** Rail rides with cached map-matched geometry (built after each fetch). */
+  matchedRides: number
   lastFetchedAtMs: number
+}
+
+/** Progress of the map-matching pass that runs after a rail fetch. */
+export interface RailMatchProgress {
+  done: number
+  total: number
+  matched: number
 }
 
 export interface ViewportWaypoint {
@@ -189,8 +198,16 @@ export interface ArcApi {
   setBasemapTheme(theme: 'dark' | 'light'): Promise<void>
   /** Saves a rendered map frame; the user picks the destination. */
   exportMapPng(dataUrl: string): Promise<{ saved: boolean; path?: string }>
-  /** Fetch OSM rail for the given (on-screen) bbox; regions accumulate. */
+  /**
+   * Fetch OSM rail for the given (on-screen) bbox; regions accumulate. On
+   * success the map-matched geometry is rebuilt (progress via onRailProgress),
+   * so the returned coverage reflects the new matchedRides count.
+   */
   fetchRailNetwork(bbox: LatLonBBox): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
+  /** Re-run the match pass over all fetched coverage (e.g. when enabling snap). */
+  rebuildRailMatches(): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
+  /** Progress of the post-fetch / rebuild map-matching pass. */
+  onRailProgress(cb: (p: RailMatchProgress) => void): () => void
   getRailCoverage(): Promise<RailCoverage | null>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
 }

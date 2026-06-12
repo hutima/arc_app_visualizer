@@ -16,9 +16,10 @@ import {
   insertPerf
 } from './db/queries'
 import { averageRailTracks } from './db/railAverage'
-import { buildRailGraph, snapRailTracks } from './rail/snapRail'
+import { RAIL_SNAP_TYPES } from './rail/snapRail'
+import { rebuildRailMatches } from './rail/buildMatches'
 import { fetchRailNetwork } from './rail/overpass'
-import { addRailNetwork, getRailCoverage, loadRailForViewport } from './db/railStore'
+import { addRailNetwork, getRailCoverage } from './db/railStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
 import type { ImportProgress, LatLonBBox, ViewportQuery, ViewportResult } from '../shared/types'
@@ -88,30 +89,22 @@ export function registerIpc(ctx: IpcContext): void {
     const { truncated, detail, downsampleStride } = queried
     const wp = queryViewportWaypoints(ctx.db, q, ctx.settings.queryLimits.waypoints)
 
-    // Cleaning (display-only). Snapping to OSM rail supersedes averaging for
-    // rail rides — snapped rides already coincide on the real alignment.
+    // Snap mode substitutes cached map-matched geometry inside the query, so
+    // here we just tally how many rail rides were served from it. Snapping
+    // supersedes averaging — averaging the already-snapped lines would only
+    // re-blur them — so the two are mutually exclusive.
     let rows = queried.rows
-    let railSnapped = 0
     let railRides = 0
+    let railSnapped = 0
     if (q.snapRail) {
-      const net = loadRailForViewport(ctx.db, q)
-      if (net.edges.length > 0) {
-        // Coverage gate: only vertices inside a fetched region snap; the rest
-        // of a ride keeps raw GPS (rail is fetched one viewport at a time).
-        const boxes = (getRailCoverage(ctx.db)?.regions ?? []).map((r) => r.bbox)
-        const isCovered = (lon: number, lat: number): boolean =>
-          boxes.some(
-            (b) => lat >= b.minLat && lat <= b.maxLat && lon >= b.minLon && lon <= b.maxLon
-          )
-        const result = snapRailTracks(rows, buildRailGraph(net.nodes, net.edges), isCovered)
-        rows = result.rows
-        railSnapped = result.snapped
-        railRides = result.railRides
+      for (const r of rows) {
+        if (!RAIL_SNAP_TYPES.has(r.type)) continue
+        railRides++
+        if (r._matched) railSnapped++
       }
     }
-    const rail = q.averageRail
-      ? averageRailTracks(rows, wp.waypoints)
-      : { rows, collapsed: 0 }
+    const rail =
+      q.averageRail && !q.snapRail ? averageRailTracks(rows, wp.waypoints) : { rows, collapsed: 0 }
     rows = rail.rows
     const queryMs = performance.now() - t0
 
@@ -180,7 +173,7 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
   ipcMain.handle('rail:coverage', () => getRailCoverage(ctx.db))
-  ipcMain.handle('rail:fetch', async (_e, view: LatLonBBox) => {
+  ipcMain.handle('rail:fetch', async (event, view: LatLonBBox) => {
     const nums = [view?.minLat, view?.maxLat, view?.minLon, view?.maxLon]
     if (nums.some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
       return { ok: false, error: 'no view to fetch' }
@@ -199,8 +192,28 @@ export function registerIpc(ctx: IpcContext): void {
     }
     try {
       const rail = await fetchRailNetwork(bbox)
-      const coverage = addRailNetwork(ctx.db, rail, bbox)
-      return { ok: true, coverage }
+      addRailNetwork(ctx.db, rail, bbox)
+      // Cache map-matched geometry for the new coverage (progress to the UI).
+      const sender = event.sender
+      const t0 = performance.now()
+      const { matched, railSegments } = await rebuildRailMatches(ctx.db, (p) => {
+        if (!sender.isDestroyed()) sender.send('rail:progress', p)
+      })
+      insertPerf(ctx.db, 'rail.match', performance.now() - t0, `matched=${matched}/${railSegments}`)
+      return { ok: true, coverage: getRailCoverage(ctx.db) }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('rail:rebuildMatches', async (event) => {
+    const sender = event.sender
+    try {
+      const t0 = performance.now()
+      const { matched, railSegments } = await rebuildRailMatches(ctx.db, (p) => {
+        if (!sender.isDestroyed()) sender.send('rail:progress', p)
+      })
+      insertPerf(ctx.db, 'rail.match', performance.now() - t0, `matched=${matched}/${railSegments}`)
+      return { ok: true, coverage: getRailCoverage(ctx.db) }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }

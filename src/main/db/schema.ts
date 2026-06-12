@@ -13,8 +13,9 @@
  */
 // v2: idx_waypoints_bbox; v3: categories.custom; v4: categories.priority;
 // v5: 'unknown' ignored by default; v6: OSM rail network tables;
-// v7: rail regions accumulate (canonical a<b edges, unique (a,b))
-export const SCHEMA_VERSION = 7
+// v7: rail regions accumulate (canonical a<b edges, unique (a,b));
+// v8: rail_matched_geom (cached map-matched rail geometry, per detail level)
+export const SCHEMA_VERSION = 8
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -144,4 +145,17 @@ CREATE TABLE IF NOT EXISTS rail_coverage (
   node_count  INTEGER NOT NULL,
   edge_count  INTEGER NOT NULL
 );
+
+-- Cached map-matched rail geometry. Matching raw points against the network
+-- is too heavy to run per viewport, so it runs once after a fetch and is
+-- stored here, simplified into the same per-zoom detail levels as
+-- display_geometries; the viewport query swaps it in for rail segments that
+-- have it. Rebuilt wholesale when coverage changes; absent ⇒ ride shows raw.
+CREATE TABLE IF NOT EXISTS rail_matched_geom (
+  segment_id  INTEGER NOT NULL,
+  detail      INTEGER NOT NULL,
+  point_count INTEGER NOT NULL,
+  coords      BLOB NOT NULL,
+  PRIMARY KEY (segment_id, detail)
+) WITHOUT ROWID;
 `

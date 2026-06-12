@@ -111,11 +111,18 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
 - **Cleaning — snap rail to OSM (recommended)**: fetch the OpenStreetMap rail
   network **for the area on screen** (the app's only network call; stored
   locally, everything after is offline) — pan to each city and fetch it,
-  regions accumulate. Metro/tram/train rides are then **map-matched** onto the
-  real alignment and **routed through tunnels** along the rail graph — fixing
-  exactly where GPS is worst, and making repeat rides coincide instead of
-  smearing. Greedy nearest-node + Dijkstra matcher; rides keep their raw GPS
-  wherever they leave fetched areas, and unmatchable rides are left untouched.
+  regions accumulate. Each fetch then runs a one-time **map-matching pass**
+  over the raw points of every metro/tram/train ride in coverage and **caches**
+  the result (`rail_matched_geom`, simplified into the same per-zoom levels as
+  display geometry), so panning stays fast — the viewport query just swaps the
+  cleaned line in. The matcher is **segment-local**: each ride vertex anchors
+  to the nearest point on the *track* (edge distance, since OSM nodes are
+  sparse on straight runs), consecutive anchors are joined by **Dijkstra along
+  the rail graph** — filling tunnel gaps and crossing between lines at
+  interchanges (nearby nodes are linked as transfer edges) — and any stretch
+  that can't be matched or routed (off-network, off-coverage, or a gap too long
+  to bridge) **keeps its raw GPS** instead of rejecting the whole ride.
+  Supersedes averaging while on.
 - **Cleaning fallback — average repeat rail rides** (no network): rides
   between the same two places (either direction) collapse into one **robust
   consensus** track at ~50 m resolution — arc-length resampled, reduced by

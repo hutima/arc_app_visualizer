@@ -1,31 +1,18 @@
 /**
  * OSM rail snapping: Overpass parsing (pure, no network) and the offline
- * map-matcher that snaps rail rides onto the network and routes through
- * tunnel gaps.
+ * map-matcher that threads rail rides onto the network, routes through tunnel
+ * gaps, and keeps raw GPS where it can't match.
  */
 import { describe, it, expect, vi } from 'vitest'
 import { buildOverpassQuery, parseOverpassJson, fetchRailNetwork } from '../src/main/rail/overpass'
 import {
   buildRailGraph,
-  snapRideToRail,
-  snapRailTracks,
+  matchRideToRail,
   type RailNodeInput,
   type RailEdgeInput
 } from '../src/main/rail/snapRail'
-import type { ViewportSegmentRow } from '../src/main/db/queries'
 
-const f32row = (type: string, lonLat: number[], id = 1): ViewportSegmentRow => ({
-  id,
-  type,
-  start_ts_ms: null,
-  point_count: lonLat.length / 2,
-  coords: new Uint8Array(new Float32Array(lonLat).buffer)
-})
-
-const coordsOf = (a: Float32Array | ViewportSegmentRow): number[] =>
-  a instanceof Float32Array
-    ? [...a]
-    : [...new Float32Array(a.coords.buffer.slice(a.coords.byteOffset, a.coords.byteOffset + a.coords.byteLength))]
+const coordsOf = (a: Float32Array): number[] => [...a]
 
 describe('overpass parsing', () => {
   it('builds a bbox query filtered to rail, excluding service tracks', () => {
@@ -149,13 +136,13 @@ const LINE_NODES: RailNodeInput[] = Array.from({ length: 11 }, (_, i) => ({
 }))
 const LINE_EDGES: RailEdgeInput[] = Array.from({ length: 10 }, (_, i) => ({ a: i + 1, b: i + 2 }))
 
-describe('snapRideToRail', () => {
+describe('matchRideToRail', () => {
   const graph = buildRailGraph(LINE_NODES, LINE_EDGES)
 
   it('routes through a tunnel gap: two jittered fixes become the full alignment', () => {
     // Only the endpoints are "seen"; the middle is a tunnel with no GPS.
     const ride = new Float32Array([0, 0.0003, 0.1, -0.0003])
-    const snapped = snapRideToRail(ride, graph)!
+    const snapped = matchRideToRail(ride, graph)!
     expect(snapped).not.toBeNull()
     const c = coordsOf(snapped)
     // Output rides the real rail: every point on lat 0, spanning the line.
@@ -167,12 +154,12 @@ describe('snapRideToRail', () => {
 
   it('pulls a noisy ride onto the rail geometry', () => {
     const jitter = [0, 0.0004, 0.03, -0.0005, 0.06, 0.0004, 0.1, -0.0003]
-    const c = coordsOf(snapRideToRail(new Float32Array(jitter), graph)!)
+    const c = coordsOf(matchRideToRail(new Float32Array(jitter), graph)!)
     for (let i = 1; i < c.length; i += 2) expect(Math.abs(c[i]!)).toBeLessThan(1e-9)
   })
 
   it('leaves a ride far from any rail unmatched (null)', () => {
-    expect(snapRideToRail(new Float32Array([5, 5, 5.1, 5]), graph)).toBeNull()
+    expect(matchRideToRail(new Float32Array([5, 5, 5.1, 5]), graph)).toBeNull()
   })
 
   it('refuses a hop that will not route (disconnected lines)', () => {
@@ -181,11 +168,11 @@ describe('snapRideToRail', () => {
     const farEdges = [...LINE_EDGES, { a: 50, b: 51 }]
     const g = buildRailGraph(farNodes, farEdges)
     const ride = new Float32Array([0, 0, 1, 1]) // one end per line
-    expect(snapRideToRail(ride, g)).toBeNull()
+    expect(matchRideToRail(ride, g)).toBeNull()
   })
 
   it('returns null on an empty network', () => {
-    expect(snapRideToRail(new Float32Array([0, 0, 0.1, 0]), buildRailGraph([], []))).toBeNull()
+    expect(matchRideToRail(new Float32Array([0, 0, 0.1, 0]), buildRailGraph([], []))).toBeNull()
   })
 
   it('snaps only the covered portion; an off-coverage tail keeps raw GPS', () => {
@@ -195,7 +182,7 @@ describe('snapRideToRail', () => {
       0.06, 0.0005, 0.08, -0.0005, 0.1, 0.0004 // outside → must stay raw
     ])
     const isCovered = (lon: number): boolean => lon <= 0.05
-    const c = coordsOf(snapRideToRail(ride, graph, isCovered)!)
+    const c = coordsOf(matchRideToRail(ride, graph, isCovered)!)
     // Covered prefix rides the rail: routed nodes 1..5, all exactly on lat 0.
     expect(c.length / 2).toBe(5 + 3)
     for (let i = 1; i < 10; i += 2) expect(c[i]).toBe(0)
@@ -205,7 +192,7 @@ describe('snapRideToRail', () => {
 
   it('returns null when the whole ride is outside coverage', () => {
     const ride = new Float32Array([0, 0.0003, 0.05, -0.0003, 0.1, 0.0004])
-    expect(snapRideToRail(ride, graph, () => false)).toBeNull()
+    expect(matchRideToRail(ride, graph, () => false)).toBeNull()
   })
 
   it('matches vertices mid-edge on sparse-node straight track', () => {
@@ -220,7 +207,7 @@ describe('snapRideToRail', () => {
       [{ a: 1, b: 2 }]
     )
     const ride = new Float32Array([0.002, 0.0003, 0.008, -0.0003])
-    const c = coordsOf(snapRideToRail(ride, g)!)
+    const c = coordsOf(matchRideToRail(ride, g)!)
     expect(c).toEqual([0, 0, expect.closeTo(0.01, 6), 0])
   })
 
@@ -244,7 +231,7 @@ describe('snapRideToRail', () => {
     for (let i = 0; i <= 40; i++) {
       ride.push(i * 0.0005, i % 7 === 3 ? 0.00008 : 0.00002)
     }
-    const c = coordsOf(snapRideToRail(new Float32Array(ride), g)!)
+    const c = coordsOf(matchRideToRail(new Float32Array(ride), g)!)
     expect(c.length).toBeGreaterThanOrEqual(4)
     // Every output point lies on one of the two tracks — never off-network.
     const lats = new Set([0, Math.fround(0.0001)])
@@ -252,25 +239,41 @@ describe('snapRideToRail', () => {
   })
 })
 
-describe('snapRailTracks', () => {
-  const graph = buildRailGraph(LINE_NODES, LINE_EDGES)
+describe('matchRideToRail — segment-local fallback', () => {
+  // Two separate lines: A on lat 0 (lon 0..0.05), B on lat 1 (lon 0..0.05),
+  // unconnected. A ride that runs along A, jumps to B, then rides B should
+  // snap both on-rail stretches and keep only the un-routable jump raw —
+  // not reject the whole ride (the old all-or-nothing behavior).
+  const nodes: RailNodeInput[] = []
+  const edges: RailEdgeInput[] = []
+  for (let i = 0; i <= 5; i++) {
+    nodes.push({ id: 10 + i, lat: 0, lon: i * 0.01 })
+    nodes.push({ id: 60 + i, lat: 1, lon: i * 0.01 })
+    if (i > 0) {
+      edges.push({ a: 9 + i, b: 10 + i })
+      edges.push({ a: 59 + i, b: 60 + i })
+    }
+  }
+  const graph = buildRailGraph(nodes, edges)
 
-  it('snaps rail rows and passes non-rail through untouched', () => {
-    const metro = f32row('metro', [0, 0.0002, 0.1, -0.0002], 1)
-    const walk = f32row('walking', [0, 0.0002, 0.1, -0.0002], 2)
-    const { rows, snapped } = snapRailTracks([metro, walk], graph)
-    expect(snapped).toBe(1)
-    const outWalk = rows.find((r) => r.id === 2)!
-    expect(coordsOf(outWalk)).toEqual(coordsOf(walk)) // byte-identical passthrough
-    const outMetro = rows.find((r) => r.id === 1)!
-    expect(outMetro.point_count).toBe(11) // snapped to the full line
-    expect(outMetro.type).toBe('metro')
+  it('snaps the on-rail stretches and keeps the un-routable jump raw', () => {
+    const ride = new Float32Array([
+      0, 0.0003, 0.02, -0.0003, 0.04, 0.0003, // along line A
+      0.04, 1.0003, 0.02, 0.9997, 0, 1.0003 // along line B (after a big jump)
+    ])
+    const c = coordsOf(matchRideToRail(ride, graph)!)
+    const lats = c.filter((_, k) => k % 2 === 1)
+    // Both halves land on a rail (lat 0 or lat 1): ≥5 on A + ≥3 on B.
+    const onRail = lats.filter((lat) => lat === 0 || lat === 1)
+    expect(onRail.length).toBeGreaterThanOrEqual(8)
+    // The cross-line jump can't route, so it survives as a raw vertex
+    // (lat ≈ 1.0003) rather than nuking the whole match.
+    expect(lats.some((lat) => lat > 1 && lat < 1.001)).toBe(true)
   })
 
-  it('keeps an unmatchable rail ride as-is', () => {
-    const metro = f32row('metro', [5, 5, 5.1, 5], 7)
-    const { rows, snapped } = snapRailTracks([metro], graph)
-    expect(snapped).toBe(0)
-    expect(coordsOf(rows[0]!)).toEqual(coordsOf(metro))
+  it('returns null when nothing routes (single far point is not a snap)', () => {
+    // Touches line A once then leaves — no routed hop, so keep the raw line.
+    const ride = new Float32Array([0, 0.0003, 9, 9])
+    expect(matchRideToRail(ride, graph)).toBeNull()
   })
 })
