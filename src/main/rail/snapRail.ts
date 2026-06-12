@@ -38,7 +38,9 @@ export const RAIL_KIND = {
   tram: 3,
   rail: 4,
   narrow_gauge: 5,
-  monorail: 6
+  monorail: 6,
+  /** Road tunnels (highway + tunnel tags) — used only to bridge car GPS gaps. */
+  road_tunnel: 7
 } as const
 
 export function railKindCode(railwayTag: string | undefined): number {
@@ -57,7 +59,8 @@ export function railKindCode(railwayTag: string | undefined): number {
  * Which OSM track kinds each Arc mode may match. Splits heavy rail (train)
  * from subway/light modes so the corridors stop bleeding into each other;
  * metro and tram still share light_rail (the Green-Line-style gray zone),
- * which is geometrically near-identical anyway.
+ * which is geometrically near-identical anyway. road_tunnel is deliberately
+ * absent — roads never participate in rail matching (and vice versa).
  */
 export const ALLOWED_KINDS_BY_TYPE: Readonly<Record<string, readonly number[]>> = {
   metro: [RAIL_KIND.subway, RAIL_KIND.light_rail],
@@ -65,6 +68,21 @@ export const ALLOWED_KINDS_BY_TYPE: Readonly<Record<string, readonly number[]>> 
   tram: [RAIL_KIND.tram, RAIL_KIND.light_rail],
   train: [RAIL_KIND.rail, RAIL_KIND.narrow_gauge, RAIL_KIND.monorail]
 }
+
+/**
+ * Road trips get tunnel-gap bridging only — never full map-matching (roads
+ * overlap far too much for the greedy matcher). When GPS drops for a long
+ * stretch and both sides of the gap sit near mapped road-tunnel geometry,
+ * the gap is filled by routing through the tunnel instead of a straight
+ * line skipping across downtown (Boston's Central Artery effect).
+ */
+export const ROAD_TUNNEL_TYPES: ReadonlySet<string> = new Set(['car', 'taxi', 'bus'])
+
+/** A gap shorter than this (~200 m) is ordinary GPS cadence, not a tunnel. */
+const ROAD_GAP_MIN_DEG = 1.8e-3
+
+/** Portal anchoring is forgiving — GPS dies/revives some way from the mouth. */
+export const ROAD_TUNING: RailTuning = { snapRadiusM: 250, transferRadiusM: 0 }
 
 /** OSM node and its neighbors; coords are projected (see RailGraph). */
 export interface RailNodeInput {
@@ -340,6 +358,58 @@ export function matchRideToRail(
     }
   }
   if (snappedHops === 0 || out.length < 4) return null
+  return new Float32Array(out)
+}
+
+/**
+ * Bridge long GPS gaps in a road trip through mapped road tunnels. Unlike
+ * rail matching, every raw point is kept verbatim — the only change is that
+ * a gap longer than ~200 m whose two sides both anchor near tunnel geometry
+ * gets the routed tunnel path spliced in between them. Gaps that don't
+ * anchor or won't route sanely stay as they were. Returns null when nothing
+ * was bridged (caller keeps the original row).
+ */
+export function bridgeRoadGaps(
+  coords: Float32Array,
+  g: RailGraph,
+  isCovered: CoverageTest = FULL_COVERAGE
+): Float32Array | null {
+  if (g.empty) return null
+  const n = coords.length / 2
+  if (n < 2) return null
+
+  const out: number[] = []
+  const pushLonLat = (lon: number, lat: number): void => {
+    const m = out.length
+    if (m >= 2 && out[m - 2] === lon && out[m - 1] === lat) return
+    out.push(lon, lat)
+  }
+
+  let bridged = 0
+  for (let i = 0; i < n; i++) {
+    const lon = coords[i * 2]!
+    const lat = coords[i * 2 + 1]!
+    pushLonLat(lon, lat)
+    if (i + 1 >= n) break
+    const lon2 = coords[i * 2 + 2]!
+    const lat2 = coords[i * 2 + 3]!
+    const gap = Math.hypot((lon2 - lon) * g.refCos, lat2 - lat)
+    if (gap <= ROAD_GAP_MIN_DEG || !isCovered(lon, lat) || !isCovered(lon2, lat2)) continue
+    const a = nearestAnchor(g, lon * g.refCos, lat)
+    const b = nearestAnchor(g, lon2 * g.refCos, lat2)
+    if (a === null || b === null || a === b) continue
+    const pa = g.pos.get(a)!
+    const pb = g.pos.get(b)!
+    const straight = Math.hypot(pa.x - pb.x, pa.y - pb.y)
+    const route = dijkstra(g, a, b, GAP_FACTOR * straight + GAP_SLACK_DEG)
+    if (!route || route.length < 2) continue
+    for (const id of route) {
+      const p = g.pos.get(id)!
+      pushLonLat(p.lon, p.lat)
+    }
+    bridged++
+  }
+  if (bridged === 0) return null
   return new Float32Array(out)
 }
 

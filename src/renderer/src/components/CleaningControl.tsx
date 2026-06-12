@@ -79,11 +79,12 @@ export function CleaningControl({
         routing through tunnels and across transfers — fixing the spots where GPS
         is worst. Each mode matches only its own track kind (metro→subway,
         train→commuter rail, tram→tram/light-rail), so rides don&apos;t grab a
-        parallel line. Fetch loads the area on screen; pan to each city and fetch
-        it — areas add up, and matching is cached so panning stays fast. Rides
-        keep their raw GPS wherever they leave fetched areas or wander off the
-        rails.{' '}
-        <em>Re-fetch areas fetched before this update to apply the mode limits.</em>
+        parallel line. Car/taxi/bus trips stay raw except long GPS gaps
+        (&gt;~200 m) whose ends sit near a mapped <strong>road tunnel</strong> —
+        those are bridged through the tunnel instead of a straight jump across
+        downtown. Fetch loads the area on screen; pan to each city and fetch it —
+        areas add up, and matching is cached so panning stays fast.{' '}
+        <em>Re-fetch areas fetched before this update to pull road tunnels.</em>
       </p>
       <button type="button" onClick={onFetchRail} disabled={busy}>
         {railFetching
