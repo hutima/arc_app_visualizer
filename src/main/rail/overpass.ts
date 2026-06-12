@@ -6,7 +6,7 @@
  * extent. The result is stored locally (see db/railStore) and every later
  * snap runs offline. The JSON parser is pure so it's tested without network.
  */
-import { railKindCode, type RailNodeInput, type RailEdgeInput } from './snapRail'
+import { railKindCode, RAIL_KIND, type RailNodeInput, type RailEdgeInput } from './snapRail'
 
 export interface BBox {
   minLat: number
@@ -25,6 +25,16 @@ export interface ParsedRail {
 
 /** Rail kinds we match against; excludes sidings/yards/abandoned by default. */
 const RAILWAY_TYPES = ['subway', 'tram', 'light_rail', 'rail', 'narrow_gauge', 'monorail']
+
+/**
+ * Road classes whose tunnels we fetch (for bridging car GPS gaps). Tunnels
+ * only — the full road network would dwarf the rail data and is never
+ * matched against. service/parking ways are deliberately absent.
+ */
+const ROAD_TYPES = [
+  'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential',
+  'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link'
+]
 
 /**
  * Public Overpass instances, tried in order. The primary is busy — under
@@ -46,12 +56,15 @@ const isRetryable = (status: number): boolean => status === 429 || status >= 500
 
 export function buildOverpassQuery(bbox: BBox): string {
   const b = `${bbox.minLat},${bbox.minLon},${bbox.maxLat},${bbox.maxLon}`
-  const filter = RAILWAY_TYPES.join('|')
+  const rail = RAILWAY_TYPES.join('|')
+  const road = ROAD_TYPES.join('|')
   // Ways + recursed-down nodes; service tracks (yards/sidings) excluded.
+  // Road ways only when tunnelled — they bridge car GPS gaps, nothing more.
   return [
     '[out:json][timeout:180];',
     '(',
-    `  way["railway"~"^(${filter})$"]["service"!~"."](${b});`,
+    `  way["railway"~"^(${rail})$"]["service"!~"."](${b});`,
+    `  way["highway"~"^(${road})$"]["tunnel"]["tunnel"!="no"](${b});`,
     ');',
     '(._;>;);',
     'out qt;'
@@ -87,7 +100,13 @@ export function parseOverpassJson(json: unknown): ParsedRail {
   const usedNodes = new Set<number>()
   for (const el of elements) {
     if (el.type !== 'way' || !Array.isArray(el.nodes)) continue
-    const kind = railKindCode(el.tags?.railway)
+    // Rail ways carry their railway kind; highway ways (tunnels by query
+    // construction) are road_tunnel so they can never enter a rail graph.
+    const kind = el.tags?.railway
+      ? railKindCode(el.tags.railway)
+      : el.tags?.highway
+        ? RAIL_KIND.road_tunnel
+        : RAIL_KIND.unknown
     for (let i = 1; i < el.nodes.length; i++) {
       const a = el.nodes[i - 1]!
       const b = el.nodes[i]!

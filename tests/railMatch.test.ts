@@ -106,4 +106,36 @@ describe('cached rail matching', () => {
     expect((await rebuildRailMatches(db)).matched).toBe(0)
     expect(matchedRideCount(db)).toBe(0)
   })
+
+  it('bridges a car trip GPS gap through a road tunnel; rail never uses it', async () => {
+    // Car trip: one fix before the tunnel mouth, the next past the far portal.
+    db.prepare(
+      `INSERT INTO segments (id, track_id, file_id, type, point_count, clean_point_count,
+                             min_lat, max_lat, min_lon, max_lon)
+       VALUES (2, 1, 1, 'car', 2, 2, -0.001, 0.001, 0.009, 0.031)`
+    ).run()
+    const insPt = db.prepare(
+      'INSERT INTO points (segment_id, seq, lat, lon, flags) VALUES (2, ?, ?, ?, 0)'
+    )
+    insPt.run(0, 0.0001, 0.009)
+    insPt.run(1, -0.0001, 0.031)
+
+    // Network contains ONLY a road tunnel (lon 0.01..0.03 at lat 0).
+    addRailNetwork(
+      db,
+      {
+        nodes: [0.01, 0.015, 0.02, 0.025, 0.03].map((lon, i) => ({ id: 50 + i, lat: 0, lon })),
+        edges: [50, 51, 52, 53].map((a) => ({ a, b: a + 1, kind: RAIL_KIND.road_tunnel }))
+      },
+      railBox
+    )
+    const r = await rebuildRailMatches(db)
+    // The car trip bridged; the metro ride (seg 1) must not touch road edges.
+    expect(r.railSegments).toBe(2)
+    expect(r.matched).toBe(1)
+    const row = db.prepare(
+      'SELECT point_count FROM rail_matched_geom WHERE segment_id = 2 AND detail = 2'
+    ).get() as { point_count: number }
+    expect(row.point_count).toBeGreaterThan(2) // tunnel alignment spliced in
+  })
 })

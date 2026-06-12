@@ -12,9 +12,13 @@ import { DETAIL_LEVELS } from '../../shared/displayDetail'
 import { simplifyIndices } from '../importer/simplify'
 import {
   ALLOWED_KINDS_BY_TYPE,
+  bridgeRoadGaps,
   buildRailGraph,
   matchRideToRail,
+  RAIL_KIND,
   RAIL_SNAP_TYPES,
+  ROAD_TUNNEL_TYPES,
+  ROAD_TUNING,
   type CoverageTest,
   type RailGraph
 } from './snapRail'
@@ -28,8 +32,9 @@ export interface RebuildResult {
 }
 
 /**
- * Rebuild all cached matched geometry from scratch. Returns once every
- * rail segment intersecting coverage has been (re)matched.
+ * Rebuild all cached matched geometry from scratch: full map-matching for
+ * rail rides, tunnel-gap bridging for road trips. Returns once every
+ * candidate segment intersecting coverage has been (re)processed.
  */
 export async function rebuildRailMatches(
   db: DatabaseSync,
@@ -50,7 +55,8 @@ export async function rebuildRailMatches(
   // One graph per Arc mode, each filtered to the OSM track kinds that mode may
   // match (a metro ride routes only on subway/light-rail, never commuter rail).
   // Cached by kind-set so metro and subway share a graph. Unknown-kind edges
-  // (0, from pre-v9 fetches) are wildcards until the area is re-fetched.
+  // (0, from pre-v9 fetches) are wildcards until the area is re-fetched — but
+  // never for roads, whose graph wants exactly the tunnel ways.
   const graphByKindSet = new Map<string, RailGraph>()
   const graphFor = (type: string): RailGraph => {
     const allowed = ALLOWED_KINDS_BY_TYPE[type] ?? null
@@ -66,9 +72,20 @@ export async function rebuildRailMatches(
     }
     return g
   }
+  let roadGraphCache: RailGraph | null = null
+  const roadGraph = (): RailGraph => {
+    if (!roadGraphCache) {
+      roadGraphCache = buildRailGraph(
+        nodes,
+        edges.filter((e) => e.kind === RAIL_KIND.road_tunnel),
+        ROAD_TUNING
+      )
+    }
+    return roadGraphCache
+  }
 
   const u = unionBox(boxes)
-  const typeList = [...RAIL_SNAP_TYPES]
+  const typeList = [...RAIL_SNAP_TYPES, ...ROAD_TUNNEL_TYPES]
   const segs = db.prepare(
     `SELECT id, type FROM segments
      WHERE type IN (${typeList.map(() => '?').join(',')})
@@ -98,7 +115,11 @@ export async function rebuildRailMatches(
           coords[k * 2] = pts[k]!.lon
           coords[k * 2 + 1] = pts[k]!.lat
         }
-        const snapped = matchRideToRail(coords, graphFor(segs[i]!.type), isCovered)
+        // Rail rides are fully map-matched; road trips only get long GPS
+        // gaps bridged through mapped tunnels (everything else stays raw).
+        const snapped = ROAD_TUNNEL_TYPES.has(segs[i]!.type)
+          ? bridgeRoadGaps(coords, roadGraph(), isCovered)
+          : matchRideToRail(coords, graphFor(segs[i]!.type), isCovered)
         if (snapped && storeDetailLevels(insertStmt, segs[i]!.id, snapped)) matched++
       }
       db.exec('COMMIT')

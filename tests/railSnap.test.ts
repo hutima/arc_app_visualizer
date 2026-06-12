@@ -7,9 +7,11 @@ import { describe, it, expect, vi } from 'vitest'
 import { buildOverpassQuery, parseOverpassJson, fetchRailNetwork } from '../src/main/rail/overpass'
 import {
   ALLOWED_KINDS_BY_TYPE,
+  bridgeRoadGaps,
   buildRailGraph,
   matchRideToRail,
   RAIL_KIND,
+  ROAD_TUNING,
   type RailNodeInput,
   type RailEdgeInput
 } from '../src/main/rail/snapRail'
@@ -22,6 +24,11 @@ describe('overpass parsing', () => {
     expect(q).toContain('1,2,3,4')
     expect(q).toContain('subway|tram|light_rail|rail|narrow_gauge|monorail')
     expect(q).toContain('"service"!~"."')
+  })
+
+  it('also requests road tunnels — and only tunnels — for car gap bridging', () => {
+    const q = buildOverpassQuery({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 })
+    expect(q).toMatch(/way\["highway"~"\^\(motorway\|.*\)\$"\]\["tunnel"\]\["tunnel"!="no"\]/)
   })
 
   it('splits ways into per-segment edges, tagging each with its railway kind', () => {
@@ -65,6 +72,17 @@ describe('overpass parsing', () => {
       ]
     }
     expect(parseOverpassJson(json).edges[0]!.kind).toBe(RAIL_KIND.unknown)
+  })
+
+  it('tags highway ways with the road kind so they stay out of rail graphs', () => {
+    const json = {
+      elements: [
+        { type: 'node', id: 1, lat: 0, lon: 0 },
+        { type: 'node', id: 2, lat: 0, lon: 0.01 },
+        { type: 'way', id: 3, nodes: [1, 2], tags: { highway: 'motorway', tunnel: 'yes' } }
+      ]
+    }
+    expect(parseOverpassJson(json).edges[0]!.kind).toBe(RAIL_KIND.road_tunnel)
   })
 
   it('returns empty for malformed input', () => {
@@ -405,5 +423,43 @@ describe('type-constrained matching', () => {
     const fLat = Math.fround(foreignLat)
     for (let i = 1; i < c.length; i += 2) expect(c[i]).not.toBe(fLat)
     expect(c.length / 2).toBeGreaterThan(10) // actually routed the long way
+  })
+})
+
+describe('bridgeRoadGaps (car tunnels)', () => {
+  // A road tunnel along lat 0, lon 0.01..0.03 (≈2.2 km, Central-Artery-ish).
+  const tunnelNodes: RailNodeInput[] = [0.01, 0.015, 0.02, 0.025, 0.03].map((lon, i) => ({
+    id: i + 1,
+    lat: 0,
+    lon
+  }))
+  const tunnelEdges: RailEdgeInput[] = [1, 2, 3, 4].map((a) => ({ a, b: a + 1 }))
+  const g = buildRailGraph(tunnelNodes, tunnelEdges, ROAD_TUNING)
+
+  it('splices a long GPS gap through the tunnel, keeping every raw point', () => {
+    const trip = new Float32Array([
+      0, 0.0001, 0.005, -0.0001, 0.009, 0.0001, // approach (raw, stays raw)
+      0.031, -0.0001, 0.035, 0.0001 // GPS resumes past the far portal
+    ])
+    const c = coordsOf(bridgeRoadGaps(trip, g)!)
+    expect(c.length / 2).toBe(5 + 5) // 5 raw points + 5 tunnel nodes
+    const lons = c.filter((_, k) => k % 2 === 0)
+    for (const lon of [0, 0.005, 0.009, 0.031, 0.035]) {
+      expect(lons).toContain(Math.fround(lon)) // raw points intact
+    }
+    // The gap is filled with the tunnel alignment (lat exactly 0)…
+    const lats = c.filter((_, k) => k % 2 === 1)
+    expect(lats.filter((lat) => lat === 0)).toHaveLength(5)
+  })
+
+  it('leaves ordinary point cadence alone (nothing bridged → null)', () => {
+    const trip: number[] = []
+    for (let i = 0; i <= 10; i++) trip.push(i * 0.001, 0.0001) // ~110 m steps
+    expect(bridgeRoadGaps(new Float32Array(trip), g)).toBeNull()
+  })
+
+  it('does not invent a tunnel for gaps far from any', () => {
+    const trip = new Float32Array([0.5, 0.5, 0.55, 0.5])
+    expect(bridgeRoadGaps(trip, g)).toBeNull()
   })
 })

@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS rail_edges (
   id INTEGER PRIMARY KEY,
   a  INTEGER NOT NULL,
   b  INTEGER NOT NULL,
-  kind INTEGER NOT NULL DEFAULT 0, -- OSM railway kind (RAIL_KIND); 0 = unknown/any
+  kind INTEGER NOT NULL DEFAULT 0, -- OSM way kind (RAIL_KIND; incl. road tunnels); 0 = unknown/any rail
   min_lat REAL, min_lon REAL, max_lat REAL, max_lon REAL
 );
 CREATE INDEX IF NOT EXISTS idx_rail_edges_bbox

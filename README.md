@@ -124,7 +124,12 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   to bridge) **keeps its raw GPS** instead of rejecting the whole ride. Matching
   is **type-constrained** — each mode snaps only to its own OSM track kind
   (metro→subway/light-rail, train→commuter rail, tram→tram/light-rail) — so a
-  metro ride can't grab a parallel commuter line. Supersedes averaging while on. The matching ranges are tweakable in the
+  metro ride can't grab a parallel commuter line. Supersedes averaging while on.
+  **Car/taxi/bus trips** stay raw except long GPS gaps (>~200 m) whose ends sit
+  near a mapped **road tunnel** (`tunnel=yes` — the fetch grabs tunnel ways
+  only, never the full road network): those gaps are bridged through the
+  tunnel alignment instead of a straight jump across downtown (the Big Dig
+  effect). The matching ranges are tweakable in the
   panel (or `settings.json` → `rail`): **Snap within** (how far a GPS point may
   sit from a track and still match; raise if noisy rides stay raw, lower if
   rides grab the wrong nearby line) and **Transfer within** (how far apart two
