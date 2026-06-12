@@ -137,6 +137,8 @@ where OSM is best) by map-matching rides onto real OSM rail geometry.
   one graph per Arc mode filtered to its allowed kinds
   (`ALLOWED_KINDS_BY_TYPE` — metro→subway/light-rail, train→rail, tram→
   tram/light-rail), so a metro ride can't snap to a parallel commuter line.
+  Each graph keeps **only nodes its kept edges reference** — otherwise transfer
+  edges chain across a foreign line's orphaned nodes and route across modes.
   Heavy → runs after a fetch (auto) with chunked progress, **not** per viewport.
   The viewport query `COALESCE`s the cached line in under snap mode.
 

@@ -374,4 +374,36 @@ describe('type-constrained matching', () => {
     const railLat = Math.fround(0.00028)
     for (let i = 1; i < c.length; i += 2) expect(c[i]).toBe(railLat)
   })
+
+  it('transfers never chain through another mode\'s edge-less nodes', () => {
+    // Subway makes a U (the long way round between its tips); a foreign line
+    // runs straight between them with nodes spaced inside the transfer
+    // radius. Its EDGES are kind-filtered out but its NODES are passed in,
+    // exactly as buildMatches does per mode — routing must take the long
+    // subway path, never hop transfer-to-transfer along the foreign nodes.
+    const nodes: RailNodeInput[] = []
+    const edges: RailEdgeInput[] = []
+    let id = 0
+    const subwayIds: number[] = []
+    const addSub = (lat: number, lon: number): void => {
+      nodes.push({ id: ++id, lat, lon })
+      subwayIds.push(id)
+    }
+    for (let i = 0; i <= 10; i++) addSub(i * 0.001, 0) // up
+    for (let i = 1; i <= 10; i++) addSub(0.01, i * 0.001) // across
+    for (let i = 9; i >= 0; i--) addSub(i * 0.001, 0.01) // down
+    for (let k = 1; k < subwayIds.length; k++) {
+      edges.push({ a: subwayIds[k - 1]!, b: subwayIds[k]! })
+    }
+    // Foreign (commuter) nodes: dense straight line between the U's tips.
+    const foreignLat = 0.0004
+    for (let i = 0; i <= 25; i++) nodes.push({ id: ++id, lat: foreignLat, lon: i * 0.0004 })
+
+    const g = buildRailGraph(nodes, edges, { snapRadiusM: 100, transferRadiusM: 60 })
+    const ride = new Float32Array([0, 0.00005, 0.01, 0.00005]) // tip to tip
+    const c = coordsOf(matchRideToRail(ride, g)!)
+    const fLat = Math.fround(foreignLat)
+    for (let i = 1; i < c.length; i += 2) expect(c[i]).not.toBe(fLat)
+    expect(c.length / 2).toBeGreaterThan(10) // actually routed the long way
+  })
 })
