@@ -77,9 +77,13 @@ export function CleaningControl({
       <p className="hint">
         Map-matches metro/tram/train rides onto real OpenStreetMap rail geometry,
         routing through tunnels and across transfers — fixing the spots where GPS
-        is worst. Fetch loads the area on screen; pan to each city and fetch it —
-        areas add up, and matching is cached so panning stays fast. Rides keep
-        their raw GPS wherever they leave fetched areas or wander off the rails.
+        is worst. Each mode matches only its own track kind (metro→subway,
+        train→commuter rail, tram→tram/light-rail), so rides don&apos;t grab a
+        parallel line. Fetch loads the area on screen; pan to each city and fetch
+        it — areas add up, and matching is cached so panning stays fast. Rides
+        keep their raw GPS wherever they leave fetched areas or wander off the
+        rails.{' '}
+        <em>Re-fetch areas fetched before this update to apply the mode limits.</em>
       </p>
       <button type="button" onClick={onFetchRail} disabled={busy}>
         {railFetching

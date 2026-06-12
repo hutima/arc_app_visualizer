@@ -8,6 +8,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { openDb } from '../src/main/db/db'
 import { addRailNetwork, matchedRideCount } from '../src/main/db/railStore'
 import { rebuildRailMatches } from '../src/main/rail/buildMatches'
+import { RAIL_KIND } from '../src/main/rail/snapRail'
 import { queryViewportSegments, type ViewportSegmentRow } from '../src/main/db/queries'
 import type { ViewportQuery } from '../src/shared/types'
 
@@ -86,5 +87,23 @@ describe('cached rail matching', () => {
     // With nothing matched, snap mode falls back to the raw display geometry.
     const on = queryViewportSegments(db, { ...VIEW, snapRail: true }, LIMITS).rows[0]!
     expect(on._matched).toBeFalsy()
+  })
+
+  // The seeded ride is a 'metro'. Type-constrained matching means it snaps to
+  // subway/light-rail track but not to a parallel commuter-rail line.
+  const withKind = (kind: number): typeof railLine => ({
+    nodes: railLine.nodes,
+    edges: railLine.edges.map((e) => ({ ...e, kind }))
+  })
+
+  it('matches a metro ride when the nearby track is subway', async () => {
+    addRailNetwork(db, withKind(RAIL_KIND.subway), railBox)
+    expect((await rebuildRailMatches(db)).matched).toBe(1)
+  })
+
+  it('will not snap a metro ride to a commuter-rail (kind rail) line', async () => {
+    addRailNetwork(db, withKind(RAIL_KIND.rail), railBox)
+    expect((await rebuildRailMatches(db)).matched).toBe(0)
+    expect(matchedRideCount(db)).toBe(0)
   })
 })

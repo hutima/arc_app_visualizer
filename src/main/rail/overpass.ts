@@ -6,7 +6,7 @@
  * extent. The result is stored locally (see db/railStore) and every later
  * snap runs offline. The JSON parser is pure so it's tested without network.
  */
-import type { RailNodeInput, RailEdgeInput } from './snapRail'
+import { railKindCode, type RailNodeInput, type RailEdgeInput } from './snapRail'
 
 export interface BBox {
   minLat: number
@@ -15,9 +15,12 @@ export interface BBox {
   maxLon: number
 }
 
+/** A track segment plus its OSM `railway` kind code (see RAIL_KIND). */
+export type ParsedRailEdge = RailEdgeInput & { kind: number }
+
 export interface ParsedRail {
   nodes: RailNodeInput[]
-  edges: RailEdgeInput[]
+  edges: ParsedRailEdge[]
 }
 
 /** Rail kinds we match against; excludes sidings/yards/abandoned by default. */
@@ -80,15 +83,16 @@ export function parseOverpassJson(json: unknown): ParsedRail {
     }
   }
 
-  const edges: RailEdgeInput[] = []
+  const edges: ParsedRailEdge[] = []
   const usedNodes = new Set<number>()
   for (const el of elements) {
     if (el.type !== 'way' || !Array.isArray(el.nodes)) continue
+    const kind = railKindCode(el.tags?.railway)
     for (let i = 1; i < el.nodes.length; i++) {
       const a = el.nodes[i - 1]!
       const b = el.nodes[i]!
       if (a === b || !nodeCoords.has(a) || !nodeCoords.has(b)) continue
-      edges.push({ a, b })
+      edges.push({ a, b, kind })
       usedNodes.add(a)
       usedNodes.add(b)
     }

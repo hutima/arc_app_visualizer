@@ -14,8 +14,9 @@
 // v2: idx_waypoints_bbox; v3: categories.custom; v4: categories.priority;
 // v5: 'unknown' ignored by default; v6: OSM rail network tables;
 // v7: rail regions accumulate (canonical a<b edges, unique (a,b));
-// v8: rail_matched_geom (cached map-matched rail geometry, per detail level)
-export const SCHEMA_VERSION = 8
+// v8: rail_matched_geom (cached map-matched rail geometry, per detail level);
+// v9: rail_edges.kind (OSM railway kind — type-constrained matching)
+export const SCHEMA_VERSION = 9
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -130,6 +131,7 @@ CREATE TABLE IF NOT EXISTS rail_edges (
   id INTEGER PRIMARY KEY,
   a  INTEGER NOT NULL,
   b  INTEGER NOT NULL,
+  kind INTEGER NOT NULL DEFAULT 0, -- OSM railway kind (RAIL_KIND); 0 = unknown/any
   min_lat REAL, min_lon REAL, max_lat REAL, max_lon REAL
 );
 CREATE INDEX IF NOT EXISTS idx_rail_edges_bbox
