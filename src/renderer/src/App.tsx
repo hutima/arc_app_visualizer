@@ -8,7 +8,7 @@ import type {
   TrackColorMode
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
-import type { RailCoverage, RailMatchProgress } from '../../shared/types'
+import type { RailCoverage, RailMatchProgress, RailTuning } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { yearRange } from '../../shared/yearColors'
 import { MapController, type RenderStats } from './map/MapController'
@@ -220,6 +220,24 @@ export function App(): React.JSX.Element {
   // Stream of the post-fetch map-matching pass.
   useEffect(() => window.api.onRailProgress((p) => setRailProgress(p)), [])
 
+  // Persist new matcher ranges, then re-match everything with them.
+  const handleApplyTuning = useCallback((t: RailTuning): void => {
+    setRailRebuilding(true)
+    setRailError(null)
+    setRailProgress(null)
+    void window.api.setRailTuning(t).then((res) => {
+      setRailRebuilding(false)
+      setRailProgress(null)
+      setConfig((prev) => (prev ? { ...prev, railTuning: t } : prev))
+      if (res.ok && res.coverage) {
+        setRailCoverage(res.coverage)
+        controllerRef.current?.scheduleRefresh(0)
+      } else if (res.error) {
+        setRailError(res.error)
+      }
+    })
+  }, [])
+
   // Fetch the area on screen (regions accumulate), then cache its matched
   // geometry; both phases report through railFetching / railProgress.
   const handleFetchRail = useCallback((): void => {
@@ -276,9 +294,11 @@ export function App(): React.JSX.Element {
           railRebuilding={railRebuilding}
           railProgress={railProgress}
           railError={railError}
+          railTuning={config?.railTuning ?? null}
           onChangeAverage={handleAverageRail}
           onChangeSnap={handleSnapRail}
           onFetchRail={handleFetchRail}
+          onApplyTuning={handleApplyTuning}
         />
         {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
         <StatsPanel

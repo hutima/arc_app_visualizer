@@ -277,3 +277,44 @@ describe('matchRideToRail — segment-local fallback', () => {
     expect(matchRideToRail(ride, graph)).toBeNull()
   })
 })
+
+describe('tuning ranges', () => {
+  it('snap radius is user-tunable: a ride ~100 m off matches at 200 m, not at 50 m', () => {
+    const nodes = [
+      { id: 1, lat: 0, lon: 0 },
+      { id: 2, lat: 0, lon: 0.01 }
+    ]
+    const edges = [{ a: 1, b: 2 }]
+    const offset = 9e-4 // ~100 m off the track
+    const ride = new Float32Array([0.002, offset, 0.008, offset])
+
+    const wide = buildRailGraph(nodes, edges, { snapRadiusM: 200, transferRadiusM: 60 })
+    expect(matchRideToRail(ride, wide)).not.toBeNull()
+
+    const tight = buildRailGraph(nodes, edges, { snapRadiusM: 50, transferRadiusM: 60 })
+    expect(matchRideToRail(ride, tight)).toBeNull()
+  })
+
+  it('transfer radius 0 disables cross-line routing', () => {
+    // Two lines whose ends sit ~30 m apart: with transfers, a ride spanning
+    // both routes through the junction; with transferRadiusM 0 it cannot.
+    const nodes = [
+      { id: 1, lat: 0, lon: 0 },
+      { id: 2, lat: 0, lon: 0.01 },
+      { id: 3, lat: 0.00028, lon: 0.01 }, // ~30 m from node 2, other line
+      { id: 4, lat: 0.00028, lon: 0.02 }
+    ]
+    const edges = [
+      { a: 1, b: 2 },
+      { a: 3, b: 4 }
+    ]
+    const ride = new Float32Array([0, 0.0001, 0.02, 0.00038]) // one end per line
+
+    const linked = buildRailGraph(nodes, edges, { snapRadiusM: 200, transferRadiusM: 60 })
+    const c = [...matchRideToRail(ride, linked)!]
+    expect(c.length / 2).toBe(4) // routed 1→2→(transfer)→3→4
+
+    const unlinked = buildRailGraph(nodes, edges, { snapRadiusM: 200, transferRadiusM: 0 })
+    expect(matchRideToRail(ride, unlinked)).toBeNull() // long hop won't route
+  })
+})

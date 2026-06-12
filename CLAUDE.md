@@ -126,8 +126,10 @@ where OSM is best) by map-matching rides onto real OSM rail geometry.
   distance — OSM nodes are sparse on straight runs), join consecutive anchors by
   Dijkstra along the graph (fills tunnels, crosses lines via transfer edges),
   and **keep raw GPS** for any stretch that's off-network/off-coverage or a gap
-  too long to route. Tunables (snap radius, gap factor, transfer radius) are
-  named constants at the top.
+  too long to route. The user-facing ranges (`RailTuning`: snap radius, transfer
+  radius — meters) live in `settings.json` under `rail` and in the Cleaning
+  panel ("Apply & re-match" persists + rebuilds); gap factor/slack and the soft
+  bridge stay named constants at the top.
 - **`rail/buildMatches.ts`** — runs the matcher over every rail ride's **raw
   points** once (not zoom-simplified geometry), simplifies into the per-zoom
   detail levels, and caches in `rail_matched_geom`. Heavy → runs after a fetch

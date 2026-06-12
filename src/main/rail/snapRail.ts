@@ -21,6 +21,8 @@
  * greedy core later without changing the call sites.
  */
 
+import { DEFAULT_RAIL_TUNING, type RailTuning } from '../../shared/types'
+
 export const RAIL_SNAP_TYPES: ReadonlySet<string> = new Set(['metro', 'tram', 'train', 'subway'])
 
 /** OSM node and its neighbors; coords are projected (see RailGraph). */
@@ -34,8 +36,9 @@ export interface RailEdgeInput {
   b: number
 }
 
-/** Anchor a ride vertex to rail within ~200 m of the *track* (not just nodes). */
-const SNAP_RADIUS_DEG = 1.8e-3
+/** Meters per degree of latitude; close enough for tuning radii. */
+const M_PER_DEG = 111320
+
 /** A routed hop may be at most this multiple of the straight anchor distance… */
 const GAP_FACTOR = 4
 /** …plus this slack (~330 m), so short hops aren't over-constrained. */
@@ -46,13 +49,6 @@ const GAP_SLACK_DEG = 3e-3
  * noisy anchors ping-pong across rails whose crossover is far away.
  */
 const SOFT_BRIDGE_DEG = 1.4e-3
-/**
- * Distinct nodes within this (~60 m) are linked so routing can cross between
- * lines: interchange platforms and at-grade crossings that OSM maps as
- * separate, unconnected ways. Weighted by real distance, so a transfer is
- * only taken when it genuinely shortens the path.
- */
-const TRANSFER_RADIUS_DEG = 5.5e-4
 
 /**
  * Is this lon/lat inside a fetched coverage region? Rail is fetched one
@@ -70,6 +66,7 @@ export interface RailGraph {
   /** Edges with both endpoints present; `grid` buckets hold indices into it. */
   edges: RailEdgeInput[]
   grid: Map<string, number[]>
+  /** Snap radius in degrees — also the grid cell size (3×3 covers it). */
   cell: number
   refCos: number
   empty: boolean
@@ -77,10 +74,19 @@ export interface RailGraph {
 
 const cellKey = (cx: number, cy: number): string => `${cx}:${cy}`
 
-/** Build the routing graph + edge spatial index from OSM nodes and edges. */
-export function buildRailGraph(nodes: RailNodeInput[], edges: RailEdgeInput[]): RailGraph {
+/**
+ * Build the routing graph + edge spatial index from OSM nodes and edges.
+ * Tuning ranges (user-adjustable, meters) set the anchor snap radius and how
+ * far apart unconnected nodes may be while still linked for transfers.
+ */
+export function buildRailGraph(
+  nodes: RailNodeInput[],
+  edges: RailEdgeInput[],
+  tuning: RailTuning = DEFAULT_RAIL_TUNING
+): RailGraph {
+  const snapRadiusDeg = tuning.snapRadiusM / M_PER_DEG
   if (nodes.length === 0) {
-    return { pos: new Map(), adj: new Map(), edges: [], grid: new Map(), cell: SNAP_RADIUS_DEG, refCos: 1, empty: true }
+    return { pos: new Map(), adj: new Map(), edges: [], grid: new Map(), cell: snapRadiusDeg, refCos: 1, empty: true }
   }
   let latSum = 0
   for (const n of nodes) latSum += n.lat
@@ -107,12 +113,12 @@ export function buildRailGraph(nodes: RailNodeInput[], edges: RailEdgeInput[]): 
     link(e.b, e.a, w)
     kept.push(e)
   }
-  addTransferEdges(pos, adj, link)
+  addTransferEdges(pos, adj, link, tuning.transferRadiusM / M_PER_DEG)
 
   // Index edges into a grid sized so a 3×3 neighborhood covers the snap
   // radius: an edge is registered in every cell its bbox touches, so any
   // segment passing within the radius of a vertex is found.
-  const cell = SNAP_RADIUS_DEG
+  const cell = snapRadiusDeg
   const grid = new Map<string, number[]>()
   for (let i = 0; i < kept.length; i++) {
     const pa = pos.get(kept[i]!.a)!
@@ -133,13 +139,20 @@ export function buildRailGraph(nodes: RailNodeInput[], edges: RailEdgeInput[]): 
   return { pos, adj, edges: kept, grid, cell, refCos, empty: pos.size === 0 }
 }
 
-/** Link distinct nodes within the transfer radius that the track doesn't already connect. */
+/**
+ * Link distinct nodes within the transfer radius that the track doesn't
+ * already connect: interchange platforms and at-grade crossings that OSM maps
+ * as separate, unconnected ways. Weighted by real distance, so a transfer is
+ * only taken when it genuinely shortens the path.
+ */
 function addTransferEdges(
   pos: Map<number, { x: number; y: number; lon: number; lat: number }>,
   adj: Map<number, Array<{ to: number; w: number }>>,
-  link: (a: number, b: number, w: number) => void
+  link: (a: number, b: number, w: number) => void,
+  radiusDeg: number
 ): void {
-  const cell = TRANSFER_RADIUS_DEG
+  if (radiusDeg <= 0) return
+  const cell = radiusDeg
   const grid = new Map<string, number[]>()
   for (const [id, p] of pos) {
     const key = cellKey(Math.floor(p.x / cell), Math.floor(p.y / cell))
@@ -147,7 +160,7 @@ function addTransferEdges(
     if (bucket) bucket.push(id)
     else grid.set(key, [id])
   }
-  const r2 = TRANSFER_RADIUS_DEG * TRANSFER_RADIUS_DEG
+  const r2 = radiusDeg * radiusDeg
   const adjacent = (a: number, b: number): boolean => (adj.get(a) ?? []).some((e) => e.to === b)
   for (const [id, p] of pos) {
     const cx = Math.floor(p.x / cell)
@@ -180,7 +193,7 @@ function nearestAnchor(g: RailGraph, x: number, y: number): number | null {
   const cx = Math.floor(x / g.cell)
   const cy = Math.floor(y / g.cell)
   let best: number | null = null
-  let bestD = SNAP_RADIUS_DEG * SNAP_RADIUS_DEG
+  let bestD = g.cell * g.cell // cell size = snap radius
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
       const bucket = g.grid.get(cellKey(cx + dx, cy + dy))

@@ -1,4 +1,6 @@
-import type { RailCoverage, RailMatchProgress } from '../../../shared/types'
+import { useEffect, useState } from 'react'
+import { DEFAULT_RAIL_TUNING } from '../../../shared/types'
+import type { RailCoverage, RailMatchProgress, RailTuning } from '../../../shared/types'
 
 interface Props {
   averageRail: boolean
@@ -8,9 +10,11 @@ interface Props {
   railRebuilding: boolean
   railProgress: RailMatchProgress | null
   railError: string | null
+  railTuning: RailTuning | null
   onChangeAverage: (on: boolean) => void
   onChangeSnap: (on: boolean) => void
   onFetchRail: () => void
+  onApplyTuning: (t: RailTuning) => void
 }
 
 const fmtDate = (ms: number): string => new Date(ms).toLocaleDateString()
@@ -28,12 +32,35 @@ export function CleaningControl({
   railRebuilding,
   railProgress,
   railError,
+  railTuning,
   onChangeAverage,
   onChangeSnap,
-  onFetchRail
+  onFetchRail,
+  onApplyTuning
 }: Props): React.JSX.Element {
   const hasNetwork = railCoverage !== null
   const busy = railFetching || railRebuilding
+
+  // Range inputs are local drafts; Apply persists + re-matches.
+  const [snapM, setSnapM] = useState(String(railTuning?.snapRadiusM ?? DEFAULT_RAIL_TUNING.snapRadiusM))
+  const [transferM, setTransferM] = useState(
+    String(railTuning?.transferRadiusM ?? DEFAULT_RAIL_TUNING.transferRadiusM)
+  )
+  useEffect(() => {
+    if (railTuning) {
+      setSnapM(String(railTuning.snapRadiusM))
+      setTransferM(String(railTuning.transferRadiusM))
+    }
+  }, [railTuning])
+  const draft: RailTuning = {
+    snapRadiusM: Number(snapM),
+    transferRadiusM: Number(transferM)
+  }
+  const draftValid = Number.isFinite(draft.snapRadiusM) && Number.isFinite(draft.transferRadiusM)
+  const draftChanged =
+    railTuning !== null &&
+    (draft.snapRadiusM !== railTuning.snapRadiusM ||
+      draft.transferRadiusM !== railTuning.transferRadiusM)
   return (
     <section className="panel">
       <h2>Cleaning</h2>
@@ -81,6 +108,61 @@ export function CleaningControl({
         </p>
       )}
       {railError && <p className="hint status-line error">{railError}</p>}
+
+      {hasNetwork && (
+        <div className="rail-tuning">
+          <label>
+            <span>Snap within (m)</span>
+            <input
+              type="number"
+              min={20}
+              max={1000}
+              step={10}
+              value={snapM}
+              disabled={busy}
+              onChange={(e) => setSnapM(e.target.value)}
+            />
+          </label>
+          <label>
+            <span>Transfer within (m)</span>
+            <input
+              type="number"
+              min={0}
+              max={500}
+              step={5}
+              value={transferM}
+              disabled={busy}
+              onChange={(e) => setTransferM(e.target.value)}
+            />
+          </label>
+          <div className="rail-tuning-actions">
+            <button
+              type="button"
+              disabled={busy || !draftValid || !draftChanged}
+              onClick={() => onApplyTuning(draft)}
+            >
+              Apply &amp; re-match
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              title="Reset ranges to defaults"
+              onClick={() => {
+                setSnapM(String(DEFAULT_RAIL_TUNING.snapRadiusM))
+                setTransferM(String(DEFAULT_RAIL_TUNING.transferRadiusM))
+              }}
+            >
+              ↺
+            </button>
+          </div>
+          <p className="hint">
+            Snap: how far a GPS point may sit from a track and still match —
+            raise it if noisy rides stay raw, lower it if rides grab the wrong
+            nearby line. Transfer: how far apart two lines may be while still
+            routable as an interchange.
+          </p>
+        </div>
+      )}
 
       <label className="color-mode-option cleaning-divider">
         <input

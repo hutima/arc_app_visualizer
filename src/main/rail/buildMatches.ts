@@ -7,7 +7,7 @@
  * between chunks so the UI stays responsive and can show progress.
  */
 import type { DatabaseSync } from 'node:sqlite'
-import type { LatLonBBox, RailMatchProgress } from '../../shared/types'
+import { DEFAULT_RAIL_TUNING, type LatLonBBox, type RailMatchProgress, type RailTuning } from '../../shared/types'
 import { DETAIL_LEVELS } from '../../shared/displayDetail'
 import { simplifyIndices } from '../importer/simplify'
 import { buildRailGraph, matchRideToRail, RAIL_SNAP_TYPES, type CoverageTest } from './snapRail'
@@ -26,6 +26,7 @@ export interface RebuildResult {
  */
 export async function rebuildRailMatches(
   db: DatabaseSync,
+  tuning: RailTuning = DEFAULT_RAIL_TUNING,
   onProgress?: (p: RailMatchProgress) => void
 ): Promise<RebuildResult> {
   const boxes = coverageBoxes(db)
@@ -36,7 +37,7 @@ export async function rebuildRailMatches(
   }
 
   const { nodes, edges } = loadAllRail(db)
-  const graph = buildRailGraph(nodes, edges)
+  const graph = buildRailGraph(nodes, edges, tuning)
   const isCovered: CoverageTest = (lon, lat) =>
     boxes.some((b) => lat >= b.minLat && lat <= b.maxLat && lon >= b.minLon && lon <= b.maxLon)
 
