@@ -6,32 +6,42 @@
  * from SQLite.
  */
 import type { DatabaseSync } from 'node:sqlite'
-import type { ParsedRail, BBox } from '../rail/overpass'
+import type { BBox } from '../rail/overpass'
 import type { RailNodeInput, RailEdgeInput } from '../rail/snapRail'
 import type { LatLonBBox, RailCoverage } from '../../shared/types'
+
+/** A stored edge plus its OSM railway kind code (RAIL_KIND; 0 = unknown). */
+export type StoredRailEdge = RailEdgeInput & { kind: number }
 
 /**
  * Add a fetched region to the stored network. Nodes and edges from
  * overlapping fetches dedupe (OSM ids; canonical a < b edges); coverage
  * regions made redundant by the new bbox are absorbed into it.
  */
-export function addRailNetwork(db: DatabaseSync, rail: ParsedRail, bbox: BBox): RailCoverage {
+export function addRailNetwork(
+  db: DatabaseSync,
+  rail: { nodes: RailNodeInput[]; edges: ReadonlyArray<RailEdgeInput & { kind?: number }> },
+  bbox: BBox
+): RailCoverage {
   const coords = new Map(rail.nodes.map((n) => [n.id, n]))
   db.exec('BEGIN')
   try {
     const insNode = db.prepare('INSERT OR REPLACE INTO rail_nodes (id, lat, lon) VALUES (?, ?, ?)')
     for (const n of rail.nodes) insNode.run(n.id, n.lat, n.lon)
 
+    // On a re-fetch the edge may already exist (from a v8 db with no kind, or
+    // an overlapping region): refresh its kind so type constraints take hold.
     const insEdge = db.prepare(
-      `INSERT OR IGNORE INTO rail_edges (a, b, min_lat, max_lat, min_lon, max_lon)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO rail_edges (a, b, kind, min_lat, max_lat, min_lon, max_lon)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(a, b) DO UPDATE SET kind = excluded.kind`
     )
     for (const e of rail.edges) {
       const a = coords.get(e.a)
       const b = coords.get(e.b)
       if (!a || !b || e.a === e.b) continue
       insEdge.run(
-        Math.min(e.a, e.b), Math.max(e.a, e.b),
+        Math.min(e.a, e.b), Math.max(e.a, e.b), e.kind ?? 0,
         Math.min(a.lat, b.lat), Math.max(a.lat, b.lat),
         Math.min(a.lon, b.lon), Math.max(a.lon, b.lon)
       )
@@ -89,10 +99,10 @@ export function coverageBoxes(db: DatabaseSync): LatLonBBox[] {
   ).all() as unknown as LatLonBBox[]
 }
 
-/** The whole stored network, for building one graph to match every ride against. */
-export function loadAllRail(db: DatabaseSync): { nodes: RailNodeInput[]; edges: RailEdgeInput[] } {
+/** The whole stored network (edges carry kind), for building match graphs. */
+export function loadAllRail(db: DatabaseSync): { nodes: RailNodeInput[]; edges: StoredRailEdge[] } {
   const nodes = db.prepare('SELECT id, lat, lon FROM rail_nodes').all() as unknown as RailNodeInput[]
-  const edges = db.prepare('SELECT a, b FROM rail_edges').all() as unknown as RailEdgeInput[]
+  const edges = db.prepare('SELECT a, b, kind FROM rail_edges').all() as unknown as StoredRailEdge[]
   return { nodes, edges }
 }
 

@@ -50,9 +50,12 @@ function migrate(db: DatabaseSync): void {
       db.exec('DELETE FROM rail_edges WHERE id NOT IN (SELECT MIN(id) FROM rail_edges GROUP BY a, b)')
     }
     db.exec(SCHEMA_SQL)
-    // v3/v4: CREATE IF NOT EXISTS cannot add columns to pre-existing tables.
+    // v3/v4/v9: CREATE IF NOT EXISTS cannot add columns to pre-existing tables.
     ensureColumn(db, 'categories', 'custom', 'custom INTEGER NOT NULL DEFAULT 0')
     ensureColumn(db, 'categories', 'priority', 'priority INTEGER')
+    // v9: pre-existing edges have no stored kind (0 = unknown, matches any
+    // mode); re-fetching an area populates real kinds and constrains matching.
+    ensureColumn(db, 'rail_edges', 'kind', 'kind INTEGER NOT NULL DEFAULT 0')
     seedCategories(db)
     // v5: 'unknown' joins 'bogus' as excluded-by-default (existing databases
     // seeded it visible before this rule existed).

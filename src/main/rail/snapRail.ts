@@ -25,6 +25,47 @@ import { DEFAULT_RAIL_TUNING, type RailTuning } from '../../shared/types'
 
 export const RAIL_SNAP_TYPES: ReadonlySet<string> = new Set(['metro', 'tram', 'train', 'subway'])
 
+/**
+ * OSM `railway=*` kinds we keep, as small codes (stored per edge). Matching is
+ * constrained by kind so a metro ride can't snap to a parallel commuter-rail
+ * line: each Arc mode matches only its own track kinds (ALLOWED_KINDS_BY_TYPE).
+ * 0 = unknown (edges fetched before kinds were stored) and acts as a wildcard.
+ */
+export const RAIL_KIND = {
+  unknown: 0,
+  subway: 1,
+  light_rail: 2,
+  tram: 3,
+  rail: 4,
+  narrow_gauge: 5,
+  monorail: 6
+} as const
+
+export function railKindCode(railwayTag: string | undefined): number {
+  switch (railwayTag) {
+    case 'subway': return RAIL_KIND.subway
+    case 'light_rail': return RAIL_KIND.light_rail
+    case 'tram': return RAIL_KIND.tram
+    case 'rail': return RAIL_KIND.rail
+    case 'narrow_gauge': return RAIL_KIND.narrow_gauge
+    case 'monorail': return RAIL_KIND.monorail
+    default: return RAIL_KIND.unknown
+  }
+}
+
+/**
+ * Which OSM track kinds each Arc mode may match. Splits heavy rail (train)
+ * from subway/light modes so the corridors stop bleeding into each other;
+ * metro and tram still share light_rail (the Green-Line-style gray zone),
+ * which is geometrically near-identical anyway.
+ */
+export const ALLOWED_KINDS_BY_TYPE: Readonly<Record<string, readonly number[]>> = {
+  metro: [RAIL_KIND.subway, RAIL_KIND.light_rail],
+  subway: [RAIL_KIND.subway, RAIL_KIND.light_rail],
+  tram: [RAIL_KIND.tram, RAIL_KIND.light_rail],
+  train: [RAIL_KIND.rail, RAIL_KIND.narrow_gauge, RAIL_KIND.monorail]
+}
+
 /** OSM node and its neighbors; coords are projected (see RailGraph). */
 export interface RailNodeInput {
   id: number

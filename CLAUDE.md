@@ -119,8 +119,9 @@ where OSM is best) by map-matching rides onto real OSM rail geometry.
   surfaces the server's error text.
 - **`db/railStore.ts`** — fetched regions **accumulate** one viewport at a time
   (load each city separately). Nodes dedupe by OSM id; edges stored canonically
-  (`a < b`, unique). Coverage bboxes gate matching. `rail_matched_geom` caches
-  the matched output.
+  (`a < b`, unique) with their OSM `railway` **kind** (`rail_edges.kind`,
+  `RAIL_KIND`; re-fetch upserts the kind onto legacy `0`/unknown rows). Coverage
+  bboxes gate matching. `rail_matched_geom` caches the matched output.
 - **`rail/snapRail.ts` (`matchRideToRail`)** — the matcher. **Segment-local, not
   all-or-nothing:** anchor each vertex to the nearest point on the *track* (edge
   distance — OSM nodes are sparse on straight runs), join consecutive anchors by
@@ -132,9 +133,12 @@ where OSM is best) by map-matching rides onto real OSM rail geometry.
   bridge stay named constants at the top.
 - **`rail/buildMatches.ts`** — runs the matcher over every rail ride's **raw
   points** once (not zoom-simplified geometry), simplifies into the per-zoom
-  detail levels, and caches in `rail_matched_geom`. Heavy → runs after a fetch
-  (auto) with chunked progress, **not** per viewport. The viewport query
-  `COALESCE`s the cached line in under snap mode.
+  detail levels, and caches in `rail_matched_geom`. **Type-constrained:** builds
+  one graph per Arc mode filtered to its allowed kinds
+  (`ALLOWED_KINDS_BY_TYPE` — metro→subway/light-rail, train→rail, tram→
+  tram/light-rail), so a metro ride can't snap to a parallel commuter line.
+  Heavy → runs after a fetch (auto) with chunked progress, **not** per viewport.
+  The viewport query `COALESCE`s the cached line in under snap mode.
 
 Snapping **supersedes averaging** (`railAverage.ts`, the no-network fallback) —
 they're mutually exclusive in the query and the UI.

@@ -6,8 +6,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import { buildOverpassQuery, parseOverpassJson, fetchRailNetwork } from '../src/main/rail/overpass'
 import {
+  ALLOWED_KINDS_BY_TYPE,
   buildRailGraph,
   matchRideToRail,
+  RAIL_KIND,
   type RailNodeInput,
   type RailEdgeInput
 } from '../src/main/rail/snapRail'
@@ -22,22 +24,26 @@ describe('overpass parsing', () => {
     expect(q).toContain('"service"!~"."')
   })
 
-  it('splits ways into per-segment edges and keeps only referenced nodes', () => {
+  it('splits ways into per-segment edges, tagging each with its railway kind', () => {
     const json = {
       elements: [
         { type: 'node', id: 10, lat: 0, lon: 0 },
         { type: 'node', id: 11, lat: 0, lon: 0.01 },
         { type: 'node', id: 12, lat: 0, lon: 0.02 },
+        { type: 'node', id: 20, lat: 1, lon: 0 },
+        { type: 'node', id: 21, lat: 1, lon: 0.01 },
         { type: 'node', id: 99, lat: 5, lon: 5 }, // unreferenced → dropped
-        { type: 'way', id: 100, nodes: [10, 11, 12], tags: { railway: 'subway' } }
+        { type: 'way', id: 100, nodes: [10, 11, 12], tags: { railway: 'subway' } },
+        { type: 'way', id: 101, nodes: [20, 21], tags: { railway: 'rail' } }
       ]
     }
     const { nodes, edges } = parseOverpassJson(json)
     expect(edges).toEqual([
-      { a: 10, b: 11 },
-      { a: 11, b: 12 }
+      { a: 10, b: 11, kind: RAIL_KIND.subway },
+      { a: 11, b: 12, kind: RAIL_KIND.subway },
+      { a: 20, b: 21, kind: RAIL_KIND.rail }
     ])
-    expect(nodes.map((n) => n.id).sort((x, y) => x - y)).toEqual([10, 11, 12])
+    expect(nodes.map((n) => n.id).sort((x, y) => x - y)).toEqual([10, 11, 12, 20, 21])
   })
 
   it('tolerates ways referencing missing nodes', () => {
@@ -48,6 +54,17 @@ describe('overpass parsing', () => {
       ]
     }
     expect(parseOverpassJson(json).edges).toEqual([])
+  })
+
+  it('codes an untagged/unknown railway as kind 0 (wildcard)', () => {
+    const json = {
+      elements: [
+        { type: 'node', id: 1, lat: 0, lon: 0 },
+        { type: 'node', id: 2, lat: 0, lon: 0.01 },
+        { type: 'way', id: 3, nodes: [1, 2], tags: { railway: 'funicular' } }
+      ]
+    }
+    expect(parseOverpassJson(json).edges[0]!.kind).toBe(RAIL_KIND.unknown)
   })
 
   it('returns empty for malformed input', () => {
@@ -316,5 +333,45 @@ describe('tuning ranges', () => {
 
     const unlinked = buildRailGraph(nodes, edges, { snapRadiusM: 200, transferRadiusM: 0 })
     expect(matchRideToRail(ride, unlinked)).toBeNull() // long hop won't route
+  })
+})
+
+describe('type-constrained matching', () => {
+  // A subway line and a parallel commuter-rail line ~30 m apart.
+  const nodes: RailNodeInput[] = []
+  const subwayEdges: Array<RailEdgeInput & { kind: number }> = []
+  const railEdges: Array<RailEdgeInput & { kind: number }> = []
+  for (let i = 0; i <= 10; i++) {
+    nodes.push({ id: 100 + i, lat: 0, lon: i * 0.005 }) // subway
+    nodes.push({ id: 200 + i, lat: 0.00028, lon: i * 0.005 }) // commuter rail
+    if (i > 0) {
+      subwayEdges.push({ a: 99 + i, b: 100 + i, kind: RAIL_KIND.subway })
+      railEdges.push({ a: 199 + i, b: 200 + i, kind: RAIL_KIND.rail })
+    }
+  }
+  const all = [...subwayEdges, ...railEdges]
+  // Mirror buildMatches: a mode matches only edges of its allowed kinds.
+  const graphFor = (type: string): ReturnType<typeof buildRailGraph> => {
+    const allow = new Set(ALLOWED_KINDS_BY_TYPE[type])
+    return buildRailGraph(
+      nodes,
+      all.filter((e) => allow.has(e.kind)),
+      { snapRadiusM: 120, transferRadiusM: 60 }
+    )
+  }
+
+  // A ride that hugs the subway line (lat 0) but is closer to it than to rail.
+  const subwayRide = new Float32Array([0, 0.00003, 0.02, -0.00003, 0.04, 0.00004])
+
+  it('a metro ride snaps to subway track (lat 0), never the parallel rail', () => {
+    const c = coordsOf(matchRideToRail(subwayRide, graphFor('metro'))!)
+    for (let i = 1; i < c.length; i += 2) expect(c[i]).toBe(0)
+  })
+
+  it('a train ride ignores the subway and snaps to the rail line (lat ≈ 0.00028)', () => {
+    // Same path, but as a train it may only use the commuter-rail edges.
+    const c = coordsOf(matchRideToRail(subwayRide, graphFor('train'))!)
+    const railLat = Math.fround(0.00028)
+    for (let i = 1; i < c.length; i += 2) expect(c[i]).toBe(railLat)
   })
 })

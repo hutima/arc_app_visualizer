@@ -10,7 +10,14 @@ import type { DatabaseSync } from 'node:sqlite'
 import { DEFAULT_RAIL_TUNING, type LatLonBBox, type RailMatchProgress, type RailTuning } from '../../shared/types'
 import { DETAIL_LEVELS } from '../../shared/displayDetail'
 import { simplifyIndices } from '../importer/simplify'
-import { buildRailGraph, matchRideToRail, RAIL_SNAP_TYPES, type CoverageTest } from './snapRail'
+import {
+  ALLOWED_KINDS_BY_TYPE,
+  buildRailGraph,
+  matchRideToRail,
+  RAIL_SNAP_TYPES,
+  type CoverageTest,
+  type RailGraph
+} from './snapRail'
 import { coverageBoxes, loadAllRail, clearMatchedGeom } from '../db/railStore'
 
 const CHUNK = 150
@@ -37,18 +44,37 @@ export async function rebuildRailMatches(
   }
 
   const { nodes, edges } = loadAllRail(db)
-  const graph = buildRailGraph(nodes, edges, tuning)
   const isCovered: CoverageTest = (lon, lat) =>
     boxes.some((b) => lat >= b.minLat && lat <= b.maxLat && lon >= b.minLon && lon <= b.maxLon)
+
+  // One graph per Arc mode, each filtered to the OSM track kinds that mode may
+  // match (a metro ride routes only on subway/light-rail, never commuter rail).
+  // Cached by kind-set so metro and subway share a graph. Unknown-kind edges
+  // (0, from pre-v9 fetches) are wildcards until the area is re-fetched.
+  const graphByKindSet = new Map<string, RailGraph>()
+  const graphFor = (type: string): RailGraph => {
+    const allowed = ALLOWED_KINDS_BY_TYPE[type] ?? null
+    const key = allowed ? [...allowed].sort((x, y) => x - y).join(',') : 'all'
+    let g = graphByKindSet.get(key)
+    if (!g) {
+      const allow = allowed ? new Set(allowed) : null
+      const usable = allow
+        ? edges.filter((e) => e.kind === 0 || allow.has(e.kind))
+        : edges
+      g = buildRailGraph(nodes, usable, tuning)
+      graphByKindSet.set(key, g)
+    }
+    return g
+  }
 
   const u = unionBox(boxes)
   const typeList = [...RAIL_SNAP_TYPES]
   const segs = db.prepare(
-    `SELECT id FROM segments
+    `SELECT id, type FROM segments
      WHERE type IN (${typeList.map(() => '?').join(',')})
        AND max_lat >= ? AND min_lat <= ? AND max_lon >= ? AND min_lon <= ?
      ORDER BY id`
-  ).all(...typeList, u.minLat, u.maxLat, u.minLon, u.maxLon) as Array<{ id: number }>
+  ).all(...typeList, u.minLat, u.maxLat, u.minLon, u.maxLon) as Array<{ id: number; type: string }>
 
   const pointsStmt = db.prepare(
     `SELECT lon, lat FROM points
@@ -72,7 +98,7 @@ export async function rebuildRailMatches(
           coords[k * 2] = pts[k]!.lon
           coords[k * 2 + 1] = pts[k]!.lat
         }
-        const snapped = matchRideToRail(coords, graph, isCovered)
+        const snapped = matchRideToRail(coords, graphFor(segs[i]!.type), isCovered)
         if (snapped && storeDetailLevels(insertStmt, segs[i]!.id, snapped)) matched++
       }
       db.exec('COMMIT')

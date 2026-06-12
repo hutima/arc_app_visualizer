@@ -121,8 +121,10 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   the rail graph** — filling tunnel gaps and crossing between lines at
   interchanges (nearby nodes are linked as transfer edges) — and any stretch
   that can't be matched or routed (off-network, off-coverage, or a gap too long
-  to bridge) **keeps its raw GPS** instead of rejecting the whole ride.
-  Supersedes averaging while on. The matching ranges are tweakable in the
+  to bridge) **keeps its raw GPS** instead of rejecting the whole ride. Matching
+  is **type-constrained** — each mode snaps only to its own OSM track kind
+  (metro→subway/light-rail, train→commuter rail, tram→tram/light-rail) — so a
+  metro ride can't grab a parallel commuter line. Supersedes averaging while on. The matching ranges are tweakable in the
   panel (or `settings.json` → `rail`): **Snap within** (how far a GPS point may
   sit from a track and still match; raise if noisy rides stay raw, lower if
   rides grab the wrong nearby line) and **Transfer within** (how far apart two
