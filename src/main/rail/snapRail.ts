@@ -3,22 +3,23 @@
  *
  * Metro/tram/train GPS is worst exactly where OSM is best: tunnels are mapped
  * in OSM from official alignments even though the phone sees nothing. So
- * instead of averaging bad-with-bad, we snap each ride onto the rail network
- * and route along it between matched anchors — replacing garbage tunnel GPS
- * with the real alignment, and making every repeat ride coincide (the smear
- * collapses without merging identities).
+ * instead of averaging bad-with-bad, we snap a ride onto the rail network and
+ * route along it between matched anchors — replacing garbage tunnel GPS with
+ * the real alignment, and making every repeat ride coincide.
  *
- * v1 is a greedy matcher: anchor each ride vertex to the nearest rail *edge*
- * (point-to-segment distance — OSM nodes are sparse on straight track, so
- * node distance alone misses most of the network), then Dijkstra between
- * consecutive anchors to bridge gaps (tunnels). A hop that won't route but
- * spans only a few meters (parallel-track ping-pong) is bridged straight; a
- * ride that can't be matched confidently (too far from rail, or a long hop
- * that won't route) is left untouched. Raw points are never modified — this
- * runs on display geometry per viewport query. A full HMM matcher can
- * replace the greedy core later without changing the call sites.
+ * The matcher is *segment-local*, not all-or-nothing: each ride vertex is
+ * anchored to the nearest point on the network (within a radius — OSM nodes
+ * are sparse on straight track, so we measure distance to the edge, not the
+ * node), and consecutive anchors are joined by routing along the rail graph,
+ * which fills the gap between two far-apart fixes with the real track and can
+ * cross between lines at interchanges (transfer edges connect nearby nodes).
+ * A hop that can't be routed and is too long to bridge keeps its raw GPS and
+ * breaks the rail run — so a ride that wanders off the network (or spans two
+ * disconnected systems) is cleaned where it can be and left raw where it
+ * can't, instead of being rejected wholesale. Raw points are never modified;
+ * the cleaned line is a display artifact. A full HMM matcher can replace the
+ * greedy core later without changing the call sites.
  */
-import type { ViewportSegmentRow } from '../db/queries'
 
 export const RAIL_SNAP_TYPES: ReadonlySet<string> = new Set(['metro', 'tram', 'train', 'subway'])
 
@@ -33,20 +34,34 @@ export interface RailEdgeInput {
   b: number
 }
 
-/** Snap a ride vertex to rail within ~100 m (of the track, not just nodes). */
-const SNAP_RADIUS_DEG = 9e-4
+/** Anchor a ride vertex to rail within ~200 m of the *track* (not just nodes). */
+const SNAP_RADIUS_DEG = 1.8e-3
 /** A routed hop may be at most this multiple of the straight anchor distance… */
 const GAP_FACTOR = 4
 /** …plus this slack (~330 m), so short hops aren't over-constrained. */
 const GAP_SLACK_DEG = 3e-3
 /**
- * An unroutable hop no longer than this (~150 m) is bridged straight instead
- * of failing the run: adjacent parallel tracks (one way per direction) make
- * noisy anchors ping-pong across rails whose connecting crossover is far away.
+ * An unroutable hop no longer than this (~155 m) is bridged straight instead
+ * of breaking the run: adjacent parallel tracks (one way per direction) make
+ * noisy anchors ping-pong across rails whose crossover is far away.
  */
 const SOFT_BRIDGE_DEG = 1.4e-3
-/** Give up on a run unless at least this fraction of its vertices matched. */
-const MIN_MATCH_FRACTION = 0.5
+/**
+ * Distinct nodes within this (~60 m) are linked so routing can cross between
+ * lines: interchange platforms and at-grade crossings that OSM maps as
+ * separate, unconnected ways. Weighted by real distance, so a transfer is
+ * only taken when it genuinely shortens the path.
+ */
+const TRANSFER_RADIUS_DEG = 5.5e-4
+
+/**
+ * Is this lon/lat inside a fetched coverage region? Rail is fetched one
+ * viewport at a time, so a ride can run off the edge of everything fetched —
+ * vertices outside coverage keep their raw GPS, never force-matched.
+ */
+export type CoverageTest = (lon: number, lat: number) => boolean
+
+const FULL_COVERAGE: CoverageTest = () => true
 
 export interface RailGraph {
   /** Projected coords keyed by node id: X = lon·cos(refLat), Y = lat. */
@@ -92,6 +107,7 @@ export function buildRailGraph(nodes: RailNodeInput[], edges: RailEdgeInput[]): 
     link(e.b, e.a, w)
     kept.push(e)
   }
+  addTransferEdges(pos, adj, link)
 
   // Index edges into a grid sized so a 3×3 neighborhood covers the snap
   // radius: an edge is registered in every cell its bbox touches, so any
@@ -115,6 +131,43 @@ export function buildRailGraph(nodes: RailNodeInput[], edges: RailEdgeInput[]): 
     }
   }
   return { pos, adj, edges: kept, grid, cell, refCos, empty: pos.size === 0 }
+}
+
+/** Link distinct nodes within the transfer radius that the track doesn't already connect. */
+function addTransferEdges(
+  pos: Map<number, { x: number; y: number; lon: number; lat: number }>,
+  adj: Map<number, Array<{ to: number; w: number }>>,
+  link: (a: number, b: number, w: number) => void
+): void {
+  const cell = TRANSFER_RADIUS_DEG
+  const grid = new Map<string, number[]>()
+  for (const [id, p] of pos) {
+    const key = cellKey(Math.floor(p.x / cell), Math.floor(p.y / cell))
+    const bucket = grid.get(key)
+    if (bucket) bucket.push(id)
+    else grid.set(key, [id])
+  }
+  const r2 = TRANSFER_RADIUS_DEG * TRANSFER_RADIUS_DEG
+  const adjacent = (a: number, b: number): boolean => (adj.get(a) ?? []).some((e) => e.to === b)
+  for (const [id, p] of pos) {
+    const cx = Math.floor(p.x / cell)
+    const cy = Math.floor(p.y / cell)
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const bucket = grid.get(cellKey(cx + dx, cy + dy))
+        if (!bucket) continue
+        for (const other of bucket) {
+          if (other <= id) continue // each unordered pair once
+          const q = pos.get(other)!
+          const d2 = (p.x - q.x) ** 2 + (p.y - q.y) ** 2
+          if (d2 === 0 || d2 > r2 || adjacent(id, other)) continue
+          const w = Math.sqrt(d2)
+          link(id, other, w)
+          link(other, id, w)
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -154,23 +207,12 @@ function nearestAnchor(g: RailGraph, x: number, y: number): number | null {
 }
 
 /**
- * Is this lon/lat inside a fetched coverage region? Rail is fetched one
- * viewport at a time, so a ride can run off the edge of everything fetched —
- * vertices outside coverage must keep their raw GPS, never be force-matched
- * (or worse, dropped).
+ * Map-match one ride (interleaved lon,lat coords) to the rail network. The
+ * result threads rail geometry through anchored, routable stretches and keeps
+ * raw GPS everywhere else (off-network, off-coverage, or across a gap too long
+ * to route). Returns null when nothing snapped — the caller keeps the raw line.
  */
-export type CoverageTest = (lon: number, lat: number) => boolean
-
-const FULL_COVERAGE: CoverageTest = () => true
-
-/**
- * Snap one ride (interleaved lon,lat display coords) to the rail network.
- * Each in-coverage run of vertices is matched independently; off-coverage
- * runs (and runs that won't match confidently) pass through raw, so a ride
- * leaving the fetched area keeps its real tail. Returns the stitched
- * polyline, or null when nothing snapped (caller keeps the original row).
- */
-export function snapRideToRail(
+export function matchRideToRail(
   coords: Float32Array,
   g: RailGraph,
   isCovered: CoverageTest = FULL_COVERAGE
@@ -185,74 +227,47 @@ export function snapRideToRail(
     if (m >= 2 && out[m - 2] === lon && out[m - 1] === lat) return
     out.push(lon, lat)
   }
-  const pushRaw = (i: number): void => pushLonLat(coords[i * 2]!, coords[i * 2 + 1]!)
+  const pushNode = (id: number): void => {
+    const p = g.pos.get(id)!
+    pushLonLat(p.lon, p.lat)
+  }
 
-  let snappedRuns = 0
-  let i = 0
-  while (i < n) {
-    if (!isCovered(coords[i * 2]!, coords[i * 2 + 1]!)) {
-      pushRaw(i)
-      i++
+  let prev: number | null = null // last anchored node, or null if last point was raw
+  let snappedHops = 0
+  for (let i = 0; i < n; i++) {
+    const lon = coords[i * 2]!
+    const lat = coords[i * 2 + 1]!
+    const anchor = isCovered(lon, lat) ? nearestAnchor(g, lon * g.refCos, lat) : null
+    if (anchor === null) {
+      pushLonLat(lon, lat) // off-network / off-coverage: keep raw, break the run
+      prev = null
       continue
     }
-    // Maximal in-coverage run [i, end).
-    let end = i + 1
-    while (end < n && isCovered(coords[end * 2]!, coords[end * 2 + 1]!)) end++
-    const path = matchRun(coords, i, end, g)
-    if (path) {
-      snappedRuns++
-      for (const id of path) {
-        const p = g.pos.get(id)!
-        pushLonLat(p.lon, p.lat)
-      }
-    } else {
-      for (let j = i; j < end; j++) pushRaw(j)
+    if (prev === null) {
+      pushNode(anchor)
+      prev = anchor
+      continue
     }
-    i = end
-  }
-
-  if (snappedRuns === 0 || out.length < 4) return null
-  return new Float32Array(out)
-}
-
-/**
- * Greedy-match vertices [start, end) to a rail node path, or null when the
- * run can't be matched confidently (too far from rail, or a long hop that
- * won't route sanely).
- */
-function matchRun(coords: Float32Array, start: number, end: number, g: RailGraph): number[] | null {
-  // Anchor sequence: nearest edge per vertex, consecutive duplicates dropped.
-  const anchors: number[] = []
-  let matched = 0
-  for (let i = start; i < end; i++) {
-    const x = coords[i * 2]! * g.refCos
-    const y = coords[i * 2 + 1]!
-    const node = nearestAnchor(g, x, y)
-    if (node === null) continue
-    matched++
-    if (anchors.length === 0 || anchors[anchors.length - 1] !== node) anchors.push(node)
-  }
-  if (anchors.length < 2 || matched < (end - start) * MIN_MATCH_FRACTION) return null
-
-  // Route along the rail between consecutive anchors, bridging tunnels.
-  const path: number[] = [anchors[0]!]
-  for (let k = 1; k < anchors.length; k++) {
-    const from = anchors[k - 1]!
-    const to = anchors[k]!
-    if (from === to) continue
-    const a = g.pos.get(from)!
-    const b = g.pos.get(to)!
+    if (anchor === prev) continue
+    const a = g.pos.get(prev)!
+    const b = g.pos.get(anchor)!
     const straight = Math.hypot(a.x - b.x, a.y - b.y)
-    const seg = dijkstra(g, from, to, GAP_FACTOR * straight + GAP_SLACK_DEG)
-    if (seg) {
-      for (let j = 1; j < seg.length; j++) path.push(seg[j]!)
+    const route = dijkstra(g, prev, anchor, GAP_FACTOR * straight + GAP_SLACK_DEG)
+    if (route) {
+      for (let j = 1; j < route.length; j++) pushNode(route[j]!)
+      snappedHops++
+      prev = anchor
     } else if (straight <= SOFT_BRIDGE_DEG) {
-      path.push(to) // parallel-track ping-pong: bridge the few meters straight
+      pushNode(anchor) // parallel-track ping-pong: bridge the few meters straight
+      snappedHops++
+      prev = anchor
     } else {
-      return null // a long hop that won't route sanely → don't trust the match
+      pushLonLat(lon, lat) // long gap that won't route → keep raw, break the run
+      prev = null
     }
   }
-  return path
+  if (snappedHops === 0 || out.length < 4) return null
+  return new Float32Array(out)
 }
 
 /** Shortest node path from src to dst within a distance cutoff, or null. */
@@ -282,53 +297,6 @@ function dijkstra(g: RailGraph, src: number, dst: number, maxDist: number): numb
     if (at === src) break
   }
   return path.reverse()
-}
-
-/** Snap every matchable rail row; non-rail rows pass through untouched. */
-export interface RailSnapResult {
-  rows: ViewportSegmentRow[]
-  /** Rail rides successfully snapped to OSM geometry. */
-  snapped: number
-  /** Rail-typed rides seen (snapped + passed through), for "X of Y" stats. */
-  railRides: number
-}
-
-export function snapRailTracks(
-  rows: ViewportSegmentRow[],
-  g: RailGraph,
-  isCovered: CoverageTest = FULL_COVERAGE
-): RailSnapResult {
-  if (g.empty) return { rows, snapped: 0, railRides: 0 }
-  const out: ViewportSegmentRow[] = []
-  let snapped = 0
-  let railRides = 0
-  for (const row of rows) {
-    if (!RAIL_SNAP_TYPES.has(row.type) || row.point_count < 2) {
-      out.push(row)
-      continue
-    }
-    railRides++
-    const snappedCoords = snapRideToRail(floatView(row), g, isCovered)
-    if (!snappedCoords) {
-      out.push(row)
-      continue
-    }
-    snapped++
-    out.push({
-      id: row.id,
-      type: row.type,
-      start_ts_ms: row.start_ts_ms,
-      point_count: snappedCoords.length / 2,
-      coords: new Uint8Array(snappedCoords.buffer)
-    })
-  }
-  return { rows: out, snapped, railRides }
-}
-
-function floatView(row: ViewportSegmentRow): Float32Array {
-  return row.coords.byteOffset % 4 === 0
-    ? new Float32Array(row.coords.buffer, row.coords.byteOffset, row.point_count * 2)
-    : new Float32Array(row.coords.slice().buffer)
 }
 
 /** Tiny binary min-heap keyed by distance (no dependency, allows stale entries). */

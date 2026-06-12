@@ -8,7 +8,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type { ParsedRail, BBox } from '../rail/overpass'
 import type { RailNodeInput, RailEdgeInput } from '../rail/snapRail'
-import type { RailCoverage } from '../../shared/types'
+import type { LatLonBBox, RailCoverage } from '../../shared/types'
 
 /**
  * Add a fetched region to the stored network. Nodes and edges from
@@ -76,8 +76,36 @@ export function getRailCoverage(db: DatabaseSync): RailCoverage | null {
     })),
     nodeCount: n,
     edgeCount: e,
+    matchedRides: matchedRideCount(db),
     lastFetchedAtMs: rows[rows.length - 1]!.fetchedAtMs
   }
+}
+
+/** Every fetched region's bbox (for the coverage gate during a match pass). */
+export function coverageBoxes(db: DatabaseSync): LatLonBBox[] {
+  return db.prepare(
+    `SELECT min_lat AS minLat, min_lon AS minLon, max_lat AS maxLat, max_lon AS maxLon
+     FROM rail_coverage`
+  ).all() as unknown as LatLonBBox[]
+}
+
+/** The whole stored network, for building one graph to match every ride against. */
+export function loadAllRail(db: DatabaseSync): { nodes: RailNodeInput[]; edges: RailEdgeInput[] } {
+  const nodes = db.prepare('SELECT id, lat, lon FROM rail_nodes').all() as unknown as RailNodeInput[]
+  const edges = db.prepare('SELECT a, b FROM rail_edges').all() as unknown as RailEdgeInput[]
+  return { nodes, edges }
+}
+
+/** Rail segments with cached matched geometry. */
+export function matchedRideCount(db: DatabaseSync): number {
+  const { n } = db.prepare(
+    'SELECT COUNT(DISTINCT segment_id) AS n FROM rail_matched_geom'
+  ).get() as { n: number }
+  return n
+}
+
+export function clearMatchedGeom(db: DatabaseSync): void {
+  db.exec('DELETE FROM rail_matched_geom')
 }
 
 /**

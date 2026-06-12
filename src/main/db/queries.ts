@@ -16,6 +16,8 @@ export interface ViewportSegmentRow {
   start_ts_ms: number | null
   point_count: number
   coords: Uint8Array
+  /** 1 when coords came from cached map-matched geometry (snap mode only). */
+  _matched?: number
 }
 
 export interface ViewportLimits {
@@ -72,15 +74,17 @@ export function queryViewportSegments(
   q: ViewportQuery,
   limits: ViewportLimits
 ): ViewportRowsResult {
+  // Snap mode swaps cached map-matched geometry in for rail rides that have it.
+  const snap = q.snapRail === true
   let detail = resolveDetail(q.detailMode, q.zoom)
   if ((q.detailMode ?? 'auto') === 'auto' && typeof detail === 'number') {
-    while (detail > 0 && countDisplayPoints(db, q, detail) > limits.points) detail--
+    while (detail > 0 && countDisplayPoints(db, q, detail, snap) > limits.points) detail--
   }
 
   const { rows, truncated } =
     detail === 'raw'
       ? rawRows(db, q, limits.segments)
-      : displayRows(db, q, detail, limits.segments)
+      : displayRows(db, q, detail, limits.segments, snap)
 
   const total = rows.reduce((sum, r) => sum + r.point_count, 0)
   const stride = total > limits.points ? Math.ceil(total / limits.points) : 1
@@ -90,13 +94,22 @@ export function queryViewportSegments(
   return { rows, truncated, detail, downsampleStride: stride }
 }
 
-function countDisplayPoints(db: DatabaseSync, q: ViewportQuery, detail: number): number {
+function countDisplayPoints(db: DatabaseSync, q: ViewportQuery, detail: number, snap: boolean): number {
+  // In snap mode, matched geometry (when present) decides a rail row's size.
+  const join = snap
+    ? 'LEFT JOIN rail_matched_geom m ON m.segment_id = s.id AND m.detail = ?'
+    : ''
+  const sizeExpr = snap ? 'COALESCE(m.point_count, d.point_count)' : 'd.point_count'
+  const params = snap
+    ? [detail, detail, ...viewportParams(q)]
+    : [detail, ...viewportParams(q)]
   const row = db.prepare(`
-    SELECT COALESCE(SUM(d.point_count), 0) AS total
+    SELECT COALESCE(SUM(${sizeExpr}), 0) AS total
     FROM segments s
     JOIN display_geometries d ON d.segment_id = s.id AND d.detail = ?
+    ${join}
     WHERE ${VIEWPORT_WHERE}
-  `).get(detail, ...viewportParams(q)) as { total: number }
+  `).get(...params) as { total: number }
   return row.total
 }
 
@@ -104,16 +117,32 @@ function displayRows(
   db: DatabaseSync,
   q: ViewportQuery,
   detail: number,
-  segmentLimit: number
+  segmentLimit: number,
+  snap: boolean
 ): { rows: ViewportSegmentRow[]; truncated: boolean } {
+  // Snap mode: prefer cached matched geometry per rail segment, falling back to
+  // the normal display polyline; `_matched` flags which rows were swapped.
+  const cols = snap
+    ? `s.id, s.type, s.start_ts_ms,
+       COALESCE(m.point_count, d.point_count) AS point_count,
+       COALESCE(m.coords, d.coords) AS coords,
+       (m.segment_id IS NOT NULL) AS _matched`
+    : 's.id, s.type, s.start_ts_ms, d.point_count, d.coords'
+  const join = snap
+    ? 'LEFT JOIN rail_matched_geom m ON m.segment_id = s.id AND m.detail = ?'
+    : ''
+  const params = snap
+    ? [detail, detail, ...viewportParams(q), segmentLimit + 1]
+    : [detail, ...viewportParams(q), segmentLimit + 1]
   const rows = db.prepare(`
-    SELECT s.id, s.type, s.start_ts_ms, d.point_count, d.coords
+    SELECT ${cols}
     FROM segments s
     JOIN display_geometries d ON d.segment_id = s.id AND d.detail = ?
+    ${join}
     WHERE ${VIEWPORT_WHERE}
     ORDER BY d.point_count DESC, s.id ASC
     LIMIT ?
-  `).all(detail, ...viewportParams(q), segmentLimit + 1) as unknown as ViewportSegmentRow[]
+  `).all(...params) as unknown as ViewportSegmentRow[]
   const truncated = rows.length > segmentLimit
   if (truncated) rows.length = segmentLimit
   return { rows, truncated }
