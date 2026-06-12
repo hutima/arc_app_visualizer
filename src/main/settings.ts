@@ -6,6 +6,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DEFAULT_CLEANING, type CleaningConfig } from './importer/clean'
+import { DEFAULT_RAIL_TUNING, clampRailTuning, type RailTuning } from '../shared/types'
 
 export type BasemapTheme = 'dark' | 'light'
 
@@ -22,6 +23,8 @@ export interface AppSettings {
    */
   roadDimOpacity: number
   cleaning: CleaningConfig
+  /** Rail map-matching ranges (meters); editable here or from the Cleaning panel. */
+  rail: RailTuning
   queryLimits: {
     /** Hard segment cap per viewport query (safety valve). */
     segments: number
@@ -46,6 +49,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   basemapTheme: 'dark',
   roadDimOpacity: 0.35,
   cleaning: DEFAULT_CLEANING,
+  rail: DEFAULT_RAIL_TUNING,
   queryLimits: {
     segments: 100000,
     waypoints: 5000,
@@ -94,6 +98,7 @@ export function loadSettings(userDataDir: string): AppSettings {
           ...(parsed.cleaning?.maxSpeedMpsByType ?? {})
         }
       },
+      rail: clampRailTuning(parsed.rail),
       queryLimits: {
         segments: upgradedSegmentCap(parsed.queryLimits?.segments),
         waypoints: parsed.queryLimits?.waypoints ?? DEFAULT_SETTINGS.queryLimits.waypoints,

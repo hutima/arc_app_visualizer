@@ -85,6 +85,30 @@ export interface RailMatchProgress {
   matched: number
 }
 
+/**
+ * User-tweakable matcher ranges (meters), persisted in settings.json under
+ * `rail` and editable from the Cleaning panel. Changing them re-runs the
+ * cached match pass.
+ */
+export interface RailTuning {
+  /** Max distance from a GPS point to the track for it to anchor. */
+  snapRadiusM: number
+  /** Unconnected nodes within this link up so routing can cross at transfers. */
+  transferRadiusM: number
+}
+
+export const DEFAULT_RAIL_TUNING: RailTuning = { snapRadiusM: 200, transferRadiusM: 60 }
+
+/** Keep manual edits inside ranges the matcher behaves sanely in. */
+export function clampRailTuning(t: Partial<RailTuning> | undefined): RailTuning {
+  const num = (v: unknown, def: number, min: number, max: number): number =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : def
+  return {
+    snapRadiusM: num(t?.snapRadiusM, DEFAULT_RAIL_TUNING.snapRadiusM, 20, 1000),
+    transferRadiusM: num(t?.transferRadiusM, DEFAULT_RAIL_TUNING.transferRadiusM, 0, 500)
+  }
+}
+
 export interface ViewportWaypoint {
   id: number
   lat: number
@@ -168,6 +192,8 @@ export interface AppConfig {
   basemapStyles: { dark: string; light: string }
   /** line-opacity applied to basemap road layers (1 = no dimming). */
   roadDimOpacity: number
+  /** Current matcher ranges, for the Cleaning panel inputs. */
+  railTuning: RailTuning
   dbPath: string
   settingsPath: string
 }
@@ -206,6 +232,8 @@ export interface ArcApi {
   fetchRailNetwork(bbox: LatLonBBox): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
   /** Re-run the match pass over all fetched coverage (e.g. when enabling snap). */
   rebuildRailMatches(): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
+  /** Persist new matcher ranges and re-run the match pass with them. */
+  setRailTuning(t: RailTuning): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
   /** Progress of the post-fetch / rebuild map-matching pass. */
   onRailProgress(cb: (p: RailMatchProgress) => void): () => void
   getRailCoverage(): Promise<RailCoverage | null>

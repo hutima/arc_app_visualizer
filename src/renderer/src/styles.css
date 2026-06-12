@@ -229,6 +229,42 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 
+/* Matcher range inputs (Cleaning panel) */
+.rail-tuning {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rail-tuning label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.rail-tuning input[type='number'] {
+  width: 80px;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.rail-tuning-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.rail-tuning-actions button:last-child {
+  flex: 0 0 auto;
+}
+
 .color-mode-row {
   display: flex;
   gap: 14px;

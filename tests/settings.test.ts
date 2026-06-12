@@ -44,4 +44,19 @@ describe('settings', () => {
     writeFileSync(settingsPath(dir), '{not json')
     expect(loadSettings(dir)).toEqual(DEFAULT_SETTINGS)
   })
+
+  it('merges rail tuning, clamping ranges the matcher cannot behave in', () => {
+    writeFileSync(
+      settingsPath(dir),
+      JSON.stringify({ rail: { snapRadiusM: 5000, transferRadiusM: -3 } })
+    )
+    const s = loadSettings(dir)
+    expect(s.rail.snapRadiusM).toBe(1000) // clamped to max
+    expect(s.rail.transferRadiusM).toBe(0) // clamped to min
+  })
+
+  it('defaults rail tuning for settings files predating it', () => {
+    writeFileSync(settingsPath(dir), JSON.stringify({ basemapTheme: 'dark' }))
+    expect(loadSettings(dir).rail).toEqual(DEFAULT_SETTINGS.rail)
+  })
 })

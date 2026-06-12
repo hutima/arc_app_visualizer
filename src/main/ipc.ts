@@ -22,7 +22,8 @@ import { fetchRailNetwork } from './rail/overpass'
 import { addRailNetwork, getRailCoverage } from './db/railStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
-import type { ImportProgress, LatLonBBox, ViewportQuery, ViewportResult } from '../shared/types'
+import { clampRailTuning } from '../shared/types'
+import type { ImportProgress, LatLonBBox, RailTuning, ViewportQuery, ViewportResult } from '../shared/types'
 
 export interface IpcContext {
   db: DatabaseSync
@@ -173,6 +174,16 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
   ipcMain.handle('rail:coverage', () => getRailCoverage(ctx.db))
+
+  /** One match pass with the current tuning, streaming progress to `sender`. */
+  const runMatchPass = async (sender: Electron.WebContents): Promise<void> => {
+    const t0 = performance.now()
+    const { matched, railSegments } = await rebuildRailMatches(ctx.db, ctx.settings.rail, (p) => {
+      if (!sender.isDestroyed()) sender.send('rail:progress', p)
+    })
+    insertPerf(ctx.db, 'rail.match', performance.now() - t0, `matched=${matched}/${railSegments}`)
+  }
+
   ipcMain.handle('rail:fetch', async (event, view: LatLonBBox) => {
     const nums = [view?.minLat, view?.maxLat, view?.minLon, view?.maxLon]
     if (nums.some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
@@ -194,25 +205,25 @@ export function registerIpc(ctx: IpcContext): void {
       const rail = await fetchRailNetwork(bbox)
       addRailNetwork(ctx.db, rail, bbox)
       // Cache map-matched geometry for the new coverage (progress to the UI).
-      const sender = event.sender
-      const t0 = performance.now()
-      const { matched, railSegments } = await rebuildRailMatches(ctx.db, (p) => {
-        if (!sender.isDestroyed()) sender.send('rail:progress', p)
-      })
-      insertPerf(ctx.db, 'rail.match', performance.now() - t0, `matched=${matched}/${railSegments}`)
+      await runMatchPass(event.sender)
       return { ok: true, coverage: getRailCoverage(ctx.db) }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
   ipcMain.handle('rail:rebuildMatches', async (event) => {
-    const sender = event.sender
     try {
-      const t0 = performance.now()
-      const { matched, railSegments } = await rebuildRailMatches(ctx.db, (p) => {
-        if (!sender.isDestroyed()) sender.send('rail:progress', p)
-      })
-      insertPerf(ctx.db, 'rail.match', performance.now() - t0, `matched=${matched}/${railSegments}`)
+      await runMatchPass(event.sender)
+      return { ok: true, coverage: getRailCoverage(ctx.db) }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('rail:setTuning', async (event, t: RailTuning) => {
+    try {
+      ctx.settings.rail = clampRailTuning(t)
+      saveSettings(ctx.settingsPath, ctx.settings)
+      await runMatchPass(event.sender)
       return { ok: true, coverage: getRailCoverage(ctx.db) }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -230,6 +241,7 @@ export function registerIpc(ctx: IpcContext): void {
       light: ctx.settings.basemapStyleUrlLight
     },
     roadDimOpacity: ctx.settings.roadDimOpacity,
+    railTuning: ctx.settings.rail,
     dbPath: ctx.dbPath,
     settingsPath: ctx.settingsPath
   }))

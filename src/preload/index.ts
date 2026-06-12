@@ -22,6 +22,7 @@ const api: ArcApi = {
   setBasemapTheme: (theme) => ipcRenderer.invoke('settings:setBasemapTheme', theme),
   fetchRailNetwork: (bbox) => ipcRenderer.invoke('rail:fetch', bbox),
   rebuildRailMatches: () => ipcRenderer.invoke('rail:rebuildMatches'),
+  setRailTuning: (t) => ipcRenderer.invoke('rail:setTuning', t),
   onRailProgress: (cb) => {
     const handler = (_event: unknown, p: RailMatchProgress): void => cb(p)
     ipcRenderer.on('rail:progress', handler)

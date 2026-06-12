@@ -122,7 +122,12 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   interchanges (nearby nodes are linked as transfer edges) — and any stretch
   that can't be matched or routed (off-network, off-coverage, or a gap too long
   to bridge) **keeps its raw GPS** instead of rejecting the whole ride.
-  Supersedes averaging while on.
+  Supersedes averaging while on. The matching ranges are tweakable in the
+  panel (or `settings.json` → `rail`): **Snap within** (how far a GPS point may
+  sit from a track and still match; raise if noisy rides stay raw, lower if
+  rides grab the wrong nearby line) and **Transfer within** (how far apart two
+  lines may be while still routable as an interchange) — "Apply & re-match"
+  re-runs the cached pass.
 - **Cleaning fallback — average repeat rail rides** (no network): rides
   between the same two places (either direction) collapse into one **robust
   consensus** track at ~50 m resolution — arc-length resampled, reduced by
