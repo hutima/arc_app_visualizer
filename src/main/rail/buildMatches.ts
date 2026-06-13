@@ -20,16 +20,55 @@ import {
   ROAD_TUNNEL_TYPES,
   ROAD_TUNING,
   type CoverageTest,
-  type RailGraph
+  type RailGraph,
+  type RailNodeInput
 } from './snapRail'
-import { coverageBoxes, loadAllRail, clearMatchedGeom } from '../db/railStore'
+import { coverageBoxes, loadAllRail, clearMatchedGeom, type StoredRailEdge } from '../db/railStore'
 import { prepareEffectivePoints } from '../db/editStore'
+import type { EditablePoint } from '../../shared/types'
 
 const CHUNK = 150
 
 export interface RebuildResult {
   matched: number
   railSegments: number
+}
+
+/** A coverage test over a layer's fetched boxes (rides keep raw GPS outside). */
+const makeGate = (boxes: LatLonBBox[]): CoverageTest => (lon, lat) =>
+  boxes.some((b) => lat >= b.minLat && lat <= b.maxLat && lon >= b.minLon && lon <= b.maxLon)
+
+/**
+ * One routing graph for an Arc mode, filtered to the OSM track kinds it may
+ * match (a metro ride routes only on subway/light-rail). Unknown-kind edges
+ * (0, from pre-v9 fetches) are wildcards until the area is re-fetched.
+ */
+function graphForType(
+  nodes: RailNodeInput[],
+  edges: StoredRailEdge[],
+  type: string,
+  tuning: RailTuning
+): RailGraph {
+  const allowed = ALLOWED_KINDS_BY_TYPE[type] ?? null
+  const allow = allowed ? new Set(allowed) : null
+  const usable = allow ? edges.filter((e) => e.kind === 0 || allow.has(e.kind)) : edges
+  return buildRailGraph(nodes, usable, tuning)
+}
+
+/** The road graph wants exactly the tunnel ways (no unknown-kind wildcards). */
+const roadGraphOf = (nodes: RailNodeInput[], edges: StoredRailEdge[]): RailGraph =>
+  buildRailGraph(nodes, edges.filter((e) => e.kind === RAIL_KIND.road_tunnel), ROAD_TUNING)
+
+/** Pack effective points into the matcher's coord + timestamp arrays. */
+function coordsAndTimes(pts: EditablePoint[]): { coords: Float32Array; times: Float64Array } {
+  const coords = new Float32Array(pts.length * 2)
+  const times = new Float64Array(pts.length)
+  for (let k = 0; k < pts.length; k++) {
+    coords[k * 2] = pts[k]!.lon
+    coords[k * 2 + 1] = pts[k]!.lat
+    times[k] = pts[k]!.tsMs == null ? NaN : Number(pts[k]!.tsMs)
+  }
+  return { coords, times }
 }
 
 /**
@@ -54,42 +93,21 @@ export async function rebuildRailMatches(
   }
 
   const { nodes, edges } = loadAllRail(db)
-  const gate = (boxes: LatLonBBox[]): CoverageTest => (lon, lat) =>
-    boxes.some((b) => lat >= b.minLat && lat <= b.maxLat && lon >= b.minLon && lon <= b.maxLon)
-  const railCovered = gate(railBoxes)
-  const roadCovered = gate(roadBoxes)
+  const railCovered = makeGate(railBoxes)
+  const roadCovered = makeGate(roadBoxes)
 
-  // One graph per Arc mode, each filtered to the OSM track kinds that mode may
-  // match (a metro ride routes only on subway/light-rail, never commuter rail).
-  // Cached by kind-set so metro and subway share a graph. Unknown-kind edges
-  // (0, from pre-v9 fetches) are wildcards until the area is re-fetched — but
-  // never for roads, whose graph wants exactly the tunnel ways.
+  // One graph per Arc mode (built lazily, cached by kind-set so metro and
+  // subway share one); the road graph is built once on demand.
   const graphByKindSet = new Map<string, RailGraph>()
   const graphFor = (type: string): RailGraph => {
     const allowed = ALLOWED_KINDS_BY_TYPE[type] ?? null
     const key = allowed ? [...allowed].sort((x, y) => x - y).join(',') : 'all'
     let g = graphByKindSet.get(key)
-    if (!g) {
-      const allow = allowed ? new Set(allowed) : null
-      const usable = allow
-        ? edges.filter((e) => e.kind === 0 || allow.has(e.kind))
-        : edges
-      g = buildRailGraph(nodes, usable, tuning)
-      graphByKindSet.set(key, g)
-    }
+    if (!g) graphByKindSet.set(key, (g = graphForType(nodes, edges, type, tuning)))
     return g
   }
   let roadGraphCache: RailGraph | null = null
-  const roadGraph = (): RailGraph => {
-    if (!roadGraphCache) {
-      roadGraphCache = buildRailGraph(
-        nodes,
-        edges.filter((e) => e.kind === RAIL_KIND.road_tunnel),
-        ROAD_TUNING
-      )
-    }
-    return roadGraphCache
-  }
+  const roadGraph = (): RailGraph => (roadGraphCache ??= roadGraphOf(nodes, edges))
 
   const u = unionBox([...railBoxes, ...roadBoxes])
   const typeList = [...RAIL_SNAP_TYPES, ...ROAD_TUNNEL_TYPES]
@@ -116,13 +134,7 @@ export async function rebuildRailMatches(
       for (let i = start; i < end; i++) {
         const pts = effectivePoints(segs[i]!.id)
         if (pts.length < 2) continue
-        const coords = new Float32Array(pts.length * 2)
-        const times = new Float64Array(pts.length)
-        for (let k = 0; k < pts.length; k++) {
-          coords[k * 2] = pts[k]!.lon
-          coords[k * 2 + 1] = pts[k]!.lat
-          times[k] = pts[k]!.tsMs == null ? NaN : Number(pts[k]!.tsMs)
-        }
+        const { coords, times } = coordsAndTimes(pts)
         // Rail rides are fully map-matched; road trips only get long GPS
         // gaps bridged through mapped tunnels (everything else stays raw).
         const snapped = ROAD_TUNNEL_TYPES.has(segs[i]!.type)
@@ -139,6 +151,57 @@ export async function rebuildRailMatches(
     await new Promise<void>((resolve) => setImmediate(resolve))
   }
   return { matched, railSegments: segs.length }
+}
+
+/**
+ * Re-match a single segment and refresh its cached geometry — used after an
+ * edit/split/merge to keep an already-snapped rail/metro/tram ride (or a
+ * bridged road trip) snapped, without re-running the whole dataset. Builds the
+ * one graph its type needs over the current network; a no-op (just clears the
+ * cache) for a non-snappable type or when its layer has no coverage. Returns
+ * whether matched geometry was written.
+ */
+export function rematchSegment(
+  db: DatabaseSync,
+  segmentId: number,
+  tuning: RailTuning = DEFAULT_RAIL_TUNING
+): boolean {
+  const seg = db.prepare('SELECT type FROM segments WHERE id = ?').get(segmentId) as
+    | { type: string }
+    | undefined
+  const isRoad = seg ? ROAD_TUNNEL_TYPES.has(seg.type) : false
+  const isRail = seg ? RAIL_SNAP_TYPES.has(seg.type) : false
+  if (!seg || (!isRoad && !isRail)) return false
+
+  const boxes = coverageBoxes(db, isRoad ? 'road' : 'rail')
+  const pts = boxes.length > 0 ? prepareEffectivePoints(db)(segmentId) : []
+
+  db.exec('BEGIN')
+  try {
+    // The edit already dropped this; clearing again keeps it idempotent.
+    db.prepare('DELETE FROM rail_matched_geom WHERE segment_id = ?').run(segmentId)
+    let wrote = false
+    if (boxes.length > 0 && pts.length >= 2) {
+      const { nodes, edges } = loadAllRail(db)
+      const covered = makeGate(boxes)
+      const graph = isRoad
+        ? roadGraphOf(nodes, edges)
+        : graphForType(nodes, edges, seg.type, tuning)
+      const { coords, times } = coordsAndTimes(pts)
+      const snapped = isRoad
+        ? bridgeRoadGaps(coords, graph, covered, times)
+        : matchRideToRail(coords, graph, covered, times)
+      const insertStmt = db.prepare(
+        'INSERT INTO rail_matched_geom (segment_id, detail, point_count, coords) VALUES (?, ?, ?, ?)'
+      )
+      if (snapped) wrote = storeDetailLevels(insertStmt, segmentId, snapped)
+    }
+    db.exec('COMMIT')
+    return wrote
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
 }
 
 /**

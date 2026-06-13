@@ -7,7 +7,8 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import type { DatabaseSync } from 'node:sqlite'
 import { openDb } from '../src/main/db/db'
 import { addRailNetwork, matchedRideCount } from '../src/main/db/railStore'
-import { rebuildRailMatches } from '../src/main/rail/buildMatches'
+import { rebuildRailMatches, rematchSegment } from '../src/main/rail/buildMatches'
+import { hasMatchedGeom, saveSegmentEdits } from '../src/main/db/editStore'
 import { RAIL_KIND } from '../src/main/rail/snapRail'
 import { queryViewportSegments, type ViewportSegmentRow } from '../src/main/db/queries'
 import type { ViewportQuery } from '../src/shared/types'
@@ -184,5 +185,50 @@ describe('cached rail matching', () => {
     let breaks = 0
     for (let i = 0; i < f.length; i += 2) if (Number.isNaN(f[i]!)) breaks++
     expect(breaks).toBe(1) // the impossible hop is a gap, not a jump
+  })
+})
+
+describe('single-segment re-match', () => {
+  let db: DatabaseSync
+  beforeEach(() => {
+    db = openDb(':memory:')
+    seedRide(db)
+  })
+
+  it('re-snaps only the edited segment after an edit dropped its cache', () => {
+    addRailNetwork(db, railLine, railBox)
+    return rebuildRailMatches(db).then(() => {
+      expect(hasMatchedGeom(db, 1)).toBe(true)
+
+      // An edit rebuilds display geometry and drops the cached snap...
+      saveSegmentEdits(db, 1, [{ seq: 2, lat: 0.0009, lon: 0.02, kind: 'move' }], 'draft')
+      expect(hasMatchedGeom(db, 1)).toBe(false)
+
+      // ...and re-matching that one segment restores it, riding the rail again.
+      expect(rematchSegment(db, 1)).toBe(true)
+      const on = queryViewportSegments(db, { ...VIEW, snapRail: true }, LIMITS).rows.find(
+        (r) => r.id === 1
+      )!
+      expect(on._matched).toBe(1)
+      expect(lats(on).every((lat) => lat === 0)).toBe(true)
+    })
+  })
+
+  it('clears the cache and writes nothing when coverage is gone', () => {
+    addRailNetwork(db, railLine, railBox)
+    return rebuildRailMatches(db).then(() => {
+      db.exec('DELETE FROM rail_coverage')
+      expect(rematchSegment(db, 1)).toBe(false)
+      expect(hasMatchedGeom(db, 1)).toBe(false)
+    })
+  })
+
+  it('is a no-op for a non-snappable type', () => {
+    db.prepare(
+      `INSERT INTO segments (id, track_id, file_id, type, point_count, clean_point_count,
+                             min_lat, max_lat, min_lon, max_lon)
+       VALUES (9, 1, 1, 'walking', 2, 2, 0, 0, 0, 0.01)`
+    ).run()
+    expect(rematchSegment(db, 9)).toBe(false)
   })
 })

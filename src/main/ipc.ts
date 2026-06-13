@@ -17,7 +17,7 @@ import {
 } from './db/queries'
 import { averageRailTracks } from './db/railAverage'
 import { RAIL_SNAP_TYPES } from './rail/snapRail'
-import { rebuildRailMatches } from './rail/buildMatches'
+import { rebuildRailMatches, rematchSegment } from './rail/buildMatches'
 import { fetchRailNetwork } from './rail/overpass'
 import { addRailNetwork, getRailCoverage, clearRailNetwork } from './db/railStore'
 import {
@@ -28,7 +28,8 @@ import {
   splitSegmentTyped,
   segmentStartTs,
   listMergeCandidates,
-  mergeSegments
+  mergeSegments,
+  hasMatchedGeom
 } from './db/editStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
@@ -189,6 +190,16 @@ export function registerIpc(ctx: IpcContext): void {
       setCategoryOrder(ctx.db, names)
     }
   })
+  // An edit/split/merge drops a segment's cached snap geometry. If it had one,
+  // re-match just the affected segment(s) so an already-snapped rail/metro/tram
+  // ride (or bridged road trip) stays snapped without a full dataset pass.
+  const reSnap = (hadSnap: boolean, ...segmentIds: number[]): void => {
+    if (!hadSnap) return
+    const t0 = performance.now()
+    for (const id of segmentIds) rematchSegment(ctx.db, id, ctx.settings.rail)
+    insertPerf(ctx.db, 'rail.rematch', performance.now() - t0, `segments=${segmentIds.join(',')}`)
+  }
+
   ipcMain.handle('edits:getSegment', (_e, segmentId: number) =>
     Number.isInteger(segmentId) ? getSegmentEditState(ctx.db, segmentId) : null
   )
@@ -199,7 +210,9 @@ export function registerIpc(ctx: IpcContext): void {
         if (!Number.isInteger(segmentId) || !Array.isArray(edits)) {
           return { ok: false, error: 'invalid edit payload' }
         }
+        const hadSnap = hasMatchedGeom(ctx.db, segmentId)
         saveSegmentEdits(ctx.db, segmentId, edits, mode === 'permanent' ? 'permanent' : 'draft')
+        reSnap(hadSnap, segmentId)
         return { ok: true }
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -220,7 +233,9 @@ export function registerIpc(ctx: IpcContext): void {
       if (!Number.isInteger(segmentId) || !Number.isFinite(seq)) {
         return { ok: false, error: 'invalid split request' }
       }
+      const hadSnap = hasMatchedGeom(ctx.db, segmentId)
       const newSegmentId = splitSegment(ctx.db, segmentId, seq)
+      reSnap(hadSnap, segmentId, newSegmentId)
       return { ok: true, newSegmentId }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -238,7 +253,9 @@ export function registerIpc(ctx: IpcContext): void {
         ) {
           return { ok: false, error: 'invalid split request' }
         }
+        const hadSnap = hasMatchedGeom(ctx.db, segmentId)
         const newSegmentId = splitSegmentTyped(ctx.db, segmentId, seq, firstType, secondType)
+        reSnap(hadSnap, segmentId, newSegmentId)
         return { ok: true, newSegmentId }
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -260,7 +277,9 @@ export function registerIpc(ctx: IpcContext): void {
       if (!Array.isArray(segmentIds) || !segmentIds.every((id) => Number.isInteger(id))) {
         return { ok: false, error: 'invalid merge request' }
       }
+      const hadSnap = segmentIds.some((id) => hasMatchedGeom(ctx.db, id))
       const mergedId = mergeSegments(ctx.db, segmentIds, type)
+      reSnap(hadSnap, mergedId)
       return { ok: true, mergedId }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
