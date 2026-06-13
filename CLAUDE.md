@@ -46,8 +46,10 @@ the exact production code paths; note it's still flagged experimental).
 src/
   main/        Electron main process (Node): DB, IPC, import worker, rail
     db/        schema.ts, db.ts (open+migrate), queries.ts, railStore.ts, railAverage.ts,
-               editStore.ts (user track edits overlay)
-    importer/  parseGpx, clean, simplify, importFiles (+ importWorker thread)
+               editStore.ts (user track edits overlay), placeStore.ts (persistent
+               place merge/assign + stats), placeCluster.ts (shared visit clustering)
+    importer/  parseGpx, clean, simplify, importFiles (+ importWorker thread),
+               importOverlap.ts (date-overlap scan + overwrite-window clearing)
     rail/      overpass.ts (fetch+parse), snapRail.ts (matcher), buildMatches.ts (cache pass)
     ipc.ts     all ipcMain.handle handlers; the main↔renderer contract
     index.ts   app entry, window creation
@@ -65,6 +67,14 @@ tests/         vitest; *.test.ts mirror the module they cover
 1. **Import** (worker thread, `importWorker.ts`): parse GPX → clean (flag, never
    delete) → write to SQLite. SHA-256 dedupe; per-file transactions; progress
    events; UI never blocks. Re-running a partial import self-heals.
+   **Overwrite mode** (`importOverlap.ts`, opt-in checkbox): re-exports overlap
+   in *dates* though not in *hash*, so the optional pass first
+   `analyzeImportOverlap`s the pending files (parses each for its date span,
+   reports the existing-data range it touches), the user edits a per-file
+   window, and `clearDateWindows` deletes existing in-window data (segments by
+   trip start, visits by timestamp; undated rows untouched) before the import —
+   recomputing partially-emptied files and dropping emptied ones, so
+   overlapping days replace instead of duplicating.
 2. **Index** (`schema.ts`): `points` keeps every raw point with cleaning flags
    (reprocessable forever); `display_geometries` holds per-zoom Douglas–Peucker
    simplifications (`DETAIL_LEVELS` in `shared/displayDetail.ts`) — what the map
@@ -97,9 +107,10 @@ tests/         vitest; *.test.ts mirror the module they cover
 - **Display vs Edit modes** (top-of-sidebar toggle in `App.tsx`): Display is
   the normal view (filters, cleaning, basemap); Edit swaps in the editing tools
   and de-emphasizes the base tracks (`MapController.applyEditEmphasis` dims them
-  so the working overlay reads clearly). Edit has two sub-tools (`EditTool`):
-  **Edit points** and **Merge tracks**; the active tool routes what a track
-  click does.
+  so the working overlay reads clearly). Edit has three sub-tools (`EditTool`):
+  **Edit points**, **Merge tracks**, and **Merge places**; the active tool
+  routes what a track / place click does. The third top-level mode, **Stats**,
+  makes place pins clickable for inspection instead.
 - **Track editing** (`db/editStore.ts` + `TrackEditPanel`): user edits live in
   `segment_edits`, an overlay keyed by seq — moves reuse the raw point's integer
   seq, inserts take a fractional seq between neighbors, deletes flag an integer
@@ -143,6 +154,38 @@ tests/         vitest; *.test.ts mirror the module they cover
   full dataset pass; otherwise re-run matching from the Cleaning panel. Edit
   geometry lives in `MapController`, never React state.
 
+### Places & stats
+
+- **Places are derived, not stored.** A "place" pin is a *cluster of `waypoints`
+  visits*, collapsed at query time (`queries.ts::collapseVisitsToPlaces`):
+  visits sharing an explicit `place_id` group first (a user-merged place), then
+  same-name visits within `PLACE_MERGE_RADIUS_DEG` (`placeCluster.ts`, ~275 m;
+  chains in two cities stay separate), then unnamed visits pass through. Each pin
+  keeps the **most recent** member's id/timestamp as its identity, so a clicked
+  dot maps back to its cluster. `placeCluster.clusterByProximity` is shared by
+  the renderer and the place ops so "what you click" == "what the op acts on".
+- **Persistent places** (`db/placeStore.ts`): a `places(id, name)` row + member
+  visits' `place_id` override the display clustering so far-apart / differently
+  named visits combine. `resolvePlace(ref)` turns a `PlaceRef` (`{placeId}` or a
+  representative `{waypointId}`) into the cluster's members.
+  - **Merge places** (`mergePlaces`, **Merge places** tool + `MergePlacesPanel`):
+    click pins to select, pick the name to keep, combine. **Non-destructive** —
+    only regroups `place_id` (no visit deleted; re-merge to undo), so no confirm.
+    Orphaned `places` rows are pruned.
+  - **Assign track → place** (`assignTrackToPlace`): with one place selected,
+    clicking a **track** folds it in as one stationary visit at its **centroid**
+    (timestamped at the track's start), then **deletes the track** — permanent
+    and structural, like a track merge. Materializes an implicit cluster into a
+    `places` row first so the new visit joins regardless of distance.
+- **Stats tab** (`StatsView` + `placeStore.getPlaceStats` /
+  `queries.getDatasetStats`): a dataset summary (totals, tracks/visits by year,
+  most-visited places) plus a per-place drill-down when a pin is clicked (visit
+  count, **local-time** hour-of-day / day-of-week / yearly histograms, first/last
+  visit). Charts are plain CSS bars — **no chart dependency** (offline/lean).
+  `MapController` rings the inspected/selected places via `setPlaceHighlight`
+  (its own point source, so off-screen places still ring); stats numbers live in
+  small React objects, never geometry.
+
 ### Schema migrations
 
 `schema.ts` holds `SCHEMA_VERSION` and `SCHEMA_SQL` (all `CREATE … IF NOT
@@ -156,7 +199,7 @@ inside one transaction, bumping `PRAGMA user_version`. To change schema:
    canonicalization). `CREATE IF NOT EXISTS` can't add columns — use
    `ensureColumn`.
 
-Current version: **11**. History is in the comment above `SCHEMA_VERSION`.
+Current version: **12**. History is in the comment above `SCHEMA_VERSION`.
 
 ## Rail / OSM snapping subsystem
 

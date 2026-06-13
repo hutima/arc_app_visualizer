@@ -1,15 +1,20 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type {
   CategoryInfo,
+  DatasetStats,
   DatasetSummary,
   PerfEntry,
+  PlaceRef,
+  TopPlace,
   ViewportQuery,
-  ViewportWaypoint
+  ViewportWaypoint,
+  YearCount
 } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { resolveDetail, type ResolvedDetail } from '../../shared/displayDetail'
 import { RAIL_SNAP_TYPES, ROAD_TUNNEL_TYPES } from '../rail/snapRail'
 import { prepareEffectivePoints } from './editStore'
+import { clusterByProximity } from './placeCluster'
 
 export interface ViewportSegmentRow {
   id: number
@@ -273,7 +278,7 @@ export function queryViewportWaypoints(
   limit: number
 ): ViewportWaypointsResult {
   const all = db.prepare(`
-    SELECT id, lat, lon, ts_ms AS tsMs, name
+    SELECT id, lat, lon, ts_ms AS tsMs, name, place_id AS placeId
     FROM waypoints
     WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
       AND (? IS NULL OR ts_ms IS NULL OR ts_ms >= ?)
@@ -284,67 +289,89 @@ export function queryViewportWaypoints(
     q.startTsMs, q.startTsMs,
     q.endTsMs, q.endTsMs
   ) as unknown as ViewportWaypoint[]
-  const merged = mergeSameNamePlaces(all)
+  const merged = collapseVisitsToPlaces(db, all)
   if (limit <= 0) return { waypoints: [], totalCount: merged.length }
   if (merged.length <= limit) return { waypoints: merged, totalCount: merged.length }
   return { waypoints: thinWaypoints(merged, q, limit), totalCount: merged.length }
 }
 
-/** Same-name visits within this radius of each other merge (~275 m). */
-const PLACE_MERGE_RADIUS_DEG = 0.0025
-
-interface PlaceCluster {
-  latSum: number
-  lonSum: number
-  count: number
-  /** Most recent member; supplies the merged dot's id/tsMs. */
-  rep: ViewportWaypoint
+/** Names of user-merged places, by id (small table; loaded once per query). */
+function loadPlaceNames(db: DatabaseSync): Map<number, string> {
+  const rows = db.prepare('SELECT id, name FROM places').all() as Array<{ id: number; name: string }>
+  return new Map(rows.map((r) => [r.id, r.name]))
 }
 
 /**
- * Arc exports one waypoint per stay, so a well-visited place is hundreds of
- * GPS-jittered dots. Merge same-name visits into a single dot at their mean
- * location. Merging is per spatial cluster, not global per name: chain
- * locations ("Starbucks" in two cities) keep separate dots instead of
- * averaging into a phantom between them. Unnamed visits pass through as-is.
+ * Collapse raw visits into the pins the map draws. Two passes:
+ *
+ * 1. Visits with an explicit `place_id` group by it — a user-merged place,
+ *    shown as one pin at the mean of its in-view visits with the chosen name,
+ *    regardless of distance or per-visit names.
+ * 2. The rest cluster the way Arc data demands: a well-visited place is
+ *    hundreds of GPS-jittered same-name dots, so same-name visits within a
+ *    radius merge to their mean. Per spatial cluster, not global per name, so
+ *    a chain ("Starbucks" in two cities) keeps separate pins. Unnamed visits
+ *    pass through as-is.
+ *
+ * Each merged pin keeps the most recent member's id/timestamp as its identity.
+ * (The persistent counterpart that *creates* place_id groups is
+ * placeStore.mergePlaces; this only renders whatever grouping exists.)
  */
-function mergeSameNamePlaces(all: ViewportWaypoint[]): ViewportWaypoint[] {
+function collapseVisitsToPlaces(db: DatabaseSync, all: ViewportWaypoint[]): ViewportWaypoint[] {
   const merged: ViewportWaypoint[] = []
-  const clustersByName = new Map<string, PlaceCluster[]>()
-  // id order ⇒ deterministic clustering regardless of scan order.
-  for (const w of [...all].sort((a, b) => a.id - b.id)) {
-    if (!w.name) {
-      merged.push(w)
-      continue
-    }
-    let clusters = clustersByName.get(w.name)
-    if (!clusters) clustersByName.set(w.name, (clusters = []))
-    const near = clusters.find((c) => {
-      const dLat = w.lat - c.latSum / c.count
-      const dLon = w.lon - c.lonSum / c.count
-      return dLat * dLat + dLon * dLon <= PLACE_MERGE_RADIUS_DEG ** 2
-    })
-    if (near) {
-      near.latSum += w.lat
-      near.lonSum += w.lon
-      near.count++
-      if (moreRecentVisit(w, near.rep)) near.rep = w
+  const byPlaceId = new Map<number, ViewportWaypoint[]>()
+  const byName = new Map<string, ViewportWaypoint[]>()
+  for (const w of all) {
+    if (w.placeId != null) {
+      const g = byPlaceId.get(w.placeId)
+      if (g) g.push(w)
+      else byPlaceId.set(w.placeId, [w])
+    } else if (w.name) {
+      const g = byName.get(w.name)
+      if (g) g.push(w)
+      else byName.set(w.name, [w])
     } else {
-      clusters.push({ latSum: w.lat, lonSum: w.lon, count: 1, rep: w })
+      merged.push(w) // unnamed, un-merged: its own pin
     }
   }
-  for (const clusters of clustersByName.values()) {
-    for (const c of clusters) {
-      merged.push({
-        id: c.rep.id,
-        lat: c.latSum / c.count,
-        lon: c.lonSum / c.count,
-        tsMs: c.rep.tsMs,
-        name: c.rep.name
-      })
+
+  const placeNames = byPlaceId.size > 0 ? loadPlaceNames(db) : null
+  for (const [placeId, members] of byPlaceId) {
+    merged.push(reduceCluster(members, { placeId, name: placeNames?.get(placeId) ?? null }))
+  }
+  for (const members of byName.values()) {
+    for (const cluster of clusterByProximity(members)) {
+      merged.push(reduceCluster(cluster, { placeId: null, name: null }))
     }
   }
   return merged
+}
+
+/**
+ * One pin from a cluster of visits: mean location, the most recent member's
+ * identity (id/timestamp). `name`/`placeId` override the member-derived name
+ * for user-merged places; otherwise the representative member's name is kept.
+ */
+function reduceCluster(
+  members: ViewportWaypoint[],
+  override: { placeId: number | null; name: string | null }
+): ViewportWaypoint {
+  let latSum = 0
+  let lonSum = 0
+  let rep = members[0]!
+  for (const w of members) {
+    latSum += w.lat
+    lonSum += w.lon
+    if (moreRecentVisit(w, rep)) rep = w
+  }
+  return {
+    id: rep.id,
+    lat: latSum / members.length,
+    lon: lonSum / members.length,
+    tsMs: rep.tsMs,
+    name: override.placeId != null ? override.name : rep.name,
+    placeId: override.placeId
+  }
 }
 
 /**
@@ -461,6 +488,97 @@ export function getSummary(db: DatabaseSync): DatasetSummary {
       (SELECT MAX(end_ts_ms) FROM segments) AS endTsMs
   `).get() as unknown as DatasetSummary
   return row
+}
+
+/**
+ * Dataset-wide stats for the Stats tab's global summary. A handful of grouped
+ * aggregates (cheap even on a multi-year archive); the heavier per-place
+ * histograms live in placeStore and only run when a place is selected.
+ */
+export function getDatasetStats(db: DatabaseSync): DatasetStats {
+  const base = db.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM imported_files WHERE status = 'imported') AS fileCount,
+      (SELECT COUNT(*) FROM tracks) AS trackCount,
+      (SELECT COUNT(*) FROM segments) AS segmentCount,
+      (SELECT COALESCE(SUM(point_count), 0) FROM segments) AS pointCount,
+      (SELECT COUNT(*) FROM waypoints) AS visitCount,
+      (SELECT MIN(start_ts_ms) FROM segments) AS startTsMs,
+      (SELECT MAX(end_ts_ms) FROM segments) AS endTsMs
+  `).get() as {
+    fileCount: number; trackCount: number; segmentCount: number; pointCount: number
+    visitCount: number; startTsMs: number | null; endTsMs: number | null
+  }
+
+  // Distinct places ≈ merged places + un-merged name clusters + unnamed
+  // singles. Name clusters are counted per name, not per spatial cluster — a
+  // cheap approximation (a chain in two cities counts once) good enough for a
+  // headline number.
+  const places = db.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM places) AS merged,
+      (SELECT COUNT(DISTINCT name) FROM waypoints
+         WHERE place_id IS NULL AND name IS NOT NULL AND name <> '') AS named,
+      (SELECT COUNT(*) FROM waypoints
+         WHERE place_id IS NULL AND (name IS NULL OR name = '')) AS unnamed
+  `).get() as { merged: number; named: number; unnamed: number }
+
+  return {
+    fileCount: base.fileCount,
+    trackCount: base.trackCount,
+    segmentCount: base.segmentCount,
+    pointCount: base.pointCount,
+    visitCount: base.visitCount,
+    placeCount: places.merged + places.named + places.unnamed,
+    startTsMs: base.startTsMs,
+    endTsMs: base.endTsMs,
+    segmentsByYear: yearCounts(db, 'segments', 'start_ts_ms'),
+    visitsByYear: yearCounts(db, 'waypoints', 'ts_ms'),
+    topPlaces: topVisitedPlaces(db, 12)
+  }
+}
+
+/** Row counts grouped by UTC calendar year (matches the year-coloring rule). */
+function yearCounts(db: DatabaseSync, table: 'segments' | 'waypoints', col: string): YearCount[] {
+  return db.prepare(`
+    SELECT CAST(strftime('%Y', ${col} / 1000, 'unixepoch') AS INTEGER) AS year,
+           COUNT(*) AS count
+    FROM ${table} WHERE ${col} IS NOT NULL
+    GROUP BY year ORDER BY year
+  `).all() as unknown as YearCount[]
+}
+
+/**
+ * Most-visited places: merged places by place_id, plus un-merged places by
+ * name. Each carries a ref so the UI can drill into its full stats; the coords
+ * are an average hint (drill-in recomputes the exact cluster centroid).
+ */
+function topVisitedPlaces(db: DatabaseSync, limit: number): TopPlace[] {
+  const mergedRows = db.prepare(`
+    SELECT p.id AS placeId, p.name AS name, COUNT(w.id) AS cnt,
+           AVG(w.lat) AS lat, AVG(w.lon) AS lon
+    FROM places p JOIN waypoints w ON w.place_id = p.id
+    GROUP BY p.id
+  `).all() as Array<{ placeId: number; name: string; cnt: number; lat: number; lon: number }>
+  const namedRows = db.prepare(`
+    SELECT name, COUNT(*) AS cnt, AVG(lat) AS lat, AVG(lon) AS lon, MAX(id) AS repId
+    FROM waypoints
+    WHERE place_id IS NULL AND name IS NOT NULL AND name <> ''
+    GROUP BY name
+  `).all() as Array<{ name: string; cnt: number; lat: number; lon: number; repId: number }>
+
+  const all: TopPlace[] = [
+    ...mergedRows.map((r) => ({
+      name: r.name, visitCount: r.cnt, lat: r.lat, lon: r.lon,
+      ref: { placeId: r.placeId } as PlaceRef
+    })),
+    ...namedRows.map((r) => ({
+      name: r.name, visitCount: r.cnt, lat: r.lat, lon: r.lon,
+      ref: { waypointId: r.repId } as PlaceRef
+    }))
+  ]
+  all.sort((a, b) => b.visitCount - a.visitCount || a.name.localeCompare(b.name))
+  return all.slice(0, limit)
 }
 
 export function getDataBounds(db: DatabaseSync): {

@@ -11,11 +11,15 @@ import {
   setCategoryColor,
   setCategoryOrder,
   getSummary,
+  getDatasetStats,
   getDataBounds,
   getRecentPerf,
   insertPerf
 } from './db/queries'
+import { mergePlaces, assignTrackToPlace, getPlaceStats } from './db/placeStore'
 import { averageRailTracks } from './db/railAverage'
+import { collectGpxFiles } from './importer/importFiles'
+import { analyzeImportOverlap } from './importer/importOverlap'
 import { RAIL_SNAP_TYPES } from './rail/snapRail'
 import { rebuildRailMatches, rematchSegment } from './rail/buildMatches'
 import { fetchRailNetwork } from './rail/overpass'
@@ -35,11 +39,13 @@ import {
 } from './db/editStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
-import { clampRailTuning, type MergeAnchor, type OsmLayer } from '../shared/types'
+import { clampRailTuning, type MergeAnchor, type OsmLayer, type PlaceRef } from '../shared/types'
 import type {
   EditSaveMode,
+  ImportOverlapAnalysis,
   ImportProgress,
   LatLonBBox,
+  OverwriteWindow,
   RailTuning,
   SegmentEditInput,
   ViewportQuery,
@@ -54,6 +60,13 @@ export interface IpcContext {
 }
 
 let activeImport: Worker | null = null
+
+/** A place reference from the renderer: a merged place id, or a visit's id. */
+const validPlaceRef = (r: unknown): r is PlaceRef =>
+  !!r &&
+  typeof r === 'object' &&
+  (('placeId' in r && Number.isInteger((r as { placeId: unknown }).placeId)) ||
+    ('waypointId' in r && Number.isInteger((r as { waypointId: unknown }).waypointId)))
 
 export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('dialog:selectPaths', async (event, kind: 'files' | 'folder') => {
@@ -70,19 +83,29 @@ export function registerIpc(ctx: IpcContext): void {
     return result.canceled ? null : result.filePaths
   })
 
-  ipcMain.handle('import:start', (event, paths: string[]) => {
+  ipcMain.handle('import:analyzeOverlap', (_event, paths: string[]): ImportOverlapAnalysis => {
+    if (!Array.isArray(paths) || paths.length === 0) return { totalFiles: 0, overlaps: [] }
+    return analyzeImportOverlap(ctx.db, collectGpxFiles(paths))
+  })
+
+  ipcMain.handle('import:start', (event, paths: string[], overwrite?: OverwriteWindow[]) => {
     if (activeImport) {
       return { started: false, reason: 'an import is already running' }
     }
     if (!Array.isArray(paths) || paths.length === 0) {
       return { started: false, reason: 'no paths selected' }
     }
+    const windows = Array.isArray(overwrite)
+      ? overwrite.filter(
+          (w) => w && Number.isFinite(w.startTsMs) && Number.isFinite(w.endTsMs) && w.endTsMs >= w.startTsMs
+        )
+      : []
     const sender = event.sender
 
     // Parsing/indexing runs in a worker thread with its own DB connection
     // (WAL) so the main process and renderer stay responsive throughout.
     const worker = new Worker(join(__dirname, 'importWorker.js'), {
-      workerData: { dbPath: ctx.dbPath, paths, cleaning: ctx.settings.cleaning }
+      workerData: { dbPath: ctx.dbPath, paths, cleaning: ctx.settings.cleaning, overwrite: windows }
     })
     activeImport = worker
 
@@ -310,6 +333,32 @@ export function registerIpc(ctx: IpcContext): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
+  ipcMain.handle('places:merge', (_e, refs: PlaceRef[], name: string) => {
+    try {
+      if (!Array.isArray(refs) || !refs.every(validPlaceRef) || typeof name !== 'string') {
+        return { ok: false, error: 'invalid merge request' }
+      }
+      const placeId = mergePlaces(ctx.db, refs, name)
+      return { ok: true, placeId }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('places:assignTrack', (_e, segmentId: number, ref: PlaceRef) => {
+    try {
+      if (!Number.isInteger(segmentId) || !validPlaceRef(ref)) {
+        return { ok: false, error: 'invalid assign request' }
+      }
+      assignTrackToPlace(ctx.db, segmentId, ref)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('places:stats', (_e, ref: PlaceRef) =>
+    validPlaceRef(ref) ? getPlaceStats(ctx.db, ref) : null
+  )
+  ipcMain.handle('stats:dataset', () => getDatasetStats(ctx.db))
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
   ipcMain.handle('rail:coverage', () => getRailCoverage(ctx.db))

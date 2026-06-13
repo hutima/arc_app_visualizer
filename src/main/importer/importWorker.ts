@@ -6,11 +6,13 @@
 import { parentPort, workerData } from 'node:worker_threads'
 import { runImport } from './importFiles'
 import type { CleaningConfig } from './clean'
+import type { OverwriteWindow } from '../../shared/types'
 
 interface WorkerInput {
   dbPath: string
   paths: string[]
   cleaning: CleaningConfig
+  overwrite?: OverwriteWindow[]
 }
 
 const input = workerData as WorkerInput
@@ -21,6 +23,7 @@ runImport({
   dbPath: input.dbPath,
   paths: input.paths,
   cleaning: input.cleaning,
+  overwrite: input.overwrite,
   onProgress: (p) => port.postMessage(p)
 }).catch((err: unknown) => {
   port.postMessage({

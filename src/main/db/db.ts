@@ -59,6 +59,11 @@ function migrate(db: DatabaseSync): void {
     // v10: existing coverage rows predate the split; default them to 'rail'
     // (re-fetch road tunnels to gate car-gap bridging).
     ensureColumn(db, 'rail_coverage', 'category', "category TEXT NOT NULL DEFAULT 'rail'")
+    // v12: place_id links a visit to a user-merged place. Add the column before
+    // its index (CREATE INDEX in SCHEMA_SQL can't reference a not-yet-added
+    // column on pre-existing waypoints tables), then index it here.
+    ensureColumn(db, 'waypoints', 'place_id', 'place_id INTEGER')
+    db.exec('CREATE INDEX IF NOT EXISTS idx_waypoints_place ON waypoints(place_id)')
     seedCategories(db)
     // v5: 'unknown' joins 'bogus' as excluded-by-default (existing databases
     // seeded it visible before this rule existed).

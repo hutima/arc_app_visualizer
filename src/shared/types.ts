@@ -192,6 +192,63 @@ export interface ViewportWaypoint {
   lon: number
   tsMs: number | null
   name: string | null
+  /** Set when this dot is a user-merged place (persistent identity + name). */
+  placeId: number | null
+}
+
+/**
+ * Reference to a place. A user-merged place is identified by its `placeId`; an
+ * un-merged place is just a name+proximity cluster, referenced by any one of
+ * its visits (`waypointId`) — the backend recovers the rest of the cluster.
+ */
+export type PlaceRef = { placeId: number } | { waypointId: number }
+
+export interface YearCount {
+  year: number
+  count: number
+}
+
+/** Visit statistics for one place (the Stats tab's per-place drill-down). */
+export interface PlaceStats {
+  placeId: number | null
+  name: string | null
+  /** Mean location of all the place's visits. */
+  lat: number
+  lon: number
+  visitCount: number
+  firstTsMs: number | null
+  lastTsMs: number | null
+  /** Visits per local hour-of-day (length 24). */
+  hourCounts: number[]
+  /** Visits per local day-of-week (length 7, index 0 = Sunday). */
+  dowCounts: number[]
+  /** Visits per calendar year, ascending. */
+  yearCounts: YearCount[]
+}
+
+export interface TopPlace {
+  name: string
+  visitCount: number
+  lat: number
+  lon: number
+  ref: PlaceRef
+}
+
+/** Dataset-wide statistics for the Stats tab's global summary. */
+export interface DatasetStats {
+  fileCount: number
+  trackCount: number
+  segmentCount: number
+  pointCount: number
+  /** Raw place-visit rows (waypoints). */
+  visitCount: number
+  /** Distinct places — merged + name clusters + unnamed singles (approximate). */
+  placeCount: number
+  startTsMs: number | null
+  endTsMs: number | null
+  segmentsByYear: YearCount[]
+  visitsByYear: YearCount[]
+  topPlaces: TopPlace[]
 }
 
 export interface ViewportResultMeta {
@@ -235,6 +292,37 @@ export interface ImportStats {
   pointCount: number
   waypointCount: number
   durationMs: number
+}
+
+/** A date window (inclusive ms) of existing data to clear before importing. */
+export interface OverwriteWindow {
+  startTsMs: number
+  endTsMs: number
+}
+
+/**
+ * One incoming file whose dates overlap data already in the database. The
+ * overlap span is the tightest range of *existing* data the file's dates touch
+ * — the suggested (editable) window to overwrite.
+ */
+export interface ImportOverlapFile {
+  path: string
+  filename: string
+  /** Date span the incoming file itself covers. */
+  fileStartTsMs: number | null
+  fileEndTsMs: number | null
+  /** Tightest span of existing DB data within the file's range. */
+  overlapStartTsMs: number
+  overlapEndTsMs: number
+  /** Existing tracks / visits within that overlap, for the review summary. */
+  overlapSegmentCount: number
+  overlapVisitCount: number
+}
+
+/** Result of scanning a pending import for date overlaps with existing data. */
+export interface ImportOverlapAnalysis {
+  totalFiles: number
+  overlaps: ImportOverlapFile[]
 }
 
 export type ImportProgress =
@@ -285,7 +373,18 @@ export interface DataBounds {
 /** API exposed to the renderer via contextBridge (window.api). */
 export interface ArcApi {
   selectPaths(kind: 'files' | 'folder'): Promise<string[] | null>
-  startImport(paths: string[]): Promise<{ started: boolean; reason?: string }>
+  /**
+   * Begin importing the given paths. With `overwrite` windows, existing data
+   * dated within each window is cleared first (partially-emptied files are
+   * recomputed), so re-exported / overlapping files replace the old data
+   * instead of duplicating it.
+   */
+  startImport(
+    paths: string[],
+    overwrite?: OverwriteWindow[]
+  ): Promise<{ started: boolean; reason?: string }>
+  /** Scan pending paths for date overlaps with existing data (for the review UI). */
+  analyzeImportOverlap(paths: string[]): Promise<ImportOverlapAnalysis>
   onImportProgress(cb: (p: ImportProgress) => void): () => void
   queryViewport(q: ViewportQuery): Promise<ViewportResult>
   getCategories(): Promise<CategoryInfo[]>
@@ -373,4 +472,25 @@ export interface ArcApi {
     segmentIds: number[],
     type: string
   ): Promise<{ ok: boolean; mergedId?: number; error?: string }>
+  /**
+   * Merge several places into one with the chosen name. Non-destructive — it
+   * only regroups visits under a shared place identity (no waypoint is
+   * deleted), so it's reversible by re-merging. Returns the surviving place id.
+   */
+  mergePlaces(
+    refs: PlaceRef[],
+    name: string
+  ): Promise<{ ok: boolean; placeId?: number; error?: string }>
+  /**
+   * Fold a track into a place as one stationary visit at the track's centroid,
+   * then delete the track. Permanent and structural, like a track merge.
+   */
+  assignTrackToPlace(
+    segmentId: number,
+    ref: PlaceRef
+  ): Promise<{ ok: boolean; error?: string }>
+  /** Visit stats for one place (counts + time-of-day / day-of-week histograms). */
+  getPlaceStats(ref: PlaceRef): Promise<PlaceStats | null>
+  /** Dataset-wide stats for the Stats tab's global summary. */
+  getDatasetStats(): Promise<DatasetStats>
 }
