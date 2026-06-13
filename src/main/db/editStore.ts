@@ -433,6 +433,33 @@ function deleteSegmentData(db: DatabaseSync, segmentId: number): void {
 }
 
 /**
+ * Change a segment's activity type (a known category). Geometry is untouched;
+ * the caller invalidates the type-specific snap cache (the type decides which
+ * OSM kinds a ride may match).
+ */
+export function setSegmentType(db: DatabaseSync, segmentId: number, type: string): void {
+  if (typeof type !== 'string' || type.length === 0) throw new Error('invalid type')
+  if (!categoryExists(db, type)) throw new Error(`unknown type ${type}`)
+  const res = db.prepare('UPDATE segments SET type = ? WHERE id = ?').run(type, segmentId)
+  if (res.changes === 0) throw new Error(`unknown segment ${segmentId}`)
+}
+
+/** Delete a whole track (segment) and everything derived from it. */
+export function deleteSegment(db: DatabaseSync, segmentId: number): void {
+  if (!db.prepare('SELECT 1 FROM segments WHERE id = ?').get(segmentId)) {
+    throw new Error(`unknown segment ${segmentId}`)
+  }
+  db.exec('BEGIN')
+  try {
+    deleteSegmentData(db, segmentId)
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+/**
  * Apply the overlay to a segment's raw rows, preserving flags and elevation:
  * moves override coordinates in place, deletes drop the row, inserts are
  * interleaved by their fractional seq with an interpolated timestamp. Result

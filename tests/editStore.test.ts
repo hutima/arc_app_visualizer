@@ -17,6 +17,8 @@ import {
   saveSegmentEdits,
   splitSegment,
   splitSegmentTyped,
+  setSegmentType,
+  deleteSegment,
   type CleanPoint
 } from '../src/main/db/editStore'
 import { queryViewportSegments } from '../src/main/db/queries'
@@ -544,5 +546,36 @@ describe('merge', () => {
     expect(db.prepare('SELECT type FROM segments WHERE id = ?').get(mergedId)).toMatchObject({
       type: 'cycling'
     })
+  })
+})
+
+describe('change type / delete track', () => {
+  it('changes a segment to any known category, rejecting unknown types/segments', () => {
+    const segId = seedSegment() // 'walking'
+    setSegmentType(db, segId, 'cycling')
+    expect(db.prepare('SELECT type FROM segments WHERE id = ?').get(segId)).toMatchObject({
+      type: 'cycling'
+    })
+    expect(() => setSegmentType(db, segId, 'notacategory')).toThrow(/unknown type/)
+    expect(() => setSegmentType(db, 99999, 'walking')).toThrow(/unknown segment/)
+  })
+
+  it('deletes a segment and everything derived from it', () => {
+    const segId = seedSegment()
+    saveSegmentEdits(db, segId, [MOVE], 'draft') // an overlay row
+    db.prepare(
+      'INSERT INTO rail_matched_geom (segment_id, detail, point_count, coords) VALUES (?, 2, 2, ?)'
+    ).run(segId, new Uint8Array(16))
+
+    deleteSegment(db, segId)
+
+    for (const t of ['points', 'display_geometries', 'segment_edits', 'rail_matched_geom']) {
+      const row = db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE segment_id = ?`).get(segId) as {
+        n: number
+      }
+      expect(row.n).toBe(0)
+    }
+    expect(db.prepare('SELECT 1 FROM segments WHERE id = ?').get(segId)).toBeUndefined()
+    expect(() => deleteSegment(db, segId)).toThrow(/unknown segment/)
   })
 })

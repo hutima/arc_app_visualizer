@@ -26,6 +26,8 @@ import {
   revertSegmentEdits,
   splitSegment,
   splitSegmentTyped,
+  setSegmentType,
+  deleteSegment,
   segmentStartTs,
   listMergeCandidates,
   mergeSegments,
@@ -223,6 +225,29 @@ export function registerIpc(ctx: IpcContext): void {
     try {
       if (!Number.isInteger(segmentId)) return { ok: false, error: 'invalid segment id' }
       revertSegmentEdits(ctx.db, segmentId)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('edits:setType', (_e, segmentId: number, type: string) => {
+    try {
+      if (!Number.isInteger(segmentId) || typeof type !== 'string') {
+        return { ok: false, error: 'invalid type change' }
+      }
+      // The match graph is type-specific; re-snap with the new type if it had one.
+      const hadSnap = hasMatchedGeom(ctx.db, segmentId)
+      setSegmentType(ctx.db, segmentId, type)
+      reSnap(hadSnap, segmentId)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('edits:deleteSegment', (_e, segmentId: number) => {
+    try {
+      if (!Number.isInteger(segmentId)) return { ok: false, error: 'invalid segment id' }
+      deleteSegment(ctx.db, segmentId)
       return { ok: true }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }

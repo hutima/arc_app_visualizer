@@ -36,6 +36,8 @@ const api: ArcApi = {
   saveSegmentEdits: (segmentId, edits, mode) =>
     ipcRenderer.invoke('edits:save', segmentId, edits, mode),
   revertSegmentEdits: (segmentId) => ipcRenderer.invoke('edits:revert', segmentId),
+  setSegmentType: (segmentId, type) => ipcRenderer.invoke('edits:setType', segmentId, type),
+  deleteSegment: (segmentId) => ipcRenderer.invoke('edits:deleteSegment', segmentId),
   splitSegment: (segmentId, seq) => ipcRenderer.invoke('edits:split', segmentId, seq),
   splitSegmentTyped: (segmentId, seq, firstType, secondType) =>
     ipcRenderer.invoke('edits:splitTyped', segmentId, seq, firstType, secondType),
