@@ -54,6 +54,8 @@ const EDIT_LINE_SOURCE = 'arc-edit-line'
 const EDIT_LINE_LAYER = 'arc-edit-line-line'
 const EDIT_VERTEX_SOURCE = 'arc-edit-vertices'
 const EDIT_VERTEX_LAYER = 'arc-edit-vertices-circle'
+const EDIT_SPLIT_SOURCE = 'arc-edit-split'
+const EDIT_SPLIT_LAYER = 'arc-edit-split-circle'
 // Merge-mode highlights ride on the tracks source (filtered by segment id).
 const MERGE_CAND_LAYER = 'arc-merge-candidates-line'
 const MERGE_SEL_LAYER = 'arc-merge-selected-line'
@@ -126,6 +128,8 @@ export class MapController {
   private editPts: EditablePoint[] = []
   /** Raw seqs deleted this session → their last coords, for the saved overlay. */
   private deletedSeqs = new Map<number, { lat: number; lon: number }>()
+  /** Split tool: editPts index previewed as the split point (null = none). */
+  private splitPreviewIndex: number | null = null
   private editHandlersBound = false
   private editListener: ((s: EditSessionInfo | null) => void) | null = null
   private splitRequestListener: ((segmentId: number, seq: number) => void) | null = null
@@ -281,6 +285,19 @@ export class MapController {
         'circle-stroke-width': 1
       }
     } as LayerSpecification)
+    // Split-tool preview: a ring at the slider's chosen split point.
+    this.map.addSource(EDIT_SPLIT_SOURCE, { type: 'geojson', data: EMPTY_FC })
+    this.map.addLayer({
+      id: EDIT_SPLIT_LAYER,
+      type: 'circle',
+      source: EDIT_SPLIT_SOURCE,
+      paint: {
+        'circle-color': 'rgba(0,0,0,0)',
+        'circle-radius': 9,
+        'circle-stroke-color': '#e879f9',
+        'circle-stroke-width': 3
+      }
+    } as LayerSpecification)
 
     // Merge highlights: redraw the candidate / selected segments from the
     // tracks source, filtered by segment id, hidden until merge mode turns
@@ -310,6 +327,7 @@ export class MapController {
     // any merge highlights.
     if (this.editingId !== null) this.updateEditLayers()
     this.setMergeHighlight(this.mergeCandidateIds, this.mergeSelectedIds)
+    this.updateSplitPreview()
   }
 
   /**
@@ -513,6 +531,59 @@ export class MapController {
     }
   }
 
+  /**
+   * Preview the precise-split point at an editPts index (the split slider),
+   * or clear it with null. Index is clamped to the editable range.
+   */
+  setSplitPreview(index: number | null): void {
+    this.splitPreviewIndex =
+      index === null || this.editingId === null
+        ? null
+        : Math.max(0, Math.min(this.editPts.length - 1, Math.round(index)))
+    this.updateSplitPreview()
+  }
+
+  private updateSplitPreview(): void {
+    const src = this.map.getSource(EDIT_SPLIT_SOURCE) as GeoJSONSource | undefined
+    if (!src) return
+    const i = this.splitPreviewIndex
+    const p = i === null ? undefined : this.editPts[i]
+    src.setData(
+      !p
+        ? EMPTY_FC
+        : {
+            type: 'FeatureCollection',
+            features: [
+              { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [p.lon, p.lat] } }
+            ]
+          }
+    )
+  }
+
+  /**
+   * Commit the working overlay, then split at the previewed point into two
+   * segments with the given per-half types. Caller (App) confirms first and
+   * refreshes dataset stats after.
+   */
+  async commitSplitAt(
+    index: number,
+    firstType: string,
+    secondType: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (this.editingId === null) return { ok: false, error: 'no segment selected' }
+    const p = this.editPts[index]
+    if (!p) return { ok: false, error: 'invalid split point' }
+    const segmentId = this.editingId
+    const saved = await window.api.saveSegmentEdits(segmentId, this.buildOverlay(), 'draft')
+    if (!saved.ok) return saved
+    const res = await window.api.splitSegmentTyped(segmentId, p.seq, firstType, secondType)
+    if (res.ok && !this.destroyed) {
+      this.closeEditSession()
+      this.scheduleRefresh(0)
+    }
+    return res
+  }
+
   /** Drop the in-memory session (saved drafts stay in the database). */
   closeEditSession(): void {
     this.editingId = null
@@ -521,7 +592,9 @@ export class MapController {
     this.editDirty = false
     this.editHasDraft = false
     this.editType = ''
+    this.splitPreviewIndex = null
     this.updateEditLayers()
+    this.updateSplitPreview()
     this.applyTypeFilter()
     this.map.getCanvas().style.cursor = ''
     this.notifyEdit()
@@ -811,6 +884,8 @@ export class MapController {
         geometry: { type: 'Point', coordinates: [p.lon, p.lat] }
       }))
     })
+    // Keep the split marker on its point as edits move the geometry.
+    this.updateSplitPreview()
   }
 
   /** The lat/lon box currently on screen (e.g. to fetch OSM rail for it). */

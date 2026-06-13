@@ -109,9 +109,14 @@ tests/         vitest; *.test.ts mirror the module they cover
   time-ordered), alt-click to delete, shift-click to **split** the segment in
   two. Draft saves keep raw points untouched and revertible; permanent saves
   bake the overlay into `points` (renumbered, flagged points preserved).
-  Splitting is a permanent structural op (`splitSegment`): it commits the
-  overlay and divides the effective points into two segments at a shared
-  boundary vertex.
+  Splitting is a permanent structural op: it commits the overlay and divides
+  the effective points into two segments at a shared boundary vertex.
+  Shift-click splits at a raw vertex (`splitSegment`, both halves keep the
+  type); the **split slider** in `TrackEditPanel` is the precise version
+  (`splitSegmentTyped`) — scrub the split point (a magenta ring previews it),
+  and give each half its own type. Hit-testing for the point tool is pixel
+  space on the map's own mousedown: a vertex grab (larger radius) wins over a
+  line insert, so endpoints stay draggable and clicks near a point move it.
 - **Track merging** (`editStore.listMergeCandidates`/`mergeSegments` +
   `MergePanel`): stitch fragmented pieces of one journey back together. Anchor a
   ±24h window (`MERGE_WINDOW_MS`) by clicking a track or picking a date

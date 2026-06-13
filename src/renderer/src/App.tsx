@@ -492,6 +492,35 @@ export function App(): React.JSX.Element {
     controllerRef.current?.closeEditSession()
   }, [])
 
+  const handleSplitPreview = useCallback((index: number | null): void => {
+    controllerRef.current?.setSplitPreview(index)
+  }, [])
+
+  // Precise slider split with per-half types — structural, so confirm first.
+  const handleSplit = useCallback(
+    (index: number, firstType: string, secondType: string): void => {
+      const controller = controllerRef.current
+      if (!controller) return
+      const into =
+        firstType === secondType
+          ? `into two ${firstType} tracks`
+          : `into a ${firstType} track and a ${secondType} track`
+      if (
+        !window.confirm(`Split this track ${into}? This commits the current edits and cannot be undone.`)
+      ) {
+        return
+      }
+      setEditBusy(true)
+      setEditError(null)
+      void controller.commitSplitAt(index, firstType, secondType).then((res) => {
+        setEditBusy(false)
+        if (res.ok) void refreshData()
+        else setEditError(res.error ?? 'split failed')
+      })
+    },
+    [refreshData]
+  )
+
   const handleBasemapTheme = useCallback((theme: 'dark' | 'light'): void => {
     setConfig((prev) => {
       if (!prev) return prev
@@ -583,9 +612,12 @@ export function App(): React.JSX.Element {
                 session={editSession}
                 busy={editBusy}
                 error={editError}
+                categoryNames={categories.map((c) => c.name)}
                 onSave={handleSaveEdits}
                 onRevert={handleRevertEdits}
                 onClose={handleCloseEdit}
+                onSplitPreview={handleSplitPreview}
+                onSplit={handleSplit}
               />
             ) : (
               <MergePanel

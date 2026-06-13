@@ -16,6 +16,7 @@ import {
   revertSegmentEdits,
   saveSegmentEdits,
   splitSegment,
+  splitSegmentTyped,
   type CleanPoint
 } from '../src/main/db/editStore'
 import { queryViewportSegments } from '../src/main/db/queries'
@@ -382,6 +383,38 @@ describe('split', () => {
     expect(() => splitSegment(db, segId, 1.5)).toThrow(/original track point/)
     expect(() => splitSegment(db, segId, 0)).toThrow(/too few points/)
     expect(() => splitSegment(db, 99999, 1)).toThrow(/unknown segment/)
+  })
+})
+
+describe('typed split (precise slider)', () => {
+  it('gives each half its own activity type', () => {
+    const segId = seedSegment() // type 'walking'
+    const newId = splitSegmentTyped(db, segId, 3, 'running', 'cycling')
+    expect(db.prepare('SELECT type FROM segments WHERE id = ?').get(segId)).toMatchObject({
+      type: 'running'
+    })
+    expect(db.prepare('SELECT type FROM segments WHERE id = ?').get(newId)).toMatchObject({
+      type: 'cycling'
+    })
+  })
+
+  it('can split at a fractional (inserted) point', () => {
+    const segId = seedSegment()
+    saveSegmentEdits(db, segId, [{ seq: 1.5, lat: 0, lon: 0.015, kind: 'insert' }], 'draft')
+    const newId = splitSegmentTyped(db, segId, 1.5, 'walking', 'cycling')
+    // First half: clean seqs 0,1 + the inserted boundary → 3 clean points.
+    const firstClean = db.prepare(
+      'SELECT COUNT(*) AS n FROM points WHERE segment_id = ? AND flags = 0'
+    ).get(segId) as { n: number }
+    expect(firstClean.n).toBe(3)
+    expect(db.prepare('SELECT type FROM segments WHERE id = ?').get(newId)).toMatchObject({
+      type: 'cycling'
+    })
+  })
+
+  it('rejects a type that is not a known category', () => {
+    const segId = seedSegment()
+    expect(() => splitSegmentTyped(db, segId, 3, 'walking', 'notacategory')).toThrow(/unknown type/)
   })
 })
 
