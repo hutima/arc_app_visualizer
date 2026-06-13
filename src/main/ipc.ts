@@ -19,10 +19,10 @@ import { averageRailTracks } from './db/railAverage'
 import { RAIL_SNAP_TYPES } from './rail/snapRail'
 import { rebuildRailMatches } from './rail/buildMatches'
 import { fetchRailNetwork } from './rail/overpass'
-import { addRailNetwork, getRailCoverage } from './db/railStore'
+import { addRailNetwork, getRailCoverage, clearRailNetwork } from './db/railStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
-import { clampRailTuning } from '../shared/types'
+import { clampRailTuning, type OsmLayer } from '../shared/types'
 import type { ImportProgress, LatLonBBox, RailTuning, ViewportQuery, ViewportResult } from '../shared/types'
 
 export interface IpcContext {
@@ -184,13 +184,14 @@ export function registerIpc(ctx: IpcContext): void {
     insertPerf(ctx.db, 'rail.match', performance.now() - t0, `matched=${matched}/${railSegments}`)
   }
 
-  ipcMain.handle('rail:fetch', async (event, view: LatLonBBox) => {
+  ipcMain.handle('rail:fetch', async (event, view: LatLonBBox, layer: OsmLayer) => {
     const nums = [view?.minLat, view?.maxLat, view?.minLon, view?.maxLon]
     if (nums.some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
       return { ok: false, error: 'no view to fetch' }
     }
+    const osmLayer: OsmLayer = layer === 'road' ? 'road' : 'rail'
     // City-sized fetches only: Overpass times out (and the local graph
-    // balloons) on continent-scale rail. Load cities one view at a time.
+    // balloons) on continent-scale data. Load cities one view at a time.
     const MAX_SPAN_DEG = 4
     if (view.maxLat - view.minLat > MAX_SPAN_DEG || view.maxLon - view.minLon > MAX_SPAN_DEG) {
       return { ok: false, error: 'view too large — zoom in to one city and fetch areas individually' }
@@ -202,14 +203,18 @@ export function registerIpc(ctx: IpcContext): void {
       maxLat: Math.min(90, view.maxLat + pad), maxLon: Math.min(180, view.maxLon + pad)
     }
     try {
-      const rail = await fetchRailNetwork(bbox)
-      addRailNetwork(ctx.db, rail, bbox)
-      // Cache map-matched geometry for the new coverage (progress to the UI).
+      const fetched = await fetchRailNetwork(bbox, osmLayer)
+      addRailNetwork(ctx.db, fetched, bbox, osmLayer)
+      // Cache matched/bridged geometry for the new coverage (progress to UI).
       await runMatchPass(event.sender)
       return { ok: true, coverage: getRailCoverage(ctx.db) }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
+  })
+  ipcMain.handle('rail:clear', () => {
+    clearRailNetwork(ctx.db)
+    return { ok: true }
   })
   ipcMain.handle('rail:rebuildMatches', async (event) => {
     try {

@@ -15,8 +15,9 @@
 // v5: 'unknown' ignored by default; v6: OSM rail network tables;
 // v7: rail regions accumulate (canonical a<b edges, unique (a,b));
 // v8: rail_matched_geom (cached map-matched rail geometry, per detail level);
-// v9: rail_edges.kind (OSM railway kind — type-constrained matching)
-export const SCHEMA_VERSION = 9
+// v9: rail_edges.kind (OSM railway kind — type-constrained matching);
+// v10: rail_coverage.category ('rail' | 'road' — fetched & gated separately)
+export const SCHEMA_VERSION = 10
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -138,10 +139,12 @@ CREATE INDEX IF NOT EXISTS idx_rail_edges_bbox
   ON rail_edges(min_lat, max_lat, min_lon, max_lon);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rail_edges_ab ON rail_edges(a, b);
 
--- Bounding boxes already fetched: shows coverage, and gates snapping so rides
--- keep raw GPS wherever they leave fetched areas.
+-- Bounding boxes already fetched, per layer ('rail' or 'road'): shows
+-- coverage, and gates matching so rides keep raw GPS wherever they leave
+-- their layer's fetched areas.
 CREATE TABLE IF NOT EXISTS rail_coverage (
   id          INTEGER PRIMARY KEY,
+  category    TEXT NOT NULL DEFAULT 'rail',
   min_lat REAL, min_lon REAL, max_lat REAL, max_lon REAL,
   fetched_at_ms INTEGER NOT NULL,
   node_count  INTEGER NOT NULL,

@@ -20,9 +20,10 @@ const api: ArcApi = {
   getDataBounds: () => ipcRenderer.invoke('bounds:get'),
   getConfig: () => ipcRenderer.invoke('app:getConfig'),
   setBasemapTheme: (theme) => ipcRenderer.invoke('settings:setBasemapTheme', theme),
-  fetchRailNetwork: (bbox) => ipcRenderer.invoke('rail:fetch', bbox),
+  fetchRailNetwork: (bbox, layer) => ipcRenderer.invoke('rail:fetch', bbox, layer),
   rebuildRailMatches: () => ipcRenderer.invoke('rail:rebuildMatches'),
   setRailTuning: (t) => ipcRenderer.invoke('rail:setTuning', t),
+  clearRailNetwork: () => ipcRenderer.invoke('rail:clear'),
   onRailProgress: (cb) => {
     const handler = (_event: unknown, p: RailMatchProgress): void => cb(p)
     ipcRenderer.on('rail:progress', handler)

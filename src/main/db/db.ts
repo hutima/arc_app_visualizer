@@ -56,6 +56,9 @@ function migrate(db: DatabaseSync): void {
     // v9: pre-existing edges have no stored kind (0 = unknown, matches any
     // mode); re-fetching an area populates real kinds and constrains matching.
     ensureColumn(db, 'rail_edges', 'kind', 'kind INTEGER NOT NULL DEFAULT 0')
+    // v10: existing coverage rows predate the split; default them to 'rail'
+    // (re-fetch road tunnels to gate car-gap bridging).
+    ensureColumn(db, 'rail_coverage', 'category', "category TEXT NOT NULL DEFAULT 'rail'")
     seedCategories(db)
     // v5: 'unknown' joins 'bogus' as excluded-by-default (existing databases
     // seeded it visible before this rule existed).

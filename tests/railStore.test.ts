@@ -9,7 +9,9 @@ import { openDb } from '../src/main/db/db'
 import {
   addRailNetwork,
   getRailCoverage,
+  coverageBoxes,
   loadRailForViewport,
+  clearRailNetwork,
   hasRailNetwork
 } from '../src/main/db/railStore'
 
@@ -75,5 +77,26 @@ describe('rail store', () => {
     const net = loadRailForViewport(db, { minLat: -1, minLon: -1, maxLat: 1, maxLon: 1 })
     expect(net.edges).toHaveLength(3)
     expect(net.nodes.map((n) => n.id).sort((x, y) => x - y)).toEqual([1, 2, 3, 4])
+  })
+
+  it('tracks rail and road coverage on separate layers', () => {
+    addRailNetwork(db, cityA, boxA, 'rail')
+    addRailNetwork(db, cityB, boxB, 'road')
+    const cov = getRailCoverage(db)!
+    expect(cov.regions.map((r) => r.layer).sort()).toEqual(['rail', 'road'])
+    expect(coverageBoxes(db, 'rail')).toHaveLength(1)
+    expect(coverageBoxes(db, 'road')).toHaveLength(1)
+    // Re-fetching one layer leaves the other's coverage untouched.
+    addRailNetwork(db, cityA, boxA, 'rail')
+    expect(coverageBoxes(db, 'rail')).toHaveLength(1)
+    expect(coverageBoxes(db, 'road')).toHaveLength(1)
+  })
+
+  it('clears everything back to empty', () => {
+    addRailNetwork(db, cityA, boxA)
+    clearRailNetwork(db)
+    expect(getRailCoverage(db)).toBeNull()
+    expect(hasRailNetwork(db)).toBe(false)
+    expect(coverageBoxes(db, 'rail')).toHaveLength(0)
   })
 })

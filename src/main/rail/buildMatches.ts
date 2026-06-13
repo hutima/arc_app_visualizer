@@ -41,16 +41,22 @@ export async function rebuildRailMatches(
   tuning: RailTuning = DEFAULT_RAIL_TUNING,
   onProgress?: (p: RailMatchProgress) => void
 ): Promise<RebuildResult> {
-  const boxes = coverageBoxes(db)
+  // Each layer is fetched and gated independently: a rail ride only snaps
+  // inside fetched rail coverage, a car trip only bridges inside fetched road
+  // coverage. (You can load one without the other.)
+  const railBoxes = coverageBoxes(db, 'rail')
+  const roadBoxes = coverageBoxes(db, 'road')
   clearMatchedGeom(db)
-  if (boxes.length === 0) {
+  if (railBoxes.length === 0 && roadBoxes.length === 0) {
     onProgress?.({ done: 0, total: 0, matched: 0 })
     return { matched: 0, railSegments: 0 }
   }
 
   const { nodes, edges } = loadAllRail(db)
-  const isCovered: CoverageTest = (lon, lat) =>
+  const gate = (boxes: LatLonBBox[]): CoverageTest => (lon, lat) =>
     boxes.some((b) => lat >= b.minLat && lat <= b.maxLat && lon >= b.minLon && lon <= b.maxLon)
+  const railCovered = gate(railBoxes)
+  const roadCovered = gate(roadBoxes)
 
   // One graph per Arc mode, each filtered to the OSM track kinds that mode may
   // match (a metro ride routes only on subway/light-rail, never commuter rail).
@@ -84,7 +90,7 @@ export async function rebuildRailMatches(
     return roadGraphCache
   }
 
-  const u = unionBox(boxes)
+  const u = unionBox([...railBoxes, ...roadBoxes])
   const typeList = [...RAIL_SNAP_TYPES, ...ROAD_TUNNEL_TYPES]
   const segs = db.prepare(
     `SELECT id, type FROM segments
@@ -118,8 +124,8 @@ export async function rebuildRailMatches(
         // Rail rides are fully map-matched; road trips only get long GPS
         // gaps bridged through mapped tunnels (everything else stays raw).
         const snapped = ROAD_TUNNEL_TYPES.has(segs[i]!.type)
-          ? bridgeRoadGaps(coords, roadGraph(), isCovered)
-          : matchRideToRail(coords, graphFor(segs[i]!.type), isCovered)
+          ? bridgeRoadGaps(coords, roadGraph(), roadCovered)
+          : matchRideToRail(coords, graphFor(segs[i]!.type), railCovered)
         if (snapped && storeDetailLevels(insertStmt, segs[i]!.id, snapped)) matched++
       }
       db.exec('COMMIT')

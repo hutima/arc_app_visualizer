@@ -108,28 +108,31 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   additionally **spatially thinned** — one dot per grid cell, most recent
   visit wins — so every visited area stays represented; the sidebar shows
   `N of M places` when thinning.
-- **Cleaning — snap rail to OSM (recommended)**: fetch the OpenStreetMap rail
-  network **for the area on screen** (the app's only network call; stored
-  locally, everything after is offline) — pan to each city and fetch it,
-  regions accumulate. Each fetch then runs a one-time **map-matching pass**
-  over the raw points of every metro/tram/train ride in coverage and **caches**
-  the result (`rail_matched_geom`, simplified into the same per-zoom levels as
-  display geometry), so panning stays fast — the viewport query just swaps the
-  cleaned line in. The matcher is **segment-local**: each ride vertex anchors
-  to the nearest point on the *track* (edge distance, since OSM nodes are
-  sparse on straight runs), consecutive anchors are joined by **Dijkstra along
-  the rail graph** — filling tunnel gaps and crossing between lines at
-  interchanges (nearby nodes are linked as transfer edges) — and any stretch
-  that can't be matched or routed (off-network, off-coverage, or a gap too long
-  to bridge) **keeps its raw GPS** instead of rejecting the whole ride. Matching
-  is **type-constrained** — each mode snaps only to its own OSM track kind
-  (metro→subway/light-rail, train→commuter rail, tram→tram/light-rail) — so a
-  metro ride can't grab a parallel commuter line. Supersedes averaging while on.
-  **Car/taxi/bus trips** stay raw except long GPS gaps (>~200 m) whose ends sit
-  near a mapped **road tunnel** (`tunnel=yes` — the fetch grabs tunnel ways
-  only, never the full road network): those gaps are bridged through the
-  tunnel alignment instead of a straight jump across downtown (the Big Dig
-  effect). The matching ranges are tweakable in the
+- **Cleaning — snap rail to OSM (recommended)**: fetch OpenStreetMap geometry
+  **for the area on screen** (the app's only network call; stored locally,
+  everything after is offline) — pan to each city and fetch it, regions
+  accumulate. **Transit rail** and **road tunnels** are two separately-fetched
+  layers (separate buttons), each gating its own matching; a "Clear OSM tracks"
+  button wipes everything. Each fetch then runs a one-time **map-matching pass**
+  over the raw points of every ride in coverage and **caches** the result
+  (`rail_matched_geom`, simplified into the same per-zoom levels as display
+  geometry), so panning stays fast — the viewport query just swaps the cleaned
+  line in. The matcher is **segment-local**: each ride vertex anchors to the
+  nearest point on the *track* (edge distance, since OSM nodes are sparse on
+  straight runs), consecutive anchors are joined by **Dijkstra along the rail
+  graph** — filling tunnel gaps and crossing between lines at interchanges — and
+  any stretch that can't be matched or routed **keeps its raw GPS** instead of
+  rejecting the whole ride. Matching is **type-constrained** — each mode snaps
+  only to its own OSM track kind (metro→subway/light-rail, train→commuter rail,
+  tram→tram/light-rail) — so a metro ride can't grab a parallel commuter line.
+  It also favours **contiguity**: anchoring sticks to the previous vertex's
+  track component, and transfers carry a penalty, so a ride stays on one track
+  and switches only at genuine interchanges rather than weaving between parallel
+  rails. Supersedes averaging while on. **Car/taxi/bus trips** stay raw except
+  long GPS gaps (>~200 m) whose ends sit near a mapped **road tunnel**
+  (`tunnel=yes` — tunnel ways only, never the full road network): those gaps are
+  bridged through the tunnel alignment instead of a straight jump across
+  downtown (the Big Dig effect). The matching ranges are tweakable in the
   panel (or `settings.json` → `rail`): **Snap within** (how far a GPS point may
   sit from a track and still match; raise if noisy rides stay raw, lower if
   rides grab the wrong nearby line) and **Transfer within** (how far apart two

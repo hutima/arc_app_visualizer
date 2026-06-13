@@ -19,16 +19,18 @@ import {
 const coordsOf = (a: Float32Array): number[] => [...a]
 
 describe('overpass parsing', () => {
-  it('builds a bbox query filtered to rail, excluding service tracks', () => {
-    const q = buildOverpassQuery({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 })
+  it('builds a rail-layer query filtered to rail, excluding service tracks', () => {
+    const q = buildOverpassQuery({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 }, 'rail')
     expect(q).toContain('1,2,3,4')
     expect(q).toContain('subway|tram|light_rail|rail|narrow_gauge|monorail')
     expect(q).toContain('"service"!~"."')
+    expect(q).not.toContain('highway') // rail layer never pulls roads
   })
 
-  it('also requests road tunnels — and only tunnels — for car gap bridging', () => {
-    const q = buildOverpassQuery({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 })
+  it('builds a road-layer query for tunnels only (car gap bridging)', () => {
+    const q = buildOverpassQuery({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 }, 'road')
     expect(q).toMatch(/way\["highway"~"\^\(motorway\|.*\)\$"\]\["tunnel"\]\["tunnel"!="no"\]/)
+    expect(q).not.toContain('railway') // road layer never pulls rail
   })
 
   it('splits ways into per-segment edges, tagging each with its railway kind', () => {
@@ -99,7 +101,7 @@ describe('overpass parsing', () => {
     )
     vi.stubGlobal('fetch', mock)
     try {
-      await fetchRailNetwork(BOX)
+      await fetchRailNetwork(BOX, 'rail')
       const headers = mock.mock.calls[0]![1].headers as Record<string, string>
       expect(headers['User-Agent']).toMatch(/arc-visualizer/)
       expect(headers.Accept).toBe('application/json')
@@ -115,7 +117,7 @@ describe('overpass parsing', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ elements: [] }), { status: 200 }))
     vi.stubGlobal('fetch', mock)
     try {
-      await expect(fetchRailNetwork(BOX, MIRRORS)).resolves.toEqual({ nodes: [], edges: [] })
+      await expect(fetchRailNetwork(BOX, 'rail', MIRRORS)).resolves.toEqual({ nodes: [], edges: [] })
       expect(mock).toHaveBeenCalledTimes(2)
       expect(mock.mock.calls[1]![0]).toBe(MIRRORS[1])
     } finally {
@@ -129,7 +131,7 @@ describe('overpass parsing', () => {
     )
     vi.stubGlobal('fetch', mock)
     try {
-      await expect(fetchRailNetwork(BOX, MIRRORS)).rejects.toThrow(
+      await expect(fetchRailNetwork(BOX, 'rail', MIRRORS)).rejects.toThrow(
         /Overpass HTTP 429 \(b\.example\): Too Many Requests/
       )
       expect(mock).toHaveBeenCalledTimes(2)
@@ -142,7 +144,7 @@ describe('overpass parsing', () => {
     const mock = vi.fn().mockResolvedValue(new Response('parse error', { status: 400 }))
     vi.stubGlobal('fetch', mock)
     try {
-      await expect(fetchRailNetwork(BOX, MIRRORS)).rejects.toThrow(/Overpass HTTP 400/)
+      await expect(fetchRailNetwork(BOX, 'rail', MIRRORS)).rejects.toThrow(/Overpass HTTP 400/)
       expect(mock).toHaveBeenCalledTimes(1)
     } finally {
       vi.unstubAllGlobals()
@@ -156,7 +158,7 @@ describe('overpass parsing', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ elements: [] }), { status: 200 }))
     vi.stubGlobal('fetch', mock)
     try {
-      await expect(fetchRailNetwork(BOX, MIRRORS)).resolves.toEqual({ nodes: [], edges: [] })
+      await expect(fetchRailNetwork(BOX, 'rail', MIRRORS)).resolves.toEqual({ nodes: [], edges: [] })
     } finally {
       vi.unstubAllGlobals()
     }
@@ -351,6 +353,43 @@ describe('tuning ranges', () => {
 
     const unlinked = buildRailGraph(nodes, edges, { snapRadiusM: 200, transferRadiusM: 0 })
     expect(matchRideToRail(ride, unlinked)).toBeNull() // long hop won't route
+  })
+})
+
+describe('contiguity (sticky anchoring + transfer penalty)', () => {
+  // Two parallel directions of one line, ~11 m apart, joined only by
+  // transfers — distinct track components.
+  const nodes: RailNodeInput[] = []
+  const edges: RailEdgeInput[] = []
+  for (let i = 0; i <= 20; i++) {
+    nodes.push({ id: 100 + i, lat: 0, lon: i * 0.001 }) // direction A (lat 0)
+    nodes.push({ id: 200 + i, lat: 0.0001, lon: i * 0.001 }) // direction B (lat 0.0001)
+    if (i > 0) {
+      edges.push({ a: 99 + i, b: 100 + i })
+      edges.push({ a: 199 + i, b: 200 + i })
+    }
+  }
+  const g = buildRailGraph(nodes, edges, { snapRadiusM: 200, transferRadiusM: 60 })
+
+  it('keeps a noisy ride on one track instead of flipping to the parallel one', () => {
+    // Starts clearly on A, then several fixes drift closer to B; sticky
+    // anchoring should hold the whole ride on A (every point at lat 0).
+    const ride: number[] = []
+    for (let i = 0; i <= 20; i++) {
+      const driftToB = i > 0 && i % 3 === 1 // closer to B (lat 0.0001); start on A
+      ride.push(i * 0.001, driftToB ? 0.00007 : 0.00001)
+    }
+    const c = coordsOf(matchRideToRail(new Float32Array(ride), g)!)
+    for (let i = 1; i < c.length; i += 2) expect(c[i]).toBe(0)
+  })
+
+  it('a fill between two anchors stays on one track (no weaving)', () => {
+    // Two fixes far apart on direction A with a tunnel gap between: the routed
+    // fill must ride A throughout, never hop onto B and back.
+    const ride = new Float32Array([0, 0.00001, 0.02, 0.00001])
+    const c = coordsOf(matchRideToRail(ride, g)!)
+    for (let i = 1; i < c.length; i += 2) expect(c[i]).toBe(0)
+    expect(c.length / 2).toBeGreaterThan(10) // genuinely routed the line
   })
 })
 

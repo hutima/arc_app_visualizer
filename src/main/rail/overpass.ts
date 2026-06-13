@@ -7,6 +7,7 @@
  * snap runs offline. The JSON parser is pure so it's tested without network.
  */
 import { railKindCode, RAIL_KIND, type RailNodeInput, type RailEdgeInput } from './snapRail'
+import type { OsmLayer } from '../../shared/types'
 
 export interface BBox {
   minLat: number
@@ -54,21 +55,19 @@ const USER_AGENT = 'arc-visualizer/0.1.0 (+https://github.com/hutima/arc_app_vis
 /** Worth trying another mirror: rate limit or server-side failure. */
 const isRetryable = (status: number): boolean => status === 429 || status >= 500
 
-export function buildOverpassQuery(bbox: BBox): string {
+/**
+ * One layer at a time: `rail` fetches transit track, `road` fetches highway
+ * tunnels only (never the full road network — those just bridge car GPS gaps).
+ * Splitting keeps each fetch small and lets the user load them independently.
+ */
+export function buildOverpassQuery(bbox: BBox, layer: OsmLayer): string {
   const b = `${bbox.minLat},${bbox.minLon},${bbox.maxLat},${bbox.maxLon}`
-  const rail = RAILWAY_TYPES.join('|')
-  const road = ROAD_TYPES.join('|')
-  // Ways + recursed-down nodes; service tracks (yards/sidings) excluded.
-  // Road ways only when tunnelled — they bridge car GPS gaps, nothing more.
-  return [
-    '[out:json][timeout:180];',
-    '(',
-    `  way["railway"~"^(${rail})$"]["service"!~"."](${b});`,
-    `  way["highway"~"^(${road})$"]["tunnel"]["tunnel"!="no"](${b});`,
-    ');',
-    '(._;>;);',
-    'out qt;'
-  ].join('\n')
+  const selector =
+    layer === 'road'
+      ? `  way["highway"~"^(${ROAD_TYPES.join('|')})$"]["tunnel"]["tunnel"!="no"](${b});`
+      : `  way["railway"~"^(${RAILWAY_TYPES.join('|')})$"]["service"!~"."](${b});`
+  // Ways + recursed-down nodes.
+  return ['[out:json][timeout:180];', '(', selector, ');', '(._;>;);', 'out qt;'].join('\n')
 }
 
 interface OverpassElement {
@@ -133,9 +132,10 @@ export function parseOverpassJson(json: unknown): ParsedRail {
  */
 export async function fetchRailNetwork(
   bbox: BBox,
+  layer: OsmLayer,
   endpoints: readonly string[] = DEFAULT_ENDPOINTS
 ): Promise<ParsedRail> {
-  const body = 'data=' + encodeURIComponent(buildOverpassQuery(bbox))
+  const body = 'data=' + encodeURIComponent(buildOverpassQuery(bbox, layer))
   let lastError: Error | null = null
   for (const endpoint of endpoints) {
     const host = new URL(endpoint).host

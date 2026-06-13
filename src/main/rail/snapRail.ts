@@ -108,6 +108,14 @@ const GAP_SLACK_DEG = 3e-3
  * noisy anchors ping-pong across rails whose crossover is far away.
  */
 const SOFT_BRIDGE_DEG = 1.4e-3
+/**
+ * Flat cost added to every transfer hop (~220 m of travel). Routing minimises
+ * total weight, so this buys contiguity: a fill between two anchors prefers
+ * staying on one track over weaving across parallel rails, and takes a
+ * transfer only where one is genuinely needed (a real interchange). Kept under
+ * GAP_SLACK so a legitimate short transfer still fits the routing budget.
+ */
+const TRANSFER_PENALTY_DEG = 2e-3
 
 /**
  * Is this lon/lat inside a fetched coverage region? Rail is fetched one
@@ -125,6 +133,13 @@ export interface RailGraph {
   /** Edges with both endpoints present; `grid` buckets hold indices into it. */
   edges: RailEdgeInput[]
   grid: Map<string, number[]>
+  /**
+   * Track-connected component per node, over real track edges only (not
+   * transfers). Two directions of a line, or two unconnected lines, are
+   * separate components — so a ride stays on one and only switches at a
+   * genuine interchange. Anchoring prefers the previous vertex's component.
+   */
+  comp: Map<number, number>
   /** Snap radius in degrees — also the grid cell size (3×3 covers it). */
   cell: number
   refCos: number
@@ -150,7 +165,7 @@ export function buildRailGraph(
 ): RailGraph {
   const snapRadiusDeg = tuning.snapRadiusM / M_PER_DEG
   const emptyGraph = (): RailGraph => ({
-    pos: new Map(), adj: new Map(), edges: [], grid: new Map(), cell: snapRadiusDeg, refCos: 1, empty: true
+    pos: new Map(), adj: new Map(), edges: [], grid: new Map(), comp: new Map(), cell: snapRadiusDeg, refCos: 1, empty: true
   })
   if (nodes.length === 0) return emptyGraph()
 
@@ -166,6 +181,10 @@ export function buildRailGraph(
     used.add(e.b)
   }
   if (used.size === 0) return emptyGraph()
+
+  // Track-connected components over real edges only (transfers come later and
+  // deliberately don't merge components).
+  const comp = trackComponents(used, kept)
 
   let latSum = 0
   for (const id of used) latSum += byId.get(id)!.lat
@@ -213,7 +232,31 @@ export function buildRailGraph(
       }
     }
   }
-  return { pos, adj, edges: kept, grid, cell, refCos, empty: false }
+  return { pos, adj, edges: kept, grid, comp, cell, refCos, empty: false }
+}
+
+/** Union-find over track edges → a component id per node. */
+function trackComponents(used: Set<number>, edges: RailEdgeInput[]): Map<number, number> {
+  const parent = new Map<number, number>()
+  for (const id of used) parent.set(id, id)
+  const find = (x: number): number => {
+    let r = x
+    while (parent.get(r) !== r) r = parent.get(r)!
+    while (parent.get(x) !== r) {
+      const nx = parent.get(x)!
+      parent.set(x, r)
+      x = nx
+    }
+    return r
+  }
+  for (const e of edges) {
+    const ra = find(e.a)
+    const rb = find(e.b)
+    if (ra !== rb) parent.set(ra, rb)
+  }
+  const comp = new Map<number, number>()
+  for (const id of used) comp.set(id, find(id))
+  return comp
 }
 
 /**
@@ -252,7 +295,8 @@ function addTransferEdges(
           const q = pos.get(other)!
           const d2 = (p.x - q.x) ** 2 + (p.y - q.y) ** 2
           if (d2 === 0 || d2 > r2 || adjacent(id, other)) continue
-          const w = Math.sqrt(d2)
+          // Penalised so routing prefers contiguous track over weaving.
+          const w = Math.sqrt(d2) + TRANSFER_PENALTY_DEG
           link(id, other, w)
           link(other, id, w)
         }
@@ -266,12 +310,20 @@ function addTransferEdges(
  * distance (within the snap radius), returning the endpoint node nearer to
  * the projection. Nodes are sparse on straight track, so node distance alone
  * would miss vertices sitting right on the rail.
+ *
+ * `preferComp` is the previous vertex's track component: when given, a
+ * candidate in that component within the radius wins over a geometrically
+ * closer one on a different track — so a noisy point near a parallel line
+ * doesn't flip the ride onto it. -1 disables the preference (start of a run).
  */
-function nearestAnchor(g: RailGraph, x: number, y: number): number | null {
+function nearestAnchor(g: RailGraph, x: number, y: number, preferComp = -1): number | null {
   const cx = Math.floor(x / g.cell)
   const cy = Math.floor(y / g.cell)
+  const radius2 = g.cell * g.cell // cell size = snap radius
   let best: number | null = null
-  let bestD = g.cell * g.cell // cell size = snap radius
+  let bestD = radius2
+  let bestPref: number | null = null
+  let bestPrefD = radius2
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
       const bucket = g.grid.get(cellKey(cx + dx, cy + dy))
@@ -291,10 +343,16 @@ function nearestAnchor(g: RailGraph, x: number, y: number): number | null {
           best = anchor
           bestD = d
         }
+        if (preferComp >= 0 && g.comp.get(anchor) === preferComp) {
+          if (d < bestPrefD || (d === bestPrefD && bestPref !== null && anchor < bestPref)) {
+            bestPref = anchor
+            bestPrefD = d
+          }
+        }
       }
     }
   }
-  return best
+  return bestPref ?? best
 }
 
 /**
@@ -324,19 +382,22 @@ export function matchRideToRail(
   }
 
   let prev: number | null = null // last anchored node, or null if last point was raw
+  let prevComp = -1 // its track component, so anchoring stays on one line
   let snappedHops = 0
   for (let i = 0; i < n; i++) {
     const lon = coords[i * 2]!
     const lat = coords[i * 2 + 1]!
-    const anchor = isCovered(lon, lat) ? nearestAnchor(g, lon * g.refCos, lat) : null
+    const anchor = isCovered(lon, lat) ? nearestAnchor(g, lon * g.refCos, lat, prevComp) : null
     if (anchor === null) {
       pushLonLat(lon, lat) // off-network / off-coverage: keep raw, break the run
       prev = null
+      prevComp = -1
       continue
     }
     if (prev === null) {
       pushNode(anchor)
       prev = anchor
+      prevComp = g.comp.get(anchor) ?? -1
       continue
     }
     if (anchor === prev) continue
@@ -348,13 +409,16 @@ export function matchRideToRail(
       for (let j = 1; j < route.length; j++) pushNode(route[j]!)
       snappedHops++
       prev = anchor
+      prevComp = g.comp.get(anchor) ?? -1
     } else if (straight <= SOFT_BRIDGE_DEG) {
       pushNode(anchor) // parallel-track ping-pong: bridge the few meters straight
       snappedHops++
       prev = anchor
+      prevComp = g.comp.get(anchor) ?? -1
     } else {
       pushLonLat(lon, lat) // long gap that won't route → keep raw, break the run
       prev = null
+      prevComp = -1
     }
   }
   if (snappedHops === 0 || out.length < 4) return null
