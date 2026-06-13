@@ -517,3 +517,139 @@ button:disabled {
   position: absolute;
   inset: 0;
 }
+
+/* Merge-places selection list. */
+.place-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.place-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgba(255, 209, 102, 0.1);
+}
+
+.place-list .merge-type {
+  flex: 1;
+}
+
+/* Stats tab: dataset summary + per-place histograms (plain CSS bars). */
+.stats-subhead {
+  margin: 16px 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.stats-place-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.bar-block {
+  margin-top: 12px;
+}
+
+.histogram-title {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.histogram {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 62px;
+}
+
+.histogram-bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  min-width: 0;
+}
+
+.histogram-fill {
+  width: 100%;
+  background: var(--accent);
+  border-radius: 1px 1px 0 0;
+  min-height: 1px;
+}
+
+.histogram-label {
+  font-size: 9px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  white-space: nowrap;
+}
+
+.bar-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.bar-rows li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bar-rows li.clickable {
+  cursor: pointer;
+}
+
+.bar-rows li.clickable:hover .bar-row-label {
+  color: var(--text);
+}
+
+.bar-row-label {
+  flex: 0 0 84px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.bar-row-track {
+  flex: 1;
+  height: 10px;
+  background: #1a2130;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.bar-row-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  min-width: 2px;
+}
+
+.bar-row-count {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}

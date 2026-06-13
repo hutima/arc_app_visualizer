@@ -9,7 +9,7 @@ import type { ViewportSegmentRow } from '../src/main/db/queries'
 import type { ViewportWaypoint } from '../src/shared/types'
 
 const place = (id: number, lat: number, lon: number, name = `P${id}`): ViewportWaypoint => ({
-  id, lat, lon, tsMs: null, name
+  id, lat, lon, tsMs: null, name, placeId: null
 })
 
 /** Station A at (0, 0), station B at (0, 0.1), C far away. */

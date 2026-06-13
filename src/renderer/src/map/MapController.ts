@@ -25,6 +25,7 @@ import type {
   CategoryInfo,
   EditablePoint,
   EditSaveMode,
+  PlaceRef,
   SegmentEditInput,
   TrackColorMode,
   ViewportResultMeta
@@ -59,6 +60,10 @@ const EDIT_SPLIT_LAYER = 'arc-edit-split-circle'
 // Merge-mode highlights ride on the tracks source (filtered by segment id).
 const MERGE_CAND_LAYER = 'arc-merge-candidates-line'
 const MERGE_SEL_LAYER = 'arc-merge-selected-line'
+// Place highlight (stats inspection / merge selection): its own source of
+// rings at place centroids, so it works for off-screen places too.
+const PLACE_HL_SOURCE = 'arc-place-highlight'
+const PLACE_HL_LAYER = 'arc-place-highlight-circle'
 
 /**
  * Hit radii (screen px) for the point-edit tool. Grabbing an existing vertex
@@ -71,8 +76,20 @@ const MERGE_SEL_LAYER = 'arc-merge-selected-line'
 const VERTEX_GRAB_TOLERANCE_PX = 13
 const LINE_INSERT_TOLERANCE_PX = 8
 
-/** Editing sub-tool: per-point vertex editing vs stitching tracks together. */
-export type EditTool = 'points' | 'merge'
+/**
+ * Editing sub-tool: per-point vertex editing, stitching tracks together, or
+ * combining stationary places (and folding a track into one).
+ */
+export type EditTool = 'points' | 'merge' | 'mergePlaces'
+
+/** A clicked/selected place: the rendered dot, a backend ref, name, location. */
+export interface PlacePick {
+  dotId: number
+  ref: PlaceRef
+  name: string | null
+  lat: number
+  lon: number
+}
 
 const EMPTY_FC: FeatureCollection = { type: 'FeatureCollection', features: [] }
 
@@ -143,6 +160,13 @@ export class MapController {
   /** Last merge highlight ids, so a theme re-add can restore them. */
   private mergeCandidateIds: number[] = []
   private mergeSelectedIds: number[] = []
+  /** Stats mode: clicking a place reports it for inspection (no track edits). */
+  private statsMode = false
+  /** Centroids of highlighted places (rings); restored on a theme re-add. */
+  private placeHighlight: Array<[number, number]> = []
+  private placeSelectListener: ((p: PlacePick) => void) | null = null
+  private statsPlaceListener: ((p: PlacePick) => void) | null = null
+  private trackToPlaceListener: ((segmentId: number) => void) | null = null
   private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
@@ -324,15 +348,32 @@ export class MapController {
       filter: matchIds([]),
       paint: { 'line-color': '#ffd166', 'line-width': 5, 'line-opacity': 1 }
     } as LayerSpecification)
+
+    // Place highlight rings (stats inspection / merge-places selection), drawn
+    // at place centroids on their own source so off-screen places still ring.
+    this.map.addSource(PLACE_HL_SOURCE, { type: 'geojson', data: EMPTY_FC })
+    this.map.addLayer({
+      id: PLACE_HL_LAYER,
+      type: 'circle',
+      source: PLACE_HL_SOURCE,
+      layout: { visibility: 'none' },
+      paint: {
+        'circle-color': 'rgba(0,0,0,0)',
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 7, 14, 12] as unknown as ExpressionSpecification,
+        'circle-stroke-color': '#ffd166',
+        'circle-stroke-width': 3
+      }
+    } as LayerSpecification)
     this.bindEditHandlers()
 
     this.applyTypeFilter()
     this.applyWaypointVisibility()
     this.applyEditEmphasis()
     // Theme switches re-add everything; restore an in-flight edit session and
-    // any merge highlights.
+    // any merge / place highlights.
     if (this.editingId !== null) this.updateEditLayers()
     this.setMergeHighlight(this.mergeCandidateIds, this.mergeSelectedIds)
+    this.setPlaceHighlight(this.placeHighlight)
     this.updateSplitPreview()
   }
 
@@ -347,6 +388,7 @@ export class MapController {
     if (this.editHandlersBound) return
     this.editHandlersBound = true
     this.map.on('click', TRACKS_LAYER, (e) => this.handleTrackClick(e))
+    this.map.on('click', PLACES_LAYER, (e) => this.handlePlaceClick(e))
     this.map.on('mousedown', (e) => this.handleMapDown(e))
     this.map.on('mousemove', (e) => this.updateEditCursor(e))
     // Clicking off the edited track (empty map) commits and deselects it.
@@ -514,6 +556,7 @@ export class MapController {
     if (!on) {
       this.closeEditSession()
       this.setMergeHighlight([], [])
+      this.setPlaceHighlight([])
     }
     this.applyEditEmphasis()
   }
@@ -524,6 +567,7 @@ export class MapController {
     this.editTool = tool
     this.closeEditSession()
     this.setMergeHighlight([], [])
+    this.setPlaceHighlight([])
     this.applyEditEmphasis()
   }
 
@@ -547,6 +591,86 @@ export class MapController {
     for (const id of [MERGE_CAND_LAYER, MERGE_SEL_LAYER]) {
       this.map.setLayoutProperty(id, 'visibility', show ? 'visible' : 'none')
     }
+  }
+
+  /** Receives a place clicked in the merge-places tool (toggle its selection). */
+  setPlaceSelectListener(cb: (p: PlacePick) => void): void {
+    this.placeSelectListener = cb
+  }
+
+  /** Receives a place clicked in stats mode (inspect its visit stats). */
+  setStatsPlaceListener(cb: (p: PlacePick) => void): void {
+    this.statsPlaceListener = cb
+  }
+
+  /** Receives a track clicked in the merge-places tool (fold it into a place). */
+  setTrackToPlaceListener(cb: (segmentId: number) => void): void {
+    this.trackToPlaceListener = cb
+  }
+
+  /** True when place dots are clickable: stats mode or the merge-places tool. */
+  private placePickActive(): boolean {
+    return this.statsMode || (this.editMode && this.editTool === 'mergePlaces')
+  }
+
+  /**
+   * A place dot clicked: report it (with a backend ref and its centroid) for
+   * stats inspection or merge-places selection. A merged pin carries a
+   * `placeId`; an un-merged one is referenced by its representative visit id.
+   */
+  private handlePlaceClick(e: MapLayerMouseEvent): void {
+    if (!this.placePickActive()) return
+    const f = e.features?.[0]
+    if (!f) return
+    const rawId = f.id
+    const dotId = typeof rawId === 'number' ? rawId : Number(rawId)
+    if (!Number.isInteger(dotId)) return
+    const props = f.properties ?? {}
+    const placeId = typeof props.placeId === 'number' ? props.placeId : null
+    const ref: PlaceRef = placeId != null ? { placeId } : { waypointId: dotId }
+    const name = typeof props.name === 'string' && props.name.length > 0 ? props.name : null
+    const lat = typeof props.lat === 'number' ? props.lat : e.lngLat.lat
+    const lon = typeof props.lon === 'number' ? props.lon : e.lngLat.lng
+    const pick: PlacePick = { dotId, ref, name, lat, lon }
+    if (this.statsMode) this.statsPlaceListener?.(pick)
+    else this.placeSelectListener?.(pick)
+  }
+
+  /** Enter/leave stats mode (place dots become clickable for inspection). */
+  setStatsMode(on: boolean): void {
+    if (on === this.statsMode) return
+    this.statsMode = on
+    this.setPlaceHighlight(on ? this.placeHighlight : [])
+  }
+
+  /**
+   * Ring the given place centroids (the inspected place in stats; the selected
+   * places in merge-places). Its own source, so off-screen places still ring.
+   */
+  setPlaceHighlight(coords: Array<[number, number]>): void {
+    this.placeHighlight = coords
+    const src = this.map.getSource(PLACE_HL_SOURCE) as GeoJSONSource | undefined
+    if (!src) return
+    src.setData({
+      type: 'FeatureCollection',
+      features: coords.map(([lon, lat]) => ({
+        type: 'Feature',
+        properties: {},
+        geometry: { type: 'Point', coordinates: [lon, lat] }
+      }))
+    })
+    if (this.map.getLayer(PLACE_HL_LAYER)) {
+      this.map.setLayoutProperty(
+        PLACE_HL_LAYER,
+        'visibility',
+        this.placePickActive() && coords.length > 0 ? 'visible' : 'none'
+      )
+    }
+  }
+
+  /** Center the map on a place (e.g. one picked from the top-places list). */
+  flyToPlace(lat: number, lon: number): void {
+    this.map.flyTo({ center: [lon, lat], zoom: Math.max(this.map.getZoom(), 13), duration: 600 })
   }
 
   /**
@@ -692,6 +816,12 @@ export class MapController {
       // Clicking a track anchors the merge window on it; selection happens in
       // the panel, so this is a fresh anchor each time.
       this.mergeAnchorListener?.(id)
+      return
+    }
+    if (this.editTool === 'mergePlaces') {
+      // A place dot over the track wins (it's a place selection, not assign).
+      if (this.map.queryRenderedFeatures(e.point, { layers: [PLACES_LAYER] }).length > 0) return
+      this.trackToPlaceListener?.(id)
       return
     }
     // Point tool: switching tracks auto-saves the current one (click-off save).
@@ -1065,7 +1195,7 @@ export class MapController {
     const placeFeatures: Feature[] = result.waypoints.map((w) => ({
       type: 'Feature',
       id: w.id,
-      properties: { name: w.name ?? '' },
+      properties: { name: w.name ?? '', placeId: w.placeId, lat: w.lat, lon: w.lon },
       geometry: { type: 'Point', coordinates: [w.lon, w.lat] }
     }))
     const decodeMs = performance.now() - tDecode

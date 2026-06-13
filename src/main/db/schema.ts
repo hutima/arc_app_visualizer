@@ -17,8 +17,9 @@
 // v8: rail_matched_geom (cached map-matched rail geometry, per detail level);
 // v9: rail_edges.kind (OSM railway kind — type-constrained matching);
 // v10: rail_coverage.category ('rail' | 'road' — fetched & gated separately);
-// v11: segment_edits (user track edits as an overlay on raw points)
-export const SCHEMA_VERSION = 11
+// v11: segment_edits (user track edits as an overlay on raw points);
+// v12: places + waypoints.place_id (user-merged stationary places)
+export const SCHEMA_VERSION = 12
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -97,11 +98,23 @@ CREATE TABLE IF NOT EXISTS waypoints (
   name    TEXT,
   ts_ms   INTEGER,
   lat     REAL NOT NULL,
-  lon     REAL NOT NULL
+  lon     REAL NOT NULL,
+  place_id INTEGER -- user-merged place (places.id); NULL = clustered by name only
 );
 CREATE INDEX IF NOT EXISTS idx_waypoints_file ON waypoints(file_id);
 -- Viewport waypoint queries fetch all rows in bounds (then thin in JS).
 CREATE INDEX IF NOT EXISTS idx_waypoints_bbox ON waypoints(lat, lon);
+
+-- User-merged places: a stable identity + chosen name for a set of visits
+-- (waypoints.place_id), overriding the display-time name+proximity clustering
+-- so far-apart or differently-named visits can be combined into one pin. Plain
+-- INTEGER link (no FK), like points.segment_id; integrity is managed in code
+-- (orphaned places are pruned after a merge). The idx_waypoints_place index is
+-- created in migrate(), after place_id is ensured on pre-existing databases.
+CREATE TABLE IF NOT EXISTS places (
+  id   INTEGER PRIMARY KEY,
+  name TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS categories (
   name    TEXT PRIMARY KEY,

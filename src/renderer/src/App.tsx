@@ -9,9 +9,12 @@ import type {
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
 import type {
+  DatasetStats,
   EditSaveMode,
   MergeCandidate,
   OsmLayer,
+  PlaceRef,
+  PlaceStats,
   RailCoverage,
   RailMatchProgress,
   RailTuning
@@ -22,6 +25,7 @@ import {
   MapController,
   type EditSessionInfo,
   type EditTool,
+  type PlacePick,
   type RenderStats
 } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
@@ -32,10 +36,17 @@ import { ColorModeControl } from './components/ColorModeControl'
 import { DateFilter } from './components/DateFilter'
 import { DetailControl } from './components/DetailControl'
 import { StatsPanel } from './components/StatsPanel'
+import { StatsView } from './components/StatsView'
 import { TrackEditPanel } from './components/TrackEditPanel'
 import { MergePanel } from './components/MergePanel'
+import { MergePlacesPanel } from './components/MergePlacesPanel'
 
-type AppMode = 'display' | 'edit'
+type AppMode = 'display' | 'edit' | 'stats'
+
+/** A place selected for merging: the map pick plus its fetched visit count. */
+interface SelectedPlace extends PlacePick {
+  visitCount: number
+}
 
 /** The merged track defaults to the type of its longest (most-points) leg. */
 function defaultMergeType(selectedIds: number[], candidates: MergeCandidate[]): string {
@@ -78,10 +89,26 @@ export function App(): React.JSX.Element {
   const [mergeType, setMergeType] = useState('')
   const [mergeBusy, setMergeBusy] = useState(false)
   const [mergeError, setMergeError] = useState<string | null>(null)
+  // Merge-places tool: a selection of place pins, the name to keep, status.
+  const [placeSelection, setPlaceSelection] = useState<SelectedPlace[]>([])
+  const [mergePlaceName, setMergePlaceName] = useState('')
+  const [placeBusy, setPlaceBusy] = useState(false)
+  const [placeError, setPlaceError] = useState<string | null>(null)
+  // Stats tab: dataset-wide summary + the place currently inspected.
+  const [datasetStats, setDatasetStats] = useState<DatasetStats | null>(null)
+  const [statsPlace, setStatsPlace] = useState<PlaceStats | null>(null)
+  const [statsPlaceLoading, setStatsPlaceLoading] = useState(false)
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
   const hadDataOnLoadRef = useRef(false)
+  // Latest selection, read synchronously by map-click listeners (toggle / assign).
+  const placeSelectionRef = useRef<SelectedPlace[]>([])
+  // Map-click callbacks behind refs so the once-bound listeners always call the
+  // latest closure (state setters + skip-confirm) without rebinding.
+  const placeSelectCbRef = useRef<(p: PlacePick) => void>(() => {})
+  const trackToPlaceCbRef = useRef<(segmentId: number) => void>(() => {})
+  const inspectPlaceCbRef = useRef<(ref: PlaceRef) => void>(() => {})
 
   const refreshData = useCallback(async (): Promise<void> => {
     const [cats, sum] = await Promise.all([window.api.getCategories(), window.api.getSummary()])
@@ -143,6 +170,11 @@ export function App(): React.JSX.Element {
           setMergeSelected(cands.some((c) => c.segmentId === segmentId) ? [segmentId] : [])
         })
       })
+      // Place interactions (merge-places selection / assign, stats inspection)
+      // route through refs so these once-bound listeners call the latest handler.
+      controller.setPlaceSelectListener((pick) => placeSelectCbRef.current(pick))
+      controller.setTrackToPlaceListener((segmentId) => trackToPlaceCbRef.current(segmentId))
+      controller.setStatsPlaceListener((pick) => inspectPlaceCbRef.current(pick.ref))
       await refreshData()
       void window.api.getRailCoverage().then((cov) => {
         if (!disposed) setRailCoverage(cov)
@@ -380,19 +412,164 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setMergeHighlight([], [])
   }, [])
 
-  // Switch between the Display view and the Edit view. Edit view focuses the
-  // map on the active editing tool; Display restores the normal panels.
+  // --- Places: merge & stats -------------------------------------------------
+
+  const clearPlaceSelection = useCallback((): void => {
+    setPlaceSelection([])
+    setMergePlaceName('')
+    setPlaceError(null)
+    controllerRef.current?.setPlaceHighlight([])
+  }, [])
+
+  // Toggle a clicked place in/out of the merge selection; on add, fetch its
+  // visit count + canonical name for the panel. The ref gives the once-bound
+  // click listener the current selection synchronously.
+  const handlePlaceSelect = useCallback((pick: PlacePick): void => {
+    const cur = placeSelectionRef.current
+    if (cur.some((p) => p.dotId === pick.dotId)) {
+      setPlaceSelection(cur.filter((p) => p.dotId !== pick.dotId))
+      return
+    }
+    void window.api.getPlaceStats(pick.ref).then((stats) => {
+      setPlaceSelection((prev) =>
+        prev.some((p) => p.dotId === pick.dotId)
+          ? prev
+          : [...prev, { ...pick, name: stats?.name ?? pick.name, visitCount: stats?.visitCount ?? 0 }]
+      )
+    })
+  }, [])
+
+  const handleRemovePlace = useCallback((dotId: number): void => {
+    setPlaceSelection((prev) => prev.filter((p) => p.dotId !== dotId))
+  }, [])
+
+  // Non-destructive (only regroups visits under one identity) — no confirm.
+  const handleMergePlaces = useCallback((): void => {
+    if (placeSelection.length < 2 || mergePlaceName.trim().length === 0) return
+    setPlaceBusy(true)
+    setPlaceError(null)
+    void window.api.mergePlaces(placeSelection.map((p) => p.ref), mergePlaceName.trim()).then((res) => {
+      setPlaceBusy(false)
+      if (res.ok) {
+        clearPlaceSelection()
+        controllerRef.current?.scheduleRefresh(0)
+        void refreshData()
+      } else {
+        setPlaceError(res.error ?? 'merge failed')
+      }
+    })
+  }, [placeSelection, mergePlaceName, clearPlaceSelection, refreshData])
+
+  // With exactly one place selected, a track click folds it into that place as
+  // a stationary visit and deletes the track — destructive, so confirm.
+  const handleTrackToPlace = useCallback((segmentId: number): void => {
+    const sel = placeSelectionRef.current
+    if (sel.length !== 1) {
+      setPlaceError('Select exactly one place first, then click a track to add it.')
+      return
+    }
+    const target = sel[0]!
+    if (
+      !skipConfirmRef.current &&
+      !window.confirm(
+        `Add this track to “${target.name ?? 'this place'}” as a stationary visit? The track is removed and this cannot be undone.`
+      )
+    ) {
+      return
+    }
+    setPlaceBusy(true)
+    setPlaceError(null)
+    void window.api.assignTrackToPlace(segmentId, target.ref).then((res) => {
+      setPlaceBusy(false)
+      if (res.ok) {
+        clearPlaceSelection()
+        controllerRef.current?.scheduleRefresh(0)
+        void refreshData()
+      } else {
+        setPlaceError(res.error ?? 'assign failed')
+      }
+    })
+  }, [clearPlaceSelection, refreshData])
+
+  const refreshDatasetStats = useCallback((): void => {
+    void window.api.getDatasetStats().then((s) => setDatasetStats(s))
+  }, [])
+
+  const inspectPlace = useCallback((ref: PlaceRef): void => {
+    setStatsPlaceLoading(true)
+    void window.api.getPlaceStats(ref).then((s) => {
+      setStatsPlace(s)
+      setStatsPlaceLoading(false)
+    })
+  }, [])
+
+  const handlePickTopPlace = useCallback(
+    (ref: PlaceRef, lat: number, lon: number): void => {
+      controllerRef.current?.flyToPlace(lat, lon)
+      inspectPlace(ref)
+    },
+    [inspectPlace]
+  )
+
+  // Keep the click-listener refs pointing at the latest handler + selection.
+  useEffect(() => {
+    placeSelectionRef.current = placeSelection
+  }, [placeSelection])
+  useEffect(() => {
+    placeSelectCbRef.current = handlePlaceSelect
+  }, [handlePlaceSelect])
+  useEffect(() => {
+    trackToPlaceCbRef.current = handleTrackToPlace
+  }, [handleTrackToPlace])
+  useEffect(() => {
+    inspectPlaceCbRef.current = inspectPlace
+  }, [inspectPlace])
+
+  // Default the kept name to the most-visited selected place; never clobber a
+  // name the user has already typed.
+  useEffect(() => {
+    setMergePlaceName((cur) => {
+      if (cur.trim().length > 0) return cur
+      let best: SelectedPlace | null = null
+      for (const p of placeSelection) {
+        if (p.name && (!best || p.visitCount > best.visitCount)) best = p
+      }
+      return best?.name ?? cur
+    })
+  }, [placeSelection])
+
+  // Drive the place ring(s): the inspected place in Stats, the selection in the
+  // merge-places tool, nothing elsewhere.
+  useEffect(() => {
+    const controller = controllerRef.current
+    if (!controller) return
+    if (appMode === 'stats') {
+      controller.setPlaceHighlight(
+        statsPlace ? [[statsPlace.lon, statsPlace.lat] as [number, number]] : []
+      )
+    } else if (appMode === 'edit' && editTool === 'mergePlaces') {
+      controller.setPlaceHighlight(placeSelection.map((p) => [p.lon, p.lat] as [number, number]))
+    }
+  }, [appMode, editTool, statsPlace, placeSelection])
+
+  // Switch between Display, Edit, and Stats. Edit focuses the map on the active
+  // editing tool; Stats makes places clickable for inspection; Display restores
+  // the normal panels.
   const handleAppMode = useCallback(
     (mode: AppMode): void => {
       setAppMode(mode)
       setEditError(null)
       clearMerge()
+      clearPlaceSelection()
+      setStatsPlace(null)
       const controller = controllerRef.current
       if (!controller) return
       controller.setEditMode(mode === 'edit')
+      controller.setStatsMode(mode === 'stats')
       if (mode === 'edit') controller.setEditTool(editTool)
+      if (mode === 'stats') refreshDatasetStats()
     },
-    [clearMerge, editTool]
+    [clearMerge, clearPlaceSelection, editTool, refreshDatasetStats]
   )
 
   const handleEditTool = useCallback(
@@ -400,9 +577,10 @@ export function App(): React.JSX.Element {
       setEditTool(tool)
       setEditError(null)
       clearMerge()
+      clearPlaceSelection()
       controllerRef.current?.setEditTool(tool)
     },
-    [clearMerge]
+    [clearMerge, clearPlaceSelection]
   )
 
   // Keep the merge map highlight in sync with the candidate/selection state.
@@ -593,6 +771,14 @@ export function App(): React.JSX.Element {
           >
             Edit
           </button>
+          <button
+            role="tab"
+            aria-selected={appMode === 'stats'}
+            className={appMode === 'stats' ? 'active' : ''}
+            onClick={() => handleAppMode('stats')}
+          >
+            Stats
+          </button>
         </div>
 
         {appMode === 'display' ? (
@@ -629,7 +815,7 @@ export function App(): React.JSX.Element {
             />
             {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
           </>
-        ) : (
+        ) : appMode === 'edit' ? (
           <>
             <div className="mode-tabs sub" role="tablist">
               <button
@@ -647,6 +833,14 @@ export function App(): React.JSX.Element {
                 onClick={() => handleEditTool('merge')}
               >
                 Merge tracks
+              </button>
+              <button
+                role="tab"
+                aria-selected={editTool === 'mergePlaces'}
+                className={editTool === 'mergePlaces' ? 'active' : ''}
+                onClick={() => handleEditTool('mergePlaces')}
+              >
+                Merge places
               </button>
             </div>
             <label className="color-mode-option" title="Also bakes a click-off save permanently">
@@ -671,7 +865,7 @@ export function App(): React.JSX.Element {
                 onChangeType={handleChangeType}
                 onDeleteTrack={handleDeleteTrack}
               />
-            ) : (
+            ) : editTool === 'merge' ? (
               <MergePanel
                 candidates={mergeCandidates}
                 selected={mergeSelected}
@@ -685,16 +879,38 @@ export function App(): React.JSX.Element {
                 onMerge={handleMerge}
                 onClear={clearMerge}
               />
+            ) : (
+              <MergePlacesPanel
+                selected={placeSelection}
+                mergeName={mergePlaceName}
+                busy={placeBusy}
+                error={placeError}
+                onNameChange={setMergePlaceName}
+                onMerge={handleMergePlaces}
+                onClear={clearPlaceSelection}
+                onRemove={handleRemovePlace}
+              />
             )}
           </>
+        ) : (
+          <StatsView
+            dataset={datasetStats}
+            place={statsPlace}
+            placeLoading={statsPlaceLoading}
+            categories={categories}
+            onPickTopPlace={handlePickTopPlace}
+            onClearPlace={() => setStatsPlace(null)}
+          />
         )}
 
-        <StatsPanel
-          summary={summary}
-          lastImport={lastImport}
-          renderStats={renderStats}
-          config={config}
-        />
+        {appMode !== 'stats' && (
+          <StatsPanel
+            summary={summary}
+            lastImport={lastImport}
+            renderStats={renderStats}
+            config={config}
+          />
+        )}
         <button
           className="fit-button"
           onClick={() => void controllerRef.current?.fitToData()}

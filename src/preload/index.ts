@@ -43,7 +43,12 @@ const api: ArcApi = {
     ipcRenderer.invoke('edits:splitTyped', segmentId, seq, firstType, secondType),
   listMergeCandidates: (anchor, windowMs) =>
     ipcRenderer.invoke('edits:mergeCandidates', anchor, windowMs),
-  mergeSegments: (segmentIds, type) => ipcRenderer.invoke('edits:merge', segmentIds, type)
+  mergeSegments: (segmentIds, type) => ipcRenderer.invoke('edits:merge', segmentIds, type),
+  mergePlaces: (refs, name) => ipcRenderer.invoke('places:merge', refs, name),
+  assignTrackToPlace: (segmentId, ref) =>
+    ipcRenderer.invoke('places:assignTrack', segmentId, ref),
+  getPlaceStats: (ref) => ipcRenderer.invoke('places:stats', ref),
+  getDatasetStats: () => ipcRenderer.invoke('stats:dataset')
 }
 
 contextBridge.exposeInMainWorld('api', api)

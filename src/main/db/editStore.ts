@@ -424,7 +424,7 @@ export function mergeSegments(db: DatabaseSync, segmentIds: number[], type: stri
 }
 
 /** Remove every row belonging to a segment (points has no cascade FK). */
-function deleteSegmentData(db: DatabaseSync, segmentId: number): void {
+export function deleteSegmentData(db: DatabaseSync, segmentId: number): void {
   db.prepare('DELETE FROM points WHERE segment_id = ?').run(segmentId)
   db.prepare('DELETE FROM display_geometries WHERE segment_id = ?').run(segmentId)
   db.prepare('DELETE FROM rail_matched_geom WHERE segment_id = ?').run(segmentId)
