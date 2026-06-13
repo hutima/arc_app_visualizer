@@ -134,10 +134,19 @@ where OSM is best) by map-matching rides onto real OSM rail geometry.
   vertex's *track component* (`graph.comp`, union-find over real edges only) so
   a noisy point near a parallel line doesn't flip the ride onto it, and transfer
   edges carry a flat penalty (`TRANSFER_PENALTY_DEG`) so fills prefer one track
-  and transfer only at genuine interchanges. The user-facing ranges
-  (`RailTuning`: snap radius, transfer radius — meters) live in `settings.json`
-  under `rail` and in the Cleaning panel ("Apply & re-match" persists +
-  rebuilds); gap factor/slack, soft bridge, transfer penalty stay constants.
+  and transfer only at genuine interchanges. **Time plausibility:** fills are
+  gated by elapsed time (raw `points.ts_ms` flows through `buildMatches`) — a
+  fill far too short for its dt is an unseen out-and-back, and instead of a
+  track jump the matcher emits a **NaN break sentinel** (a deliberate gap;
+  parts survive simplification/decimation and render as MultiLineString).
+  Covered-but-unanchored *tunnel scatter* inside a run is judged by the next
+  anchor: `rescueRoute` re-anchors it at `RESCUE_ANCHOR_SCALE`× the radius and
+  routes through it (recovering e.g. a downtown out-and-back, length checked
+  against dt both ways), and scatter explained by an accepted fill is dropped
+  (display-only point rejection). The user-facing ranges (`RailTuning`: snap
+  radius, transfer radius — meters) live in `settings.json` under `rail` and in
+  the Cleaning panel ("Apply & re-match" persists + rebuilds); gap factor/
+  slack, soft bridge, transfer penalty, time gates stay constants.
 - **`rail/buildMatches.ts`** — runs the matcher over every rail ride's **raw
   points** once (not zoom-simplified geometry), simplifies into the per-zoom
   detail levels, and caches in `rail_matched_geom`. **Type-constrained:** builds
@@ -147,12 +156,14 @@ where OSM is best) by map-matching rides onto real OSM rail geometry.
   Each graph keeps **only nodes its kept edges reference** — otherwise transfer
   edges chain across a foreign line's orphaned nodes and route across modes.
   **Road tunnels** (`RAIL_KIND.road_tunnel`, fetched as `highway` + `tunnel`
-  ways only) are a separate path: car/taxi/bus trips are never map-matched,
-  but a GPS gap that's **anomalous for that trip** (an absolute floor *and*
-  ≥ a multiple of the trip's median point spacing — so a steadily coarse
-  highway drive isn't bridged, only a real tunnel dropout) whose ends anchor
-  near tunnel geometry is bridged by routing through it (`bridgeRoadGaps`) —
-  all raw points kept verbatim, gap can be anywhere mid-trip.
+  ways only) are a separate path with **its own UI toggle** (`snapRoad`; the
+  viewport query swaps cached geometry per type group per toggle): car/taxi/
+  bus trips are never map-matched, but a GPS **dropout window** that's
+  anomalous for that trip (an absolute floor *and* ≥ a multiple of the trip's
+  median point spacing) whose flanks anchor near tunnel geometry is bridged by
+  routing through it (`bridgeRoadGaps`, time-gated like rail) — and the
+  scatter *inside* a bridged window is dropped rather than drawn as a fan.
+  Un-bridgeable windows keep every raw point.
   Heavy → runs after a fetch (auto) with chunked progress, **not** per viewport.
   The viewport query `COALESCE`s the cached line in under snap mode.
 

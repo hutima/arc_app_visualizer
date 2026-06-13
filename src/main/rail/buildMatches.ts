@@ -99,8 +99,9 @@ export async function rebuildRailMatches(
      ORDER BY id`
   ).all(...typeList, u.minLat, u.maxLat, u.minLon, u.maxLon) as Array<{ id: number; type: string }>
 
+  // Timestamps feed the matcher's time-plausibility gate (wormhole rejection).
   const pointsStmt = db.prepare(
-    `SELECT lon, lat FROM points
+    `SELECT lon, lat, ts_ms FROM points
      WHERE segment_id = ? AND flags = 0 AND lat IS NOT NULL AND lon IS NOT NULL
      ORDER BY seq`
   )
@@ -114,18 +115,20 @@ export async function rebuildRailMatches(
     db.exec('BEGIN')
     try {
       for (let i = start; i < end; i++) {
-        const pts = pointsStmt.all(segs[i]!.id) as Array<{ lon: number; lat: number }>
+        const pts = pointsStmt.all(segs[i]!.id) as Array<{ lon: number; lat: number; ts_ms: number | null }>
         if (pts.length < 2) continue
         const coords = new Float32Array(pts.length * 2)
+        const times = new Float64Array(pts.length)
         for (let k = 0; k < pts.length; k++) {
           coords[k * 2] = pts[k]!.lon
           coords[k * 2 + 1] = pts[k]!.lat
+          times[k] = pts[k]!.ts_ms == null ? NaN : Number(pts[k]!.ts_ms)
         }
         // Rail rides are fully map-matched; road trips only get long GPS
         // gaps bridged through mapped tunnels (everything else stays raw).
         const snapped = ROAD_TUNNEL_TYPES.has(segs[i]!.type)
-          ? bridgeRoadGaps(coords, roadGraph(), roadCovered)
-          : matchRideToRail(coords, graphFor(segs[i]!.type), railCovered)
+          ? bridgeRoadGaps(coords, roadGraph(), roadCovered, times)
+          : matchRideToRail(coords, graphFor(segs[i]!.type), railCovered, times)
         if (snapped && storeDetailLevels(insertStmt, segs[i]!.id, snapped)) matched++
       }
       db.exec('COMMIT')
@@ -139,29 +142,52 @@ export async function rebuildRailMatches(
   return { matched, railSegments: segs.length }
 }
 
-/** Simplify the matched line into each detail level and insert it. */
+/**
+ * Simplify the matched line into each detail level and insert it. The matcher
+ * may emit NaN break sentinels (deliberate gaps — "don't connect these");
+ * each part is simplified independently so a break survives simplification.
+ */
 function storeDetailLevels(
   insertStmt: ReturnType<DatabaseSync['prepare']>,
   segmentId: number,
   coords: Float32Array
 ): boolean {
   const n = coords.length / 2
-  const lons = new Float64Array(n)
-  const lats = new Float64Array(n)
-  for (let i = 0; i < n; i++) {
-    lons[i] = coords[i * 2]!
-    lats[i] = coords[i * 2 + 1]!
+  const parts: Array<{ lons: Float64Array; lats: Float64Array }> = []
+  let partStart = 0
+  const flushPart = (from: number, to: number): void => {
+    if (to - from < 2) return // a 1-point part draws nothing anyway
+    const lons = new Float64Array(to - from)
+    const lats = new Float64Array(to - from)
+    for (let i = from; i < to; i++) {
+      lons[i - from] = coords[i * 2]!
+      lats[i - from] = coords[i * 2 + 1]!
+    }
+    parts.push({ lons, lats })
   }
+  for (let i = 0; i < n; i++) {
+    if (Number.isNaN(coords[i * 2]!)) {
+      flushPart(partStart, i)
+      partStart = i + 1
+    }
+  }
+  flushPart(partStart, n)
+  if (parts.length === 0) return false
+
   let wrote = false
   for (const level of DETAIL_LEVELS) {
-    const kept = simplifyIndices(lons, lats, level.toleranceDeg)
-    if (kept.length < 2) continue
-    const out = new Float32Array(kept.length * 2)
-    for (let i = 0; i < kept.length; i++) {
-      out[i * 2] = lons[kept[i]!]!
-      out[i * 2 + 1] = lats[kept[i]!]!
+    const outPts: number[] = []
+    for (const part of parts) {
+      const kept = simplifyIndices(part.lons, part.lats, level.toleranceDeg)
+      if (kept.length < 2) continue
+      if (outPts.length > 0) outPts.push(NaN, NaN)
+      for (const k of kept) outPts.push(part.lons[k]!, part.lats[k]!)
     }
-    insertStmt.run(segmentId, level.detail, kept.length, new Uint8Array(out.buffer))
+    if (outPts.length < 4) continue
+    insertStmt.run(
+      segmentId, level.detail, outPts.length / 2,
+      new Uint8Array(new Float32Array(outPts).buffer)
+    )
     wrote = true
   }
   return wrote

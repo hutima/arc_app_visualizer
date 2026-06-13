@@ -92,6 +92,28 @@ const ROAD_GAP_MIN_SAMPLES = 4
 /** Portal anchoring is forgiving — GPS dies/revives some way from the mouth. */
 export const ROAD_TUNING: RailTuning = { snapRadiusM: 250, transferRadiusM: 0 }
 
+/**
+ * Time-plausibility gate: a fill between two fixes is a lie when the rider
+ * had far more time than the path explains — an out-and-back through downtown
+ * with dead GPS looks like a short hop between two nearby corridor points,
+ * and routing it draws a track jump that never happened. Hops with more
+ * elapsed time than the floor must cover at least dt × a minimum sustained
+ * speed (dwell included), or they stay raw.
+ */
+const TIME_GATE_MIN_DT_MS = 300_000 // gate hops longer than 5 minutes
+const RAIL_MIN_PROGRESS_MPS = 2 // slowest believable metro progress incl. stops
+const RAIL_MAX_PROGRESS_MPS = 30 // fastest believable — rejects fictional detours
+const ROAD_MIN_PROGRESS_MPS = 1.5 // jams included
+
+/**
+ * Rescue anchoring: tunnel scatter is wild but still traces the rider's
+ * progress, so when a fill fails its time gate we retry the unanchored
+ * in-between fixes at this multiple of the snap radius and route through
+ * them — recovering e.g. an out-and-back through downtown instead of either
+ * a shortcut or nothing.
+ */
+const RESCUE_ANCHOR_SCALE = 3
+
 /** OSM node and its neighbors; coords are projected (see RailGraph). */
 export interface RailNodeInput {
   id: number
@@ -323,17 +345,25 @@ function addTransferEdges(
  * candidate in that component within the radius wins over a geometrically
  * closer one on a different track — so a noisy point near a parallel line
  * doesn't flip the ride onto it. -1 disables the preference (start of a run).
+ * `radiusScale` widens the search (rescue anchoring of tunnel scatter).
  */
-function nearestAnchor(g: RailGraph, x: number, y: number, preferComp = -1): number | null {
+function nearestAnchor(
+  g: RailGraph,
+  x: number,
+  y: number,
+  preferComp = -1,
+  radiusScale = 1
+): number | null {
   const cx = Math.floor(x / g.cell)
   const cy = Math.floor(y / g.cell)
-  const radius2 = g.cell * g.cell // cell size = snap radius
+  const reach = Math.ceil(radiusScale) // cell size = snap radius
+  const radius2 = g.cell * radiusScale * (g.cell * radiusScale)
   let best: number | null = null
   let bestD = radius2
   let bestPref: number | null = null
   let bestPrefD = radius2
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
+  for (let dx = -reach; dx <= reach; dx++) {
+    for (let dy = -reach; dy <= reach; dy++) {
       const bucket = g.grid.get(cellKey(cx + dx, cy + dy))
       if (!bucket) continue
       for (const ei of bucket) {
@@ -372,7 +402,8 @@ function nearestAnchor(g: RailGraph, x: number, y: number, preferComp = -1): num
 export function matchRideToRail(
   coords: Float32Array,
   g: RailGraph,
-  isCovered: CoverageTest = FULL_COVERAGE
+  isCovered: CoverageTest = FULL_COVERAGE,
+  timesMs?: ArrayLike<number> | null
 ): Float32Array | null {
   if (g.empty) return null
   const n = coords.length / 2
@@ -389,48 +420,147 @@ export function matchRideToRail(
     pushLonLat(p.lon, p.lat)
   }
 
+  // A break renders as a gap (MultiLineString part on the map): where we know
+  // connecting two fixes would draw a path that never happened, draw nothing.
+  const pushBreak = (): void => {
+    const m = out.length
+    if (m === 0 || Number.isNaN(out[m - 1]!)) return
+    out.push(NaN, NaN)
+  }
+  const pushRaw = (i: number): void => pushLonLat(coords[i * 2]!, coords[i * 2 + 1]!)
+
   let prev: number | null = null // last anchored node, or null if last point was raw
   let prevComp = -1 // its track component, so anchoring stays on one line
+  let prevTs = NaN // when the rider was last seen at an anchor
+  let pending: number[] = [] // covered-but-unanchored fixes inside a run (tunnel scatter)
   let snappedHops = 0
+  const acceptAnchor = (anchor: number, t: number): void => {
+    prev = anchor
+    prevComp = g.comp.get(anchor) ?? -1
+    prevTs = t
+  }
+
   for (let i = 0; i < n; i++) {
     const lon = coords[i * 2]!
     const lat = coords[i * 2 + 1]!
-    const anchor = isCovered(lon, lat) ? nearestAnchor(g, lon * g.refCos, lat, prevComp) : null
-    if (anchor === null) {
-      pushLonLat(lon, lat) // off-network / off-coverage: keep raw, break the run
+    const t = timesMs ? Number(timesMs[i]) : NaN
+    if (!isCovered(lon, lat)) {
+      // Real geometry beyond fetched coverage: stays connected and raw.
+      for (const p of pending) pushRaw(p)
+      pending = []
+      pushRaw(i)
       prev = null
       prevComp = -1
+      continue
+    }
+    const anchor = nearestAnchor(g, lon * g.refCos, lat, prevComp)
+    if (anchor === null) {
+      if (prev === null) pushRaw(i) // head scatter: nothing to explain it yet
+      else pending.push(i) // inside a run: judged when the next anchor arrives
       continue
     }
     if (prev === null) {
       pushNode(anchor)
-      prev = anchor
-      prevComp = g.comp.get(anchor) ?? -1
+      acceptAnchor(anchor, t)
       continue
     }
-    if (anchor === prev) continue
-    const a = g.pos.get(prev)!
-    const b = g.pos.get(anchor)!
-    const straight = Math.hypot(a.x - b.x, a.y - b.y)
-    const route = dijkstra(g, prev, anchor, GAP_FACTOR * straight + GAP_SLACK_DEG)
-    if (route) {
-      for (let j = 1; j < route.length; j++) pushNode(route[j]!)
-      snappedHops++
-      prev = anchor
-      prevComp = g.comp.get(anchor) ?? -1
-    } else if (straight <= SOFT_BRIDGE_DEG) {
-      pushNode(anchor) // parallel-track ping-pong: bridge the few meters straight
-      snappedHops++
-      prev = anchor
-      prevComp = g.comp.get(anchor) ?? -1
-    } else {
-      pushLonLat(lon, lat) // long gap that won't route → keep raw, break the run
-      prev = null
-      prevComp = -1
+    if (anchor === prev) {
+      pending = [] // dwell at a station: scatter around it is explained — drop it
+      prevTs = t // and dwell time must not poison the next hop's dt
+      continue
     }
+    const dtMs = t - prevTs
+    const fill = pending.length
+      ? (rescueRoute(g, coords, pending, prev, anchor, dtMs) ?? directFill(g, prev, anchor, dtMs))
+      : directFill(g, prev, anchor, dtMs)
+    pending = [] // either way the scatter is judged: explained by a fill, or garbage
+    if (fill) {
+      for (let j = 1; j < fill.length; j++) pushNode(fill[j]!)
+      snappedHops++
+    } else {
+      // No believable path between the two fixes (an unseen out-and-back, or
+      // an unroutable long hop): draw nothing rather than a jump that never
+      // happened, and restart the run here.
+      pushBreak()
+      pushNode(anchor)
+    }
+    acceptAnchor(anchor, t)
+  }
+  // Trailing scatter has no closing anchor to explain it: keep it, detached.
+  if (pending.length) {
+    pushBreak()
+    for (const p of pending) pushRaw(p)
   }
   if (snappedHops === 0 || out.length < 4) return null
   return new Float32Array(out)
+}
+
+/** Routed (or soft-bridged) fill between two anchors, time-gated; null = no believable fill. */
+function directFill(g: RailGraph, from: number, to: number, dtMs: number): number[] | null {
+  const a = g.pos.get(from)!
+  const b = g.pos.get(to)!
+  const straight = Math.hypot(a.x - b.x, a.y - b.y)
+  const route = dijkstra(g, from, to, GAP_FACTOR * straight + GAP_SLACK_DEG)
+  if (route) {
+    return timePlausible(routeLengthDeg(g, route), dtMs, RAIL_MIN_PROGRESS_MPS) ? route : null
+  }
+  // Parallel-track ping-pong: bridge the few meters straight.
+  return straight <= SOFT_BRIDGE_DEG ? [from, to] : null
+}
+
+/**
+ * Most-likely route through mid-gap scatter. Tunnel fixes are wild but still
+ * trace the rider's progress: re-anchor them with a generous radius (sticky
+ * to the running track component) and route leg by leg. Accepted only when
+ * the total length is believable for the elapsed time in both directions —
+ * long enough to explain it, short enough to be physically possible — which
+ * recovers an out-and-back through downtown instead of a shortcut across it.
+ * Needs timestamps: without time evidence there is no "most likely".
+ */
+function rescueRoute(
+  g: RailGraph,
+  coords: Float32Array,
+  pending: readonly number[],
+  from: number,
+  to: number,
+  dtMs: number
+): number[] | null {
+  if (!Number.isFinite(dtMs)) return null
+  const seq: number[] = [from]
+  let comp = g.comp.get(from) ?? -1
+  for (const i of pending) {
+    const a = nearestAnchor(
+      g, coords[i * 2]! * g.refCos, coords[i * 2 + 1]!, comp, RESCUE_ANCHOR_SCALE
+    )
+    if (a === null || a === seq[seq.length - 1]) continue
+    seq.push(a)
+    comp = g.comp.get(a) ?? comp
+  }
+  if (seq[seq.length - 1] !== to) seq.push(to)
+  if (seq.length < 2) return null
+
+  const path: number[] = [from]
+  let lenDeg = 0
+  for (let k = 1; k < seq.length; k++) {
+    const u = seq[k - 1]!
+    const v = seq[k]!
+    const a = g.pos.get(u)!
+    const b = g.pos.get(v)!
+    const straight = Math.hypot(a.x - b.x, a.y - b.y)
+    const route = dijkstra(g, u, v, GAP_FACTOR * straight + GAP_SLACK_DEG)
+    if (route) {
+      for (let j = 1; j < route.length; j++) path.push(route[j]!)
+      lenDeg += routeLengthDeg(g, route)
+    } else if (straight <= SOFT_BRIDGE_DEG) {
+      path.push(v)
+      lenDeg += straight
+    } else {
+      return null
+    }
+  }
+  if (!timePlausible(lenDeg, dtMs, RAIL_MIN_PROGRESS_MPS)) return null
+  if (lenDeg * M_PER_DEG > (dtMs / 1000) * RAIL_MAX_PROGRESS_MPS) return null
+  return path
 }
 
 /**
@@ -446,7 +576,8 @@ export function matchRideToRail(
 export function bridgeRoadGaps(
   coords: Float32Array,
   g: RailGraph,
-  isCovered: CoverageTest = FULL_COVERAGE
+  isCovered: CoverageTest = FULL_COVERAGE,
+  timesMs?: ArrayLike<number> | null
 ): Float32Array | null {
   if (g.empty) return null
   const n = coords.length / 2
@@ -472,28 +603,70 @@ export function bridgeRoadGaps(
     out.push(lon, lat)
   }
 
-  let bridged = 0
-  for (let i = 0; i < n; i++) {
-    const lon = coords[i * 2]!
-    const lat = coords[i * 2 + 1]!
-    pushLonLat(lon, lat)
-    if (i + 1 >= n) break
-    const lon2 = coords[i * 2 + 2]!
-    const lat2 = coords[i * 2 + 3]!
-    if (gaps[i]! < threshold || !isCovered(lon, lat) || !isCovered(lon2, lat2)) continue
-    const a = nearestAnchor(g, lon * g.refCos, lat)
+  // Tunnel route between the fixes at vertex `a` and vertex `b`, or null.
+  const tryBridge = (vi: number, vj: number): number[] | null => {
+    const lon1 = coords[vi * 2]!
+    const lat1 = coords[vi * 2 + 1]!
+    const lon2 = coords[vj * 2]!
+    const lat2 = coords[vj * 2 + 1]!
+    if (!isCovered(lon1, lat1) || !isCovered(lon2, lat2)) return null
+    const a = nearestAnchor(g, lon1 * g.refCos, lat1)
     const b = nearestAnchor(g, lon2 * g.refCos, lat2)
-    if (a === null || b === null || a === b) continue
+    if (a === null || b === null || a === b) return null
     const pa = g.pos.get(a)!
     const pb = g.pos.get(b)!
     const straight = Math.hypot(pa.x - pb.x, pa.y - pb.y)
     const route = dijkstra(g, a, b, GAP_FACTOR * straight + GAP_SLACK_DEG)
-    if (!route || route.length < 2) continue
+    if (!route || route.length < 2) return null
+    // Same wormhole guard as rail: if the driver had far more time than the
+    // tunnel explains (parked downtown and came back), don't bridge.
+    const dtMs = timesMs ? Number(timesMs[vj]) - Number(timesMs[vi]) : NaN
+    if (!timePlausible(routeLengthDeg(g, route), dtMs, ROAD_MIN_PROGRESS_MPS)) return null
+    return route
+  }
+  const pushRoute = (route: number[]): void => {
     for (const id of route) {
       const p = g.pos.get(id)!
       pushLonLat(p.lon, p.lat)
     }
-    bridged++
+  }
+
+  let bridged = 0
+  let i = 0
+  while (i < n) {
+    pushLonLat(coords[i * 2]!, coords[i * 2 + 1]!)
+    if (i + 1 >= n) break
+    if (gaps[i]! < threshold) {
+      i++
+      continue
+    }
+    // A dropout window: consecutive anomalous gaps. The fixes inside it are
+    // tunnel scatter, not travel — if one bridge spans the whole window,
+    // splice the tunnel and reject the scatter instead of drawing its fan.
+    let wEnd = i + 1
+    while (wEnd < n - 1 && gaps[wEnd]! >= threshold) wEnd++
+    const whole = tryBridge(i, wEnd)
+    if (whole) {
+      pushRoute(whole)
+      bridged++
+      i = wEnd
+      continue
+    }
+    if (wEnd === i + 1) {
+      i++
+      continue // single un-bridgeable gap: nothing more to try
+    }
+    // Window didn't bridge as one (e.g. two separate tunnels with a real fix
+    // between): keep the interior fixes and bridge each gap individually.
+    for (let k = i; k < wEnd; k++) {
+      if (k > i) pushLonLat(coords[k * 2]!, coords[k * 2 + 1]!)
+      const single = tryBridge(k, k + 1)
+      if (single) {
+        pushRoute(single)
+        bridged++
+      }
+    }
+    i = wEnd
   }
   if (bridged === 0) return null
   return new Float32Array(out)
@@ -505,6 +678,23 @@ function median(values: ArrayLike<number>): number {
   const sorted = Array.from(values).sort((a, b) => a - b)
   const mid = sorted.length >> 1
   return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2
+}
+
+/** A fill is a lie if the rider had far more time than the path explains. */
+function timePlausible(lenDeg: number, dtMs: number, minMps: number): boolean {
+  if (!Number.isFinite(dtMs) || dtMs <= TIME_GATE_MIN_DT_MS) return true
+  return lenDeg * M_PER_DEG >= (dtMs / 1000) * minMps
+}
+
+/** Geometric length of a node path (graph weights include transfer penalties). */
+function routeLengthDeg(g: RailGraph, route: number[]): number {
+  let len = 0
+  for (let j = 1; j < route.length; j++) {
+    const p = g.pos.get(route[j - 1]!)!
+    const q = g.pos.get(route[j]!)!
+    len += Math.hypot(p.x - q.x, p.y - q.y)
+  }
+  return len
 }
 
 /** Shortest node path from src to dst within a distance cutoff, or null. */

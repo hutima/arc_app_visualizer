@@ -5,6 +5,7 @@ import type { OsmLayer, RailCoverage, RailMatchProgress, RailTuning } from '../.
 interface Props {
   averageRail: boolean
   snapRail: boolean
+  snapRoad: boolean
   railCoverage: RailCoverage | null
   railFetching: boolean
   railRebuilding: boolean
@@ -13,6 +14,7 @@ interface Props {
   railTuning: RailTuning | null
   onChangeAverage: (on: boolean) => void
   onChangeSnap: (on: boolean) => void
+  onChangeSnapRoad: (on: boolean) => void
   onFetchRail: (layer: OsmLayer) => void
   onClearRail: () => void
   onApplyTuning: (t: RailTuning) => void
@@ -28,6 +30,7 @@ const fmt = (n: number): string => n.toLocaleString()
 export function CleaningControl({
   averageRail,
   snapRail,
+  snapRoad,
   railCoverage,
   railFetching,
   railRebuilding,
@@ -36,6 +39,7 @@ export function CleaningControl({
   railTuning,
   onChangeAverage,
   onChangeSnap,
+  onChangeSnapRoad,
   onFetchRail,
   onClearRail,
   onApplyTuning
@@ -73,20 +77,30 @@ export function CleaningControl({
         <input
           type="checkbox"
           checked={snapRail}
-          disabled={!hasNetwork || busy}
+          disabled={railAreas === 0 || busy}
           onChange={(e) => onChangeSnap(e.target.checked)}
         />
         <span>Snap rail to OSM tracks</span>
       </label>
+      <label className="color-mode-option">
+        <input
+          type="checkbox"
+          checked={snapRoad}
+          disabled={roadAreas === 0 || busy}
+          onChange={(e) => onChangeSnapRoad(e.target.checked)}
+        />
+        <span>Bridge road tunnels (car/taxi/bus)</span>
+      </label>
       <p className="hint">
-        Map-matches metro/tram/train rides onto real OpenStreetMap rail geometry,
-        routing through tunnels and across transfers — fixing the spots where GPS
-        is worst. Each mode matches only its own track kind (metro→subway,
-        train→commuter rail, tram→tram/light-rail). Car/taxi/bus trips stay raw
-        except long GPS gaps (&gt;~200 m) whose ends sit near a mapped road
-        tunnel — bridged through the tunnel instead of a straight jump across
-        downtown. <strong>Transit rail</strong> and <strong>road tunnels</strong>
-        {' '}are fetched separately; load the area on screen, pan to each city and
+        Rail: map-matches metro/tram/train rides onto real OpenStreetMap rail
+        geometry, routing through tunnels and across transfers; each mode
+        matches only its own track kind (metro→subway, train→commuter rail,
+        tram→tram/light-rail), rides prefer one contiguous track, and a fill
+        that doesn&apos;t fit the elapsed time is left disconnected rather than
+        drawn as a jump that never happened. Road: car/taxi/bus trips stay raw
+        except GPS dropouts that are anomalous for that trip and end near a
+        mapped tunnel — bridged through it, with mid-dropout scatter hidden.
+        The two layers are fetched and toggled separately; pan to each city and
         fetch — areas add up and matching is cached so panning stays fast.
       </p>
       <div className="rail-fetch-actions">

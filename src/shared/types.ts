@@ -47,9 +47,14 @@ export interface ViewportQuery {
   averageRail?: boolean
   /**
    * Cleaning toggle: snap rail rides onto the fetched OSM rail network,
-   * routing through tunnel gaps (display-only; needs a fetched network).
+   * routing through tunnel gaps (display-only; needs a fetched rail layer).
    */
   snapRail?: boolean
+  /**
+   * Cleaning toggle: bridge car/taxi/bus GPS dropouts through fetched OSM
+   * road tunnels (display-only; needs a fetched road layer).
+   */
+  snapRoad?: boolean
 }
 
 export interface LatLonBBox {

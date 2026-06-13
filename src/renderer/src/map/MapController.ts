@@ -70,6 +70,7 @@ export class MapController {
   private yearExtent: [number, number] | null = null
   private averageRail = false
   private snapRail = false
+  private snapRoad = false
   private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
@@ -288,6 +289,12 @@ export class MapController {
     this.scheduleRefresh(0)
   }
 
+  setSnapRoad(on: boolean): void {
+    if (on === this.snapRoad) return
+    this.snapRoad = on
+    this.scheduleRefresh(0)
+  }
+
   /** Pure repaint — year is already in feature properties, no re-query. */
   setColorMode(mode: TrackColorMode): void {
     if (mode === this.colorMode) return
@@ -358,7 +365,8 @@ export class MapController {
       endTsMs: this.endTsMs,
       detailMode: this.detailMode,
       averageRail: this.averageRail,
-      snapRail: this.snapRail
+      snapRail: this.snapRail,
+      snapRoad: this.snapRoad
     })
     // A newer query superseded this one while we awaited.
     if (token !== this.queryToken || this.destroyed) return
@@ -366,19 +374,35 @@ export class MapController {
     const tDecode = performance.now()
     const decoded = decodeGeometry(result.buffer)
     const years = new Set<number>()
-    const features: Feature[] = decoded.segments.map((s) => {
-      const coordinates: number[][] = new Array(s.coords.length / 2)
-      for (let i = 0; i < coordinates.length; i++) {
-        coordinates[i] = [s.coords[i * 2]!, s.coords[i * 2 + 1]!]
+    const features: Feature[] = []
+    for (const s of decoded.segments) {
+      // Matched geometry may carry NaN break sentinels — deliberate gaps
+      // where connecting two fixes would draw a path that never happened.
+      const parts: number[][][] = []
+      let part: number[][] = []
+      const total = s.coords.length / 2
+      for (let i = 0; i < total; i++) {
+        const lon = s.coords[i * 2]!
+        if (Number.isNaN(lon)) {
+          if (part.length >= 2) parts.push(part)
+          part = []
+          continue
+        }
+        part.push([lon, s.coords[i * 2 + 1]!])
       }
+      if (part.length >= 2) parts.push(part)
+      if (parts.length === 0) continue
       years.add(s.year)
-      return {
+      features.push({
         type: 'Feature',
         id: s.id,
         properties: { type: decoded.typeTable[s.typeIndex]!, year: s.year },
-        geometry: { type: 'LineString', coordinates }
-      }
-    })
+        geometry:
+          parts.length > 1
+            ? { type: 'MultiLineString', coordinates: parts }
+            : { type: 'LineString', coordinates: parts[0]! }
+      })
+    }
     this.yearsInView = [...years].sort((a, b) => a - b)
     const placeFeatures: Feature[] = result.waypoints.map((w) => ({
       type: 'Feature',
