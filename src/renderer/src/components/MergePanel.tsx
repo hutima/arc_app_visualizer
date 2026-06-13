@@ -4,6 +4,8 @@ interface Props {
   candidates: MergeCandidate[]
   selected: number[]
   mergeType: string
+  /** Every existing activity type — the merged track may take any of them. */
+  categoryNames: string[]
   busy: boolean
   error: string | null
   onPickDate: (dateStr: string) => void
@@ -33,6 +35,7 @@ export function MergePanel({
   candidates,
   selected,
   mergeType,
+  categoryNames,
   busy,
   error,
   onPickDate,
@@ -41,8 +44,8 @@ export function MergePanel({
   onMerge,
   onClear
 }: Props): React.JSX.Element {
-  const selectedCands = candidates.filter((c) => selected.includes(c.segmentId))
-  const selectedTypes = [...new Set(selectedCands.map((c) => c.type))]
+  // The merged track may take any existing type, defaulting to the longest leg.
+  const typeOptions = [...new Set([mergeType, ...categoryNames])].filter((t) => t.length > 0)
   const canMerge = selected.length >= 2 && mergeType.length > 0
 
   return (
@@ -101,7 +104,7 @@ export function MergePanel({
               disabled={busy}
               onChange={(e) => onTypeChange(e.target.value)}
             >
-              {selectedTypes.map((t) => (
+              {typeOptions.map((t) => (
                 <option key={t} value={t}>
                   {t}
                 </option>

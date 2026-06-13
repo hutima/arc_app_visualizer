@@ -124,7 +124,8 @@ tests/         vitest; *.test.ts mirror the module they cover
   chronologically); tick a run in the panel and merge. `mergeSegments`
   concatenates each segment's **effective points** (so edits apply first; flags
   + elevation preserved) in time order into the **earliest** segment, deletes
-  the rest, and sets the chosen type (one of the constituents'). Permanent and
+  the rest, and sets the chosen type — **any existing category** (defaulting to
+  the longest leg), like the split tool's per-half types. Permanent and
   structural, like split. Map highlights candidate/selected segments by id
   (`setMergeHighlight`, filtered on the tracks source).
 - Any edit/split/merge rebuilds the segment's `display_geometries` + bbox and

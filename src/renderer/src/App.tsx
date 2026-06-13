@@ -399,16 +399,13 @@ export function App(): React.JSX.Element {
     )
   }, [mergeCandidates, mergeSelected])
 
-  // Default the merged type to the longest selected leg, unless the user has
-  // picked a type that's still among the selection.
+  // Default the merged type to the longest selected leg; keep a still-valid
+  // type the user picked (any existing category is allowed, not just a leg's).
   useEffect(() => {
-    setMergeType((cur) => {
-      const selectedTypes = new Set(
-        mergeCandidates.filter((c) => mergeSelected.includes(c.segmentId)).map((c) => c.type)
-      )
-      return selectedTypes.has(cur) ? cur : defaultMergeType(mergeSelected, mergeCandidates)
-    })
-  }, [mergeSelected, mergeCandidates])
+    setMergeType((cur) =>
+      categories.some((c) => c.name === cur) ? cur : defaultMergeType(mergeSelected, mergeCandidates)
+    )
+  }, [mergeSelected, mergeCandidates, categories])
 
   const handleMergeByDate = useCallback((dateStr: string): void => {
     const ts = Date.parse(`${dateStr}T12:00:00Z`)
@@ -624,6 +621,7 @@ export function App(): React.JSX.Element {
                 candidates={mergeCandidates}
                 selected={mergeSelected}
                 mergeType={mergeType}
+                categoryNames={categories.map((c) => c.name)}
                 busy={mergeBusy}
                 error={mergeError}
                 onPickDate={handleMergeByDate}
