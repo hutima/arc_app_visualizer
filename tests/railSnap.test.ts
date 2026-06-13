@@ -497,6 +497,27 @@ describe('bridgeRoadGaps (car tunnels)', () => {
     expect(bridgeRoadGaps(new Float32Array(trip), g)).toBeNull()
   })
 
+  it('does not bridge a road sampled over the tunnel at coarse-but-steady cadence', () => {
+    // Surface traffic right above the tunnel, sampled every ~280 m — each gap
+    // exceeds the old fixed ~200 m bar, but is normal for the trip, so the
+    // relative rule keeps it raw instead of snapping the whole drive onto the
+    // tunnel. (A fixed threshold would wrongly bridge every step here.)
+    const trip: number[] = []
+    for (let i = 0; i <= 9; i++) trip.push(0.008 + i * 0.0025, 0.0001)
+    expect(bridgeRoadGaps(new Float32Array(trip), g)).toBeNull()
+  })
+
+  it('bridges a gap that is anomalous for the trip even amid fine sampling', () => {
+    // Same fine cadence, but one ~2 km jump across the tunnel mid-trip.
+    const trip = new Float32Array([
+      0.008, 0.0001, 0.0095, 0.0001, 0.011, 0.0001, // dense approach near west portal
+      0.029, 0.0001, 0.0305, 0.0001, 0.032, 0.0001 // resumes near east portal
+    ])
+    const c = coordsOf(bridgeRoadGaps(trip, g)!)
+    const lats = c.filter((_, k) => k % 2 === 1)
+    expect(lats.filter((lat) => lat === 0).length).toBeGreaterThanOrEqual(3) // tunnel spliced in
+  })
+
   it('does not invent a tunnel for gaps far from any', () => {
     const trip = new Float32Array([0.5, 0.5, 0.55, 0.5])
     expect(bridgeRoadGaps(trip, g)).toBeNull()

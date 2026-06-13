@@ -128,9 +128,11 @@ all raw points), and date-range presets (`All time`, `Last year`, `90 days`,
   It also favours **contiguity**: anchoring sticks to the previous vertex's
   track component, and transfers carry a penalty, so a ride stays on one track
   and switches only at genuine interchanges rather than weaving between parallel
-  rails. Supersedes averaging while on. **Car/taxi/bus trips** stay raw except
-  long GPS gaps (>~200 m) whose ends sit near a mapped **road tunnel**
-  (`tunnel=yes` — tunnel ways only, never the full road network): those gaps are
+  rails. Supersedes averaging while on. **Car/taxi/bus trips** stay raw except a
+  GPS gap that's anomalous for that trip (long absolutely *and* well above the
+  trip's own median point spacing, so a steadily-coarse highway drive isn't
+  touched) whose ends sit near a mapped **road tunnel** (`tunnel=yes` — tunnel
+  ways only, never the full road network): that gap — anywhere mid-trip — is
   bridged through the tunnel alignment instead of a straight jump across
   downtown (the Big Dig effect). The matching ranges are tweakable in the
   panel (or `settings.json` → `rail`): **Snap within** (how far a GPS point may

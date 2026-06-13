@@ -333,7 +333,7 @@ export function App(): React.JSX.Element {
             if (dataUrl) void window.api.exportMapPng(dataUrl)
           }}
         >
-          Export map as PNG
+          Export current view as PNG
         </button>
       </aside>
       <main className="map-wrap">
