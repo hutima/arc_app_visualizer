@@ -148,8 +148,11 @@ where OSM is best) by map-matching rides onto real OSM rail geometry.
   edges chain across a foreign line's orphaned nodes and route across modes.
   **Road tunnels** (`RAIL_KIND.road_tunnel`, fetched as `highway` + `tunnel`
   ways only) are a separate path: car/taxi/bus trips are never map-matched,
-  but a >~200 m GPS gap whose ends anchor near tunnel geometry is bridged by
-  routing through it (`bridgeRoadGaps`) — all raw points kept verbatim.
+  but a GPS gap that's **anomalous for that trip** (an absolute floor *and*
+  ≥ a multiple of the trip's median point spacing — so a steadily coarse
+  highway drive isn't bridged, only a real tunnel dropout) whose ends anchor
+  near tunnel geometry is bridged by routing through it (`bridgeRoadGaps`) —
+  all raw points kept verbatim, gap can be anywhere mid-trip.
   Heavy → runs after a fetch (auto) with chunked progress, **not** per viewport.
   The viewport query `COALESCE`s the cached line in under snap mode.
 

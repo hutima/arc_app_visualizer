@@ -78,8 +78,16 @@ export const ALLOWED_KINDS_BY_TYPE: Readonly<Record<string, readonly number[]>> 
  */
 export const ROAD_TUNNEL_TYPES: ReadonlySet<string> = new Set(['car', 'taxi', 'bus'])
 
-/** A gap shorter than this (~200 m) is ordinary GPS cadence, not a tunnel. */
-const ROAD_GAP_MIN_DEG = 1.8e-3
+/**
+ * A tunnel gap is one that's both absolutely long (GPS doesn't vanish for
+ * ~120 m on open road) and anomalous for *this* trip — a stop-and-go city
+ * drive samples every few meters, a highway run every ~100 m, so the bar is
+ * relative to the trip's own median spacing rather than a fixed distance.
+ */
+const ROAD_GAP_FLOOR_DEG = 1.1e-3 // ~120 m absolute minimum
+const ROAD_GAP_REL_FACTOR = 4 // …and ≥ this × the trip's median point spacing
+/** Below this many gaps the median is too noisy; fall back to the floor alone. */
+const ROAD_GAP_MIN_SAMPLES = 4
 
 /** Portal anchoring is forgiving — GPS dies/revives some way from the mouth. */
 export const ROAD_TUNING: RailTuning = { snapRadiusM: 250, transferRadiusM: 0 }
@@ -427,11 +435,13 @@ export function matchRideToRail(
 
 /**
  * Bridge long GPS gaps in a road trip through mapped road tunnels. Unlike
- * rail matching, every raw point is kept verbatim — the only change is that
- * a gap longer than ~200 m whose two sides both anchor near tunnel geometry
- * gets the routed tunnel path spliced in between them. Gaps that don't
- * anchor or won't route sanely stay as they were. Returns null when nothing
- * was bridged (caller keeps the original row).
+ * rail matching, every raw point is kept verbatim — the only change is that a
+ * tunnel-shaped gap (long absolutely, and large relative to the trip's median
+ * point spacing) whose two sides both anchor near tunnel geometry gets the
+ * routed tunnel path spliced in between them. The gap need not be at the
+ * trip's start/end — any anomalous jump between two near-tunnel fixes
+ * qualifies. Gaps that don't anchor or won't route sanely stay as they were.
+ * Returns null when nothing was bridged (caller keeps the original row).
  */
 export function bridgeRoadGaps(
   coords: Float32Array,
@@ -441,6 +451,19 @@ export function bridgeRoadGaps(
   if (g.empty) return null
   const n = coords.length / 2
   if (n < 2) return null
+
+  // A gap counts as a tunnel candidate only if it's an outlier for this trip.
+  const gaps = new Float64Array(n - 1)
+  for (let i = 0; i < n - 1; i++) {
+    gaps[i] = Math.hypot(
+      (coords[i * 2 + 2]! - coords[i * 2]!) * g.refCos,
+      coords[i * 2 + 3]! - coords[i * 2 + 1]!
+    )
+  }
+  const threshold = Math.max(
+    ROAD_GAP_FLOOR_DEG,
+    gaps.length >= ROAD_GAP_MIN_SAMPLES ? ROAD_GAP_REL_FACTOR * median(gaps) : 0
+  )
 
   const out: number[] = []
   const pushLonLat = (lon: number, lat: number): void => {
@@ -457,8 +480,7 @@ export function bridgeRoadGaps(
     if (i + 1 >= n) break
     const lon2 = coords[i * 2 + 2]!
     const lat2 = coords[i * 2 + 3]!
-    const gap = Math.hypot((lon2 - lon) * g.refCos, lat2 - lat)
-    if (gap <= ROAD_GAP_MIN_DEG || !isCovered(lon, lat) || !isCovered(lon2, lat2)) continue
+    if (gaps[i]! < threshold || !isCovered(lon, lat) || !isCovered(lon2, lat2)) continue
     const a = nearestAnchor(g, lon * g.refCos, lat)
     const b = nearestAnchor(g, lon2 * g.refCos, lat2)
     if (a === null || b === null || a === b) continue
@@ -475,6 +497,14 @@ export function bridgeRoadGaps(
   }
   if (bridged === 0) return null
   return new Float32Array(out)
+}
+
+/** Median of a numeric array (non-mutating; the trip's typical point spacing). */
+function median(values: ArrayLike<number>): number {
+  if (values.length === 0) return 0
+  const sorted = Array.from(values).sort((a, b) => a - b)
+  const mid = sorted.length >> 1
+  return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2
 }
 
 /** Shortest node path from src to dst within a distance cutoff, or null. */
