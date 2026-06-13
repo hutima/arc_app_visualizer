@@ -384,13 +384,14 @@ export function listMergeCandidates(
  * Stitch several segments into one: concatenate their effective points (raw +
  * any edits, flagged points and elevation preserved) in time order, write them
  * to the earliest segment, and delete the rest. The merged track takes `type`
- * (the renderer offers the constituents' own types). Permanent and structural,
- * like split. Returns the surviving segment's id.
+ * — any existing activity type, not only a constituent's. Permanent and
+ * structural, like split. Returns the surviving segment's id.
  */
 export function mergeSegments(db: DatabaseSync, segmentIds: number[], type: string): number {
   const ids = [...new Set(segmentIds)]
   if (ids.length < 2) throw new Error('merge needs at least two tracks')
   if (typeof type !== 'string' || type.length === 0) throw new Error('invalid merged type')
+  if (!categoryExists(db, type)) throw new Error(`unknown type ${type}`)
 
   const segs = ids.map((id) => {
     const s = db.prepare('SELECT id, type, start_ts_ms AS startTsMs FROM segments WHERE id = ?').get(id) as
@@ -399,9 +400,6 @@ export function mergeSegments(db: DatabaseSync, segmentIds: number[], type: stri
     if (!s) throw new Error(`unknown segment ${id}`)
     return s
   })
-  if (!segs.some((s) => s.type === type)) {
-    throw new Error('merged type must be one of the selected tracks')
-  }
   // Chronological order = the order points are stitched; undated sink last.
   segs.sort((a, b) => (a.startTsMs ?? Infinity) - (b.startTsMs ?? Infinity) || a.id - b.id)
   const target = segs[0]!

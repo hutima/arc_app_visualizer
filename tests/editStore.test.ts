@@ -528,11 +528,21 @@ describe('merge', () => {
     expect(seg).toMatchObject({ point_count: 7, clean_point_count: 6 })
   })
 
-  it('rejects fewer than two, unknown ids, and a type not among the tracks', () => {
+  it('rejects fewer than two, unknown ids, and an unknown type', () => {
     const a = seedAt(10 * HOUR, 'walking')
     const b = seedAt(11 * HOUR, 'train')
     expect(() => mergeSegments(db, [a], 'walking')).toThrow(/at least two/)
     expect(() => mergeSegments(db, [a, 99999], 'walking')).toThrow(/unknown segment/)
-    expect(() => mergeSegments(db, [a, b], 'cycling')).toThrow(/one of the selected/)
+    expect(() => mergeSegments(db, [a, b], 'notacategory')).toThrow(/unknown type/)
+  })
+
+  it('lets the merged track take any known category, not just a constituent', () => {
+    const a = seedAt(10 * HOUR, 'walking')
+    const b = seedAt(11 * HOUR, 'train')
+    // 'cycling' is neither constituent's type, but it is a known category.
+    const mergedId = mergeSegments(db, [a, b], 'cycling')
+    expect(db.prepare('SELECT type FROM segments WHERE id = ?').get(mergedId)).toMatchObject({
+      type: 'cycling'
+    })
   })
 })

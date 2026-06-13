@@ -142,7 +142,8 @@ function SplitTool({
 
   if (pointCount < 3) return null
   const clamped = Math.min(Math.max(1, index), maxIdx)
-  const options = categoryNames.length > 0 ? categoryNames : [type]
+  // Any existing type for each half; the current type is always offered.
+  const options = [...new Set([type, ...categoryNames])]
 
   return (
     <div className="split-tool">
