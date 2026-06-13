@@ -344,6 +344,11 @@ function performSplit(
 const categoryExists = (db: DatabaseSync, name: string): boolean =>
   db.prepare('SELECT 1 FROM categories WHERE name = ?').get(name) !== undefined
 
+/** True if a segment currently has cached snap/bridge geometry. */
+export const hasMatchedGeom = (db: DatabaseSync, segmentId: number): boolean =>
+  db.prepare('SELECT 1 FROM rail_matched_geom WHERE segment_id = ? LIMIT 1').get(segmentId) !==
+  undefined
+
 const drawableCount = (rows: RawRow[]): number =>
   rows.filter((r) => r.flags === 0 && r.lat !== null && r.lon !== null).length
 

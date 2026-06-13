@@ -130,8 +130,11 @@ tests/         vitest; *.test.ts mirror the module they cover
 - Any edit/split/merge rebuilds the segment's `display_geometries` + bbox and
   drops its cached `rail_matched_geom`. `prepareEffectivePoints` is the
   raw-point read path for the match pass and 'all points' queries, so **edits
-  always apply before rail/road snapping** (re-run matching to re-snap an edited
-  ride). Edit geometry lives in `MapController`, never React state.
+  always apply before rail/road snapping**. If the affected segment was
+  **already snapped**, the `edits:*` IPC handlers re-match just that segment
+  (`rematchSegment`, gated on `hasMatchedGeom`) so it stays snapped without a
+  full dataset pass; otherwise re-run matching from the Cleaning panel. Edit
+  geometry lives in `MapController`, never React state.
 
 ### Schema migrations
 
