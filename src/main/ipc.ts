@@ -20,7 +20,7 @@ import { RAIL_SNAP_TYPES } from './rail/snapRail'
 import { rebuildRailMatches } from './rail/buildMatches'
 import { fetchRailNetwork } from './rail/overpass'
 import { addRailNetwork, getRailCoverage, clearRailNetwork } from './db/railStore'
-import { getSegmentEditState, saveSegmentEdits, revertSegmentEdits } from './db/editStore'
+import { getSegmentEditState, saveSegmentEdits, revertSegmentEdits, splitSegment } from './db/editStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
 import { clampRailTuning, type OsmLayer } from '../shared/types'
@@ -202,6 +202,17 @@ export function registerIpc(ctx: IpcContext): void {
       if (!Number.isInteger(segmentId)) return { ok: false, error: 'invalid segment id' }
       revertSegmentEdits(ctx.db, segmentId)
       return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('edits:split', (_e, segmentId: number, seq: number) => {
+    try {
+      if (!Number.isInteger(segmentId) || !Number.isFinite(seq)) {
+        return { ok: false, error: 'invalid split request' }
+      }
+      const newSegmentId = splitSegment(ctx.db, segmentId, seq)
+      return { ok: true, newSegmentId }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }

@@ -123,20 +123,20 @@ export function clampRailTuning(t: Partial<RailTuning> | undefined): RailTuning 
   }
 }
 
-/** How an editable point relates to the raw track. */
-export type EditKind = 'move' | 'insert'
+/** How an overlay row relates to the raw track. */
+export type EditKind = 'move' | 'insert' | 'delete'
 
 /**
  * One vertex of a segment being edited. Raw points keep their integer seq;
  * user-inserted points sit between neighbors at fractional seqs. `edit` is
- * null for untouched raw points.
+ * null for untouched raw points (deletes never appear — they're absent).
  */
 export interface EditablePoint {
   seq: number
   lat: number
   lon: number
   tsMs: number | null
-  edit: EditKind | null
+  edit: 'move' | 'insert' | null
 }
 
 /** A segment's effective (raw + draft overlay) points, for the editor UI. */
@@ -146,9 +146,14 @@ export interface SegmentEditState {
   points: EditablePoint[]
   /** True when a saved draft overlay exists for this segment. */
   hasDraft: boolean
+  /** Raw seqs the overlay deletes (absent from `points`); for round-tripping. */
+  deletedSeqs: number[]
 }
 
-/** One overlay row to persist: a moved raw point or an inserted vertex. */
+/**
+ * One overlay row to persist: a moved raw point, an inserted vertex, or a
+ * deleted raw point (deletes carry the removed point's last coords, unused).
+ */
 export interface SegmentEditInput {
   seq: number
   lat: number
@@ -312,4 +317,13 @@ export interface ArcApi {
   ): Promise<{ ok: boolean; error?: string }>
   /** Drop a segment's draft edits and restore its original geometry. */
   revertSegmentEdits(segmentId: number): Promise<{ ok: boolean; error?: string }>
+  /**
+   * Split a segment into two at one of its points (by seq). Commits the
+   * segment's current overlay; returns the id of the new (second-half)
+   * segment so the caller can refresh.
+   */
+  splitSegment(
+    segmentId: number,
+    seq: number
+  ): Promise<{ ok: boolean; newSegmentId?: number; error?: string }>
 }

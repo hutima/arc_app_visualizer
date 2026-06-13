@@ -52,10 +52,11 @@ const PLACES_SOURCE = 'arc-places'
 const PLACES_LAYER = 'arc-places-circle'
 const EDIT_LINE_SOURCE = 'arc-edit-line'
 const EDIT_LINE_LAYER = 'arc-edit-line-line'
-const EDIT_MID_SOURCE = 'arc-edit-midpoints'
-const EDIT_MID_LAYER = 'arc-edit-midpoints-circle'
 const EDIT_VERTEX_SOURCE = 'arc-edit-vertices'
 const EDIT_VERTEX_LAYER = 'arc-edit-vertices-circle'
+
+/** Click within this many screen px of the edit line inserts a vertex. */
+const LINE_INSERT_TOLERANCE_PX = 10
 
 const EMPTY_FC: FeatureCollection = { type: 'FeatureCollection', features: [] }
 
@@ -104,8 +105,11 @@ export class MapController {
   private editHasDraft = false
   private editDirty = false
   private editPts: EditablePoint[] = []
+  /** Raw seqs deleted this session → their last coords, for the saved overlay. */
+  private deletedSeqs = new Map<number, { lat: number; lon: number }>()
   private editHandlersBound = false
   private editListener: ((s: EditSessionInfo | null) => void) | null = null
+  private splitRequestListener: ((segmentId: number, seq: number) => void) | null = null
   private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
@@ -225,10 +229,10 @@ export class MapController {
       }
     } as LayerSpecification)
 
-    // Editing overlay: the working line plus drag handles, on top of all our
-    // layers. Midpoint dots insert a vertex; vertex circles move one.
+    // Editing overlay: the working line plus draggable vertex handles, on top
+    // of all our layers. Vertices drag to move (alt-click deletes, shift-click
+    // splits); clicking the line itself inserts a point between two vertices.
     this.map.addSource(EDIT_LINE_SOURCE, { type: 'geojson', data: EMPTY_FC })
-    this.map.addSource(EDIT_MID_SOURCE, { type: 'geojson', data: EMPTY_FC })
     this.map.addSource(EDIT_VERTEX_SOURCE, { type: 'geojson', data: EMPTY_FC })
     this.map.addLayer({
       id: EDIT_LINE_LAYER,
@@ -236,18 +240,6 @@ export class MapController {
       source: EDIT_LINE_SOURCE,
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: { 'line-color': '#ffd166', 'line-width': 3, 'line-opacity': 0.95 }
-    } as LayerSpecification)
-    this.map.addLayer({
-      id: EDIT_MID_LAYER,
-      type: 'circle',
-      source: EDIT_MID_SOURCE,
-      paint: {
-        'circle-color': '#ffd166',
-        'circle-opacity': 0.45,
-        'circle-radius': 3.5,
-        'circle-stroke-color': '#000000',
-        'circle-stroke-width': 0.5
-      }
     } as LayerSpecification)
     this.map.addLayer({
       id: EDIT_VERTEX_LAYER,
@@ -274,28 +266,18 @@ export class MapController {
   }
 
   /**
-   * Delegated layer listeners survive layer re-adds (they resolve by id at
-   * event time), so bind them once — a basemap switch must not duplicate.
+   * Delegated listeners survive layer re-adds (they resolve by id at event
+   * time), so bind them once — a basemap switch must not duplicate. Inserting
+   * is handled on the map's own mousedown (not a layer event): the edit line
+   * is thin, so we hit-test by pixel distance against a comfortable tolerance.
    */
   private bindEditHandlers(): void {
     if (this.editHandlersBound) return
     this.editHandlersBound = true
     this.map.on('click', TRACKS_LAYER, (e) => this.handleTrackClick(e))
-    this.map.on('mousedown', EDIT_VERTEX_LAYER, (e) => this.handleHandleDown(e, false))
-    this.map.on('mousedown', EDIT_MID_LAYER, (e) => this.handleHandleDown(e, true))
-    const cursor = (c: string) => () => {
-      this.map.getCanvas().style.cursor = c
-    }
-    this.map.on('mouseenter', EDIT_VERTEX_LAYER, cursor('move'))
-    this.map.on('mouseleave', EDIT_VERTEX_LAYER, cursor(''))
-    this.map.on('mouseenter', EDIT_MID_LAYER, cursor('copy'))
-    this.map.on('mouseleave', EDIT_MID_LAYER, cursor(''))
-    this.map.on('mouseenter', TRACKS_LAYER, () => {
-      if (this.editMode) this.map.getCanvas().style.cursor = 'pointer'
-    })
-    this.map.on('mouseleave', TRACKS_LAYER, () => {
-      if (this.editMode) this.map.getCanvas().style.cursor = ''
-    })
+    this.map.on('mousedown', EDIT_VERTEX_LAYER, (e) => this.handleVertexDown(e))
+    this.map.on('mousedown', (e) => this.handleMapDown(e))
+    this.map.on('mousemove', (e) => this.updateEditCursor(e))
   }
 
   private firstSymbolLayerId(): string | undefined {
@@ -428,6 +410,11 @@ export class MapController {
     this.editListener = cb
   }
 
+  /** Asks the host (App) to confirm + run a split at the given segment/seq. */
+  setSplitRequestListener(cb: (segmentId: number, seq: number) => void): void {
+    this.splitRequestListener = cb
+  }
+
   /** Toggle edit mode; leaving it discards any unsaved session. */
   setEditMode(on: boolean): void {
     if (on === this.editMode) return
@@ -439,22 +426,32 @@ export class MapController {
   closeEditSession(): void {
     this.editingId = null
     this.editPts = []
+    this.deletedSeqs.clear()
     this.editDirty = false
     this.editHasDraft = false
     this.editType = ''
     this.updateEditLayers()
     this.applyTypeFilter()
+    this.map.getCanvas().style.cursor = ''
     this.notifyEdit()
+  }
+
+  /** The complete overlay for the current session (moves, inserts, deletes). */
+  private buildOverlay(): SegmentEditInput[] {
+    const overlay: SegmentEditInput[] = []
+    for (const p of this.editPts) {
+      if (p.edit !== null) overlay.push({ seq: p.seq, lat: p.lat, lon: p.lon, kind: p.edit })
+    }
+    for (const [seq, c] of this.deletedSeqs) {
+      overlay.push({ seq, lat: c.lat, lon: c.lon, kind: 'delete' })
+    }
+    return overlay
   }
 
   /** Persist the session's overlay (draft or permanent) and refresh the map. */
   async saveEdits(mode: EditSaveMode): Promise<{ ok: boolean; error?: string }> {
     if (this.editingId === null) return { ok: false, error: 'no segment selected' }
-    const overlay: SegmentEditInput[] = []
-    for (const p of this.editPts) {
-      if (p.edit !== null) overlay.push({ seq: p.seq, lat: p.lat, lon: p.lon, kind: p.edit })
-    }
-    const res = await window.api.saveSegmentEdits(this.editingId, overlay, mode)
+    const res = await window.api.saveSegmentEdits(this.editingId, this.buildOverlay(), mode)
     if (res.ok && !this.destroyed) {
       this.closeEditSession()
       this.scheduleRefresh(0)
@@ -466,6 +463,23 @@ export class MapController {
   async revertEdits(): Promise<{ ok: boolean; error?: string }> {
     if (this.editingId === null) return { ok: false, error: 'no segment selected' }
     const res = await window.api.revertSegmentEdits(this.editingId)
+    if (res.ok && !this.destroyed) {
+      this.closeEditSession()
+      this.scheduleRefresh(0)
+    }
+    return res
+  }
+
+  /**
+   * Commit the working overlay, then split the segment at `seq` into two. The
+   * caller (App) confirms first and refreshes dataset stats after — splitting
+   * changes point counts. Returns the result so the host can surface errors.
+   */
+  async commitSplit(segmentId: number, seq: number): Promise<{ ok: boolean; error?: string }> {
+    if (this.editingId !== segmentId) return { ok: false, error: 'segment no longer being edited' }
+    const saved = await window.api.saveSegmentEdits(segmentId, this.buildOverlay(), 'draft')
+    if (!saved.ok) return saved
+    const res = await window.api.splitSegment(segmentId, seq)
     if (res.ok && !this.destroyed) {
       this.closeEditSession()
       this.scheduleRefresh(0)
@@ -505,45 +519,120 @@ export class MapController {
     this.editHasDraft = state.hasDraft
     this.editDirty = false
     this.editPts = state.points
+    // Re-loading a draft: keep its deletes so a re-save round-trips them
+    // (coords are unused for delete rows).
+    this.deletedSeqs = new Map(state.deletedSeqs.map((seq) => [seq, { lat: 0, lon: 0 }]))
     this.applyTypeFilter()
     this.updateEditLayers()
     this.notifyEdit()
   }
 
   /**
-   * Drag start on a handle. Midpoint handles first insert a vertex at a seq
-   * halfway between its neighbors (always unique: raw seqs are integers and
-   * neighbors are adjacent), then drag it like any vertex.
+   * Mousedown on a vertex: shift splits the track here, alt deletes the point,
+   * otherwise begin a move-drag. preventDefault keeps the map from panning.
    */
-  private handleHandleDown(e: MapLayerMouseEvent, isMid: boolean): void {
+  private handleVertexDown(e: MapLayerMouseEvent): void {
     if (this.editingId === null) return
-    const f = e.features?.[0]
-    if (!f) return
-    e.preventDefault() // keep dragPan off while dragging a handle
-    let idx: number
-    if (isMid) {
-      const after = Number(f.properties?.after)
-      if (!Number.isInteger(after) || after < 0 || after >= this.editPts.length - 1) return
-      const a = this.editPts[after]!
-      const b = this.editPts[after + 1]!
-      const seq = (a.seq + b.seq) / 2
-      if (seq === a.seq || seq === b.seq) return // float precision exhausted here
-      this.editPts.splice(after + 1, 0, {
-        seq,
-        lat: e.lngLat.lat,
-        lon: e.lngLat.lng,
-        tsMs: a.tsMs !== null && b.tsMs !== null ? Math.round((a.tsMs + b.tsMs) / 2) : null,
-        edit: 'insert'
-      })
-      idx = after + 1
-      this.editDirty = true
-      this.updateEditLayers()
-      this.notifyEdit()
-    } else {
-      idx = Number(f.properties?.idx)
-      if (!Number.isInteger(idx) || idx < 0 || idx >= this.editPts.length) return
+    const idx = Number(e.features?.[0]?.properties?.idx)
+    if (!Number.isInteger(idx) || idx < 0 || idx >= this.editPts.length) return
+    if (e.originalEvent.shiftKey) {
+      e.preventDefault()
+      this.requestSplitAt(idx)
+      return
     }
+    if (e.originalEvent.altKey) {
+      e.preventDefault()
+      this.deleteVertex(idx)
+      return
+    }
+    e.preventDefault()
+    this.beginVertexDrag(idx)
+  }
 
+  /**
+   * Mousedown anywhere on the map while editing: if it lands on the editable
+   * line (and not on a vertex, which has its own handler), insert a point
+   * there between the two bracketing vertices and start dragging it. Clicks
+   * away from the line fall through to normal map panning.
+   */
+  private handleMapDown(e: MapMouseEvent): void {
+    if (!this.editMode || this.editingId === null) return
+    if (this.map.queryRenderedFeatures(e.point, { layers: [EDIT_VERTEX_LAYER] }).length > 0) return
+    const hit = this.nearestEditSegment(e.point)
+    if (!hit || hit.distPx > LINE_INSERT_TOLERANCE_PX) return
+    e.preventDefault()
+    const idx = this.insertOnSegment(hit)
+    if (idx !== null) this.beginVertexDrag(idx)
+  }
+
+  /**
+   * Insert a vertex on the segment between editPts[i] and editPts[i+1] at the
+   * projected click. seq and timestamp are interpolated by the same fraction
+   * along that segment, so the new point is correctly ordered in time between
+   * its neighbors. Returns the new index, or null if it coincides with a
+   * vertex.
+   */
+  private insertOnSegment(hit: { i: number; t: number; lng: number; lat: number }): number | null {
+    const a = this.editPts[hit.i]
+    const b = this.editPts[hit.i + 1]
+    if (!a || !b) return null
+    const seq = a.seq + hit.t * (b.seq - a.seq)
+    if (seq <= a.seq || seq >= b.seq) return null
+    const tsMs =
+      a.tsMs !== null && b.tsMs !== null ? Math.round(a.tsMs + hit.t * (b.tsMs - a.tsMs)) : null
+    this.editPts.splice(hit.i + 1, 0, { seq, lat: hit.lat, lon: hit.lng, tsMs, edit: 'insert' })
+    this.editDirty = true
+    this.updateEditLayers()
+    this.notifyEdit()
+    return hit.i + 1
+  }
+
+  /** Nearest point on the editable polyline to a screen point, in pixels. */
+  private nearestEditSegment(
+    point: { x: number; y: number }
+  ): { i: number; t: number; lng: number; lat: number; distPx: number } | null {
+    let best: { i: number; t: number; lng: number; lat: number; distPx: number } | null = null
+    for (let i = 0; i < this.editPts.length - 1; i++) {
+      const a = this.map.project([this.editPts[i]!.lon, this.editPts[i]!.lat])
+      const b = this.map.project([this.editPts[i + 1]!.lon, this.editPts[i + 1]!.lat])
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      const len2 = dx * dx + dy * dy
+      let t = len2 === 0 ? 0 : ((point.x - a.x) * dx + (point.y - a.y) * dy) / len2
+      t = Math.max(0, Math.min(1, t))
+      const cx = a.x + t * dx
+      const cy = a.y + t * dy
+      const distPx = Math.hypot(point.x - cx, point.y - cy)
+      if (!best || distPx < best.distPx) {
+        const ll = this.map.unproject([cx, cy])
+        best = { i, t, lng: ll.lng, lat: ll.lat, distPx }
+      }
+    }
+    return best
+  }
+
+  /** Remove a vertex; raw/moved points record a delete so the overlay drops them. */
+  private deleteVertex(idx: number): void {
+    if (this.editPts.length <= 2) return // a track must keep at least two points
+    const p = this.editPts[idx]
+    if (!p) return
+    this.editPts.splice(idx, 1)
+    if (p.edit !== 'insert') this.deletedSeqs.set(p.seq, { lat: p.lat, lon: p.lon })
+    this.editDirty = true
+    this.updateEditLayers()
+    this.notifyEdit()
+  }
+
+  /** Ask the host to split here — only at an interior original (raw) point. */
+  private requestSplitAt(idx: number): void {
+    const p = this.editPts[idx]
+    if (!p || this.editingId === null) return
+    if (p.edit === 'insert' || !Number.isInteger(p.seq)) return
+    if (idx < 1 || idx > this.editPts.length - 2) return
+    this.splitRequestListener?.(this.editingId, p.seq)
+  }
+
+  private beginVertexDrag(idx: number): void {
     const onMove = (ev: MapMouseEvent): void => {
       const p = this.editPts[idx]
       if (!p) return
@@ -563,15 +652,32 @@ export class MapController {
     this.map.once('mouseup', onUp)
   }
 
+  /** Cursor feedback in edit mode: move over a vertex, copy near the line. */
+  private updateEditCursor(e: MapMouseEvent): void {
+    if (!this.editMode) return
+    const canvas = this.map.getCanvas()
+    if (this.editingId !== null) {
+      if (this.map.queryRenderedFeatures(e.point, { layers: [EDIT_VERTEX_LAYER] }).length > 0) {
+        canvas.style.cursor = 'move'
+        return
+      }
+      const hit = this.nearestEditSegment(e.point)
+      if (hit && hit.distPx <= LINE_INSERT_TOLERANCE_PX) {
+        canvas.style.cursor = 'copy'
+        return
+      }
+    }
+    const onTrack = this.map.queryRenderedFeatures(e.point, { layers: [TRACKS_LAYER] }).length > 0
+    canvas.style.cursor = onTrack ? 'pointer' : ''
+  }
+
   private updateEditLayers(): void {
     const line = this.map.getSource(EDIT_LINE_SOURCE) as GeoJSONSource | undefined
     const verts = this.map.getSource(EDIT_VERTEX_SOURCE) as GeoJSONSource | undefined
-    const mids = this.map.getSource(EDIT_MID_SOURCE) as GeoJSONSource | undefined
-    if (!line || !verts || !mids) return
+    if (!line || !verts) return
     if (this.editingId === null) {
       line.setData(EMPTY_FC)
       verts.setData(EMPTY_FC)
-      mids.setData(EMPTY_FC)
       return
     }
     line.setData({
@@ -596,17 +702,6 @@ export class MapController {
         geometry: { type: 'Point', coordinates: [p.lon, p.lat] }
       }))
     })
-    const midFeatures: Feature[] = []
-    for (let i = 0; i < this.editPts.length - 1; i++) {
-      const a = this.editPts[i]!
-      const b = this.editPts[i + 1]!
-      midFeatures.push({
-        type: 'Feature',
-        properties: { after: i },
-        geometry: { type: 'Point', coordinates: [(a.lon + b.lon) / 2, (a.lat + b.lat) / 2] }
-      })
-    }
-    mids.setData({ type: 'FeatureCollection', features: midFeatures })
   }
 
   /** The lat/lon box currently on screen (e.g. to fetch OSM rail for it). */

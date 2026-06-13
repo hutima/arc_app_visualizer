@@ -43,8 +43,7 @@ export function TrackEditPanel({
       </label>
       {editMode && !session && (
         <p className="hint">
-          Click a track on the map to select it, then drag its points to fix the
-          line, or drag the small dot between two points to add one.
+          Click a track on the map to select it for editing.
         </p>
       )}
       {session && (
@@ -57,6 +56,12 @@ export function TrackEditPanel({
               : session.hasDraft
                 ? ' — saved draft'
                 : ''}
+          </p>
+          <p className="hint">
+            <strong>Drag</strong> a point to move it. <strong>Click the line</strong>{' '}
+            between two points to add one (placed in time between them).{' '}
+            <strong>Alt-click</strong> a point to delete it. <strong>Shift-click</strong>{' '}
+            a point to split the track into two there.
           </p>
           <div className="edit-actions">
             <button type="button" disabled={busy || !canSave} onClick={() => onSave('draft')}>
