@@ -12,6 +12,8 @@ import type {
   ExpressionSpecification,
   GeoJSONSource,
   LayerSpecification,
+  MapLayerMouseEvent,
+  MapMouseEvent,
   StyleSpecification
 } from 'maplibre-gl'
 import type { Feature, FeatureCollection } from 'geojson'
@@ -19,17 +21,41 @@ import { decodeGeometry } from '../../../shared/geomCodec'
 import { WAYPOINT_COLOR } from '../../../shared/categories'
 import { colorForYear, UNDATED_YEAR_COLOR } from '../../../shared/yearColors'
 import type { DetailMode } from '../../../shared/displayDetail'
-import type { CategoryInfo, TrackColorMode, ViewportResultMeta } from '../../../shared/types'
+import type {
+  CategoryInfo,
+  EditablePoint,
+  EditSaveMode,
+  SegmentEditInput,
+  TrackColorMode,
+  ViewportResultMeta
+} from '../../../shared/types'
 
 export interface RenderStats extends ViewportResultMeta {
   decodeMs: number
   renderMs: number
 }
 
+/** Small state object the editor panel renders from (geometry stays here). */
+export interface EditSessionInfo {
+  segmentId: number
+  type: string
+  pointCount: number
+  /** Unsaved in-session changes exist. */
+  dirty: boolean
+  /** A saved draft overlay exists in the database. */
+  hasDraft: boolean
+}
+
 const TRACKS_SOURCE = 'arc-tracks'
 const TRACKS_LAYER = 'arc-tracks-line'
 const PLACES_SOURCE = 'arc-places'
 const PLACES_LAYER = 'arc-places-circle'
+const EDIT_LINE_SOURCE = 'arc-edit-line'
+const EDIT_LINE_LAYER = 'arc-edit-line-line'
+const EDIT_MID_SOURCE = 'arc-edit-midpoints'
+const EDIT_MID_LAYER = 'arc-edit-midpoints-circle'
+const EDIT_VERTEX_SOURCE = 'arc-edit-vertices'
+const EDIT_VERTEX_LAYER = 'arc-edit-vertices-circle'
 
 const EMPTY_FC: FeatureCollection = { type: 'FeatureCollection', features: [] }
 
@@ -71,6 +97,15 @@ export class MapController {
   private averageRail = false
   private snapRail = false
   private snapRoad = false
+  /** Track editing: geometry being edited lives here, never in React. */
+  private editMode = false
+  private editingId: number | null = null
+  private editType = ''
+  private editHasDraft = false
+  private editDirty = false
+  private editPts: EditablePoint[] = []
+  private editHandlersBound = false
+  private editListener: ((s: EditSessionInfo | null) => void) | null = null
   private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
@@ -189,8 +224,78 @@ export class MapController {
         'circle-stroke-width': 0.5
       }
     } as LayerSpecification)
+
+    // Editing overlay: the working line plus drag handles, on top of all our
+    // layers. Midpoint dots insert a vertex; vertex circles move one.
+    this.map.addSource(EDIT_LINE_SOURCE, { type: 'geojson', data: EMPTY_FC })
+    this.map.addSource(EDIT_MID_SOURCE, { type: 'geojson', data: EMPTY_FC })
+    this.map.addSource(EDIT_VERTEX_SOURCE, { type: 'geojson', data: EMPTY_FC })
+    this.map.addLayer({
+      id: EDIT_LINE_LAYER,
+      type: 'line',
+      source: EDIT_LINE_SOURCE,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#ffd166', 'line-width': 3, 'line-opacity': 0.95 }
+    } as LayerSpecification)
+    this.map.addLayer({
+      id: EDIT_MID_LAYER,
+      type: 'circle',
+      source: EDIT_MID_SOURCE,
+      paint: {
+        'circle-color': '#ffd166',
+        'circle-opacity': 0.45,
+        'circle-radius': 3.5,
+        'circle-stroke-color': '#000000',
+        'circle-stroke-width': 0.5
+      }
+    } as LayerSpecification)
+    this.map.addLayer({
+      id: EDIT_VERTEX_LAYER,
+      type: 'circle',
+      source: EDIT_VERTEX_SOURCE,
+      paint: {
+        'circle-color': [
+          'case',
+          ['boolean', ['get', 'edited'], false],
+          '#f97316',
+          '#ffffff'
+        ] as unknown as ExpressionSpecification,
+        'circle-radius': 5,
+        'circle-stroke-color': '#000000',
+        'circle-stroke-width': 1
+      }
+    } as LayerSpecification)
+    this.bindEditHandlers()
+
     this.applyTypeFilter()
     this.applyWaypointVisibility()
+    // Theme switches re-add everything; restore an in-flight edit overlay.
+    if (this.editingId !== null) this.updateEditLayers()
+  }
+
+  /**
+   * Delegated layer listeners survive layer re-adds (they resolve by id at
+   * event time), so bind them once — a basemap switch must not duplicate.
+   */
+  private bindEditHandlers(): void {
+    if (this.editHandlersBound) return
+    this.editHandlersBound = true
+    this.map.on('click', TRACKS_LAYER, (e) => this.handleTrackClick(e))
+    this.map.on('mousedown', EDIT_VERTEX_LAYER, (e) => this.handleHandleDown(e, false))
+    this.map.on('mousedown', EDIT_MID_LAYER, (e) => this.handleHandleDown(e, true))
+    const cursor = (c: string) => () => {
+      this.map.getCanvas().style.cursor = c
+    }
+    this.map.on('mouseenter', EDIT_VERTEX_LAYER, cursor('move'))
+    this.map.on('mouseleave', EDIT_VERTEX_LAYER, cursor(''))
+    this.map.on('mouseenter', EDIT_MID_LAYER, cursor('copy'))
+    this.map.on('mouseleave', EDIT_MID_LAYER, cursor(''))
+    this.map.on('mouseenter', TRACKS_LAYER, () => {
+      if (this.editMode) this.map.getCanvas().style.cursor = 'pointer'
+    })
+    this.map.on('mouseleave', TRACKS_LAYER, () => {
+      if (this.editMode) this.map.getCanvas().style.cursor = ''
+    })
   }
 
   private firstSymbolLayerId(): string | undefined {
@@ -239,10 +344,15 @@ export class MapController {
     if (!this.map.getLayer(TRACKS_LAYER)) return
     const visible = this.categories.filter((c) => c.visible && !c.ignored).map((c) => c.name)
     // No category info yet (fresh DB): show everything that arrives.
-    const filter: ExpressionSpecification =
+    const base: ExpressionSpecification =
       this.categories.length === 0
         ? (['literal', true] as unknown as ExpressionSpecification)
         : (['in', ['get', 'type'], ['literal', visible]] as unknown as ExpressionSpecification)
+    // While editing, the original line hides under the editable copy.
+    const filter: ExpressionSpecification =
+      this.editingId !== null
+        ? (['all', base, ['!=', ['id'], this.editingId]] as unknown as ExpressionSpecification)
+        : base
     this.map.setFilter(TRACKS_LAYER, filter)
   }
 
@@ -311,6 +421,192 @@ export class MapController {
     if (this.colorMode !== 'year') return
     if (!this.map.isStyleLoaded() || !this.map.getLayer(TRACKS_LAYER)) return
     this.map.setPaintProperty(TRACKS_LAYER, 'line-color', this.colorExpression())
+  }
+
+  /** Receives editor session changes for the sidebar panel. */
+  setEditListener(cb: (s: EditSessionInfo | null) => void): void {
+    this.editListener = cb
+  }
+
+  /** Toggle edit mode; leaving it discards any unsaved session. */
+  setEditMode(on: boolean): void {
+    if (on === this.editMode) return
+    this.editMode = on
+    if (!on) this.closeEditSession()
+  }
+
+  /** Drop the in-memory session (saved drafts stay in the database). */
+  closeEditSession(): void {
+    this.editingId = null
+    this.editPts = []
+    this.editDirty = false
+    this.editHasDraft = false
+    this.editType = ''
+    this.updateEditLayers()
+    this.applyTypeFilter()
+    this.notifyEdit()
+  }
+
+  /** Persist the session's overlay (draft or permanent) and refresh the map. */
+  async saveEdits(mode: EditSaveMode): Promise<{ ok: boolean; error?: string }> {
+    if (this.editingId === null) return { ok: false, error: 'no segment selected' }
+    const overlay: SegmentEditInput[] = []
+    for (const p of this.editPts) {
+      if (p.edit !== null) overlay.push({ seq: p.seq, lat: p.lat, lon: p.lon, kind: p.edit })
+    }
+    const res = await window.api.saveSegmentEdits(this.editingId, overlay, mode)
+    if (res.ok && !this.destroyed) {
+      this.closeEditSession()
+      this.scheduleRefresh(0)
+    }
+    return res
+  }
+
+  /** Delete the segment's draft edits and restore its original geometry. */
+  async revertEdits(): Promise<{ ok: boolean; error?: string }> {
+    if (this.editingId === null) return { ok: false, error: 'no segment selected' }
+    const res = await window.api.revertSegmentEdits(this.editingId)
+    if (res.ok && !this.destroyed) {
+      this.closeEditSession()
+      this.scheduleRefresh(0)
+    }
+    return res
+  }
+
+  private notifyEdit(): void {
+    this.editListener?.(
+      this.editingId === null
+        ? null
+        : {
+            segmentId: this.editingId,
+            type: this.editType,
+            pointCount: this.editPts.length,
+            dirty: this.editDirty,
+            hasDraft: this.editHasDraft
+          }
+    )
+  }
+
+  private handleTrackClick(e: MapLayerMouseEvent): void {
+    if (!this.editMode) return
+    // An unsaved session must be saved or closed before switching tracks.
+    if (this.editingId !== null && this.editDirty) return
+    const raw = e.features?.[0]?.id
+    const id = typeof raw === 'number' ? raw : Number(raw)
+    if (!Number.isInteger(id)) return
+    void this.loadSegmentForEdit(id)
+  }
+
+  private async loadSegmentForEdit(segmentId: number): Promise<void> {
+    const state = await window.api.getSegmentEditState(segmentId)
+    if (!state || state.points.length < 2 || this.destroyed || !this.editMode) return
+    this.editingId = state.segmentId
+    this.editType = state.type
+    this.editHasDraft = state.hasDraft
+    this.editDirty = false
+    this.editPts = state.points
+    this.applyTypeFilter()
+    this.updateEditLayers()
+    this.notifyEdit()
+  }
+
+  /**
+   * Drag start on a handle. Midpoint handles first insert a vertex at a seq
+   * halfway between its neighbors (always unique: raw seqs are integers and
+   * neighbors are adjacent), then drag it like any vertex.
+   */
+  private handleHandleDown(e: MapLayerMouseEvent, isMid: boolean): void {
+    if (this.editingId === null) return
+    const f = e.features?.[0]
+    if (!f) return
+    e.preventDefault() // keep dragPan off while dragging a handle
+    let idx: number
+    if (isMid) {
+      const after = Number(f.properties?.after)
+      if (!Number.isInteger(after) || after < 0 || after >= this.editPts.length - 1) return
+      const a = this.editPts[after]!
+      const b = this.editPts[after + 1]!
+      const seq = (a.seq + b.seq) / 2
+      if (seq === a.seq || seq === b.seq) return // float precision exhausted here
+      this.editPts.splice(after + 1, 0, {
+        seq,
+        lat: e.lngLat.lat,
+        lon: e.lngLat.lng,
+        tsMs: a.tsMs !== null && b.tsMs !== null ? Math.round((a.tsMs + b.tsMs) / 2) : null,
+        edit: 'insert'
+      })
+      idx = after + 1
+      this.editDirty = true
+      this.updateEditLayers()
+      this.notifyEdit()
+    } else {
+      idx = Number(f.properties?.idx)
+      if (!Number.isInteger(idx) || idx < 0 || idx >= this.editPts.length) return
+    }
+
+    const onMove = (ev: MapMouseEvent): void => {
+      const p = this.editPts[idx]
+      if (!p) return
+      p.lon = ev.lngLat.lng
+      p.lat = ev.lngLat.lat
+      if (p.edit === null) p.edit = 'move'
+      if (!this.editDirty) {
+        this.editDirty = true
+        this.notifyEdit()
+      }
+      this.updateEditLayers()
+    }
+    const onUp = (): void => {
+      this.map.off('mousemove', onMove)
+    }
+    this.map.on('mousemove', onMove)
+    this.map.once('mouseup', onUp)
+  }
+
+  private updateEditLayers(): void {
+    const line = this.map.getSource(EDIT_LINE_SOURCE) as GeoJSONSource | undefined
+    const verts = this.map.getSource(EDIT_VERTEX_SOURCE) as GeoJSONSource | undefined
+    const mids = this.map.getSource(EDIT_MID_SOURCE) as GeoJSONSource | undefined
+    if (!line || !verts || !mids) return
+    if (this.editingId === null) {
+      line.setData(EMPTY_FC)
+      verts.setData(EMPTY_FC)
+      mids.setData(EMPTY_FC)
+      return
+    }
+    line.setData({
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'LineString',
+            coordinates: this.editPts.map((p) => [p.lon, p.lat])
+          }
+        }
+      ]
+    })
+    verts.setData({
+      type: 'FeatureCollection',
+      features: this.editPts.map((p, i) => ({
+        type: 'Feature',
+        id: i,
+        properties: { idx: i, edited: p.edit !== null },
+        geometry: { type: 'Point', coordinates: [p.lon, p.lat] }
+      }))
+    })
+    const midFeatures: Feature[] = []
+    for (let i = 0; i < this.editPts.length - 1; i++) {
+      const a = this.editPts[i]!
+      const b = this.editPts[i + 1]!
+      midFeatures.push({
+        type: 'Feature',
+        properties: { after: i },
+        geometry: { type: 'Point', coordinates: [(a.lon + b.lon) / 2, (a.lat + b.lat) / 2] }
+      })
+    }
+    mids.setData({ type: 'FeatureCollection', features: midFeatures })
   }
 
   /** The lat/lon box currently on screen (e.g. to fetch OSM rail for it). */

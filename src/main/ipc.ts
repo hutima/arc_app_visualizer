@@ -20,10 +20,19 @@ import { RAIL_SNAP_TYPES } from './rail/snapRail'
 import { rebuildRailMatches } from './rail/buildMatches'
 import { fetchRailNetwork } from './rail/overpass'
 import { addRailNetwork, getRailCoverage, clearRailNetwork } from './db/railStore'
+import { getSegmentEditState, saveSegmentEdits, revertSegmentEdits } from './db/editStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
 import { clampRailTuning, type OsmLayer } from '../shared/types'
-import type { ImportProgress, LatLonBBox, RailTuning, ViewportQuery, ViewportResult } from '../shared/types'
+import type {
+  EditSaveMode,
+  ImportProgress,
+  LatLonBBox,
+  RailTuning,
+  SegmentEditInput,
+  ViewportQuery,
+  ViewportResult
+} from '../shared/types'
 
 export interface IpcContext {
   db: DatabaseSync
@@ -169,6 +178,32 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('categories:setOrder', (_e, names: string[]) => {
     if (Array.isArray(names) && names.every((n) => typeof n === 'string')) {
       setCategoryOrder(ctx.db, names)
+    }
+  })
+  ipcMain.handle('edits:getSegment', (_e, segmentId: number) =>
+    Number.isInteger(segmentId) ? getSegmentEditState(ctx.db, segmentId) : null
+  )
+  ipcMain.handle(
+    'edits:save',
+    (_e, segmentId: number, edits: SegmentEditInput[], mode: EditSaveMode) => {
+      try {
+        if (!Number.isInteger(segmentId) || !Array.isArray(edits)) {
+          return { ok: false, error: 'invalid edit payload' }
+        }
+        saveSegmentEdits(ctx.db, segmentId, edits, mode === 'permanent' ? 'permanent' : 'draft')
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
+  ipcMain.handle('edits:revert', (_e, segmentId: number) => {
+    try {
+      if (!Number.isInteger(segmentId)) return { ok: false, error: 'invalid segment id' }
+      revertSegmentEdits(ctx.db, segmentId)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
   ipcMain.handle('summary:get', () => getSummary(ctx.db))

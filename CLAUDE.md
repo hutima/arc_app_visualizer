@@ -45,7 +45,8 @@ the exact production code paths; note it's still flagged experimental).
 ```
 src/
   main/        Electron main process (Node): DB, IPC, import worker, rail
-    db/        schema.ts, db.ts (open+migrate), queries.ts, railStore.ts, railAverage.ts
+    db/        schema.ts, db.ts (open+migrate), queries.ts, railStore.ts, railAverage.ts,
+               editStore.ts (user track edits overlay)
     importer/  parseGpx, clean, simplify, importFiles (+ importWorker thread)
     rail/      overpass.ts (fetch+parse), snapRail.ts (matcher), buildMatches.ts (cache pass)
     ipc.ts     all ipcMain.handle handlers; the main↔renderer contract
@@ -90,7 +91,18 @@ tests/         vitest; *.test.ts mirror the module they cover
 - **Geometry never lives in React state** — it's in MapController. React holds
   small objects (stats, category lists, progress) only.
 - Cleaning is **display-only**: flag/transform what's shown; raw points are
-  never mutated.
+  never mutated. The one sanctioned exception is an explicit **permanent**
+  track-edit save (`editStore.ts`) — drafts exist precisely so originals
+  survive by default.
+- **Track editing** (`db/editStore.ts` + the Track editing panel): user-dragged
+  / inserted vertices live in `segment_edits`, an overlay keyed by seq (moves
+  reuse the raw point's integer seq, inserts take fractional seqs). Draft saves
+  keep raw points untouched and revertible; permanent saves bake the overlay
+  into `points` (renumbered, flagged points preserved). Saving rebuilds the
+  segment's `display_geometries` + bbox and drops its cached
+  `rail_matched_geom`. `prepareEffectivePoints` is the raw-point read path for
+  the match pass and 'all points' queries, so **edits always apply before
+  rail/road snapping** (re-run matching to re-snap an edited ride).
 
 ### Schema migrations
 
@@ -105,7 +117,7 @@ inside one transaction, bumping `PRAGMA user_version`. To change schema:
    canonicalization). `CREATE IF NOT EXISTS` can't add columns — use
    `ensureColumn`.
 
-Current version: **8**. History is in the comment above `SCHEMA_VERSION`.
+Current version: **11**. History is in the comment above `SCHEMA_VERSION`.
 
 ## Rail / OSM snapping subsystem
 

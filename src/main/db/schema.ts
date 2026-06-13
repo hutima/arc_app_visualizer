@@ -16,8 +16,9 @@
 // v7: rail regions accumulate (canonical a<b edges, unique (a,b));
 // v8: rail_matched_geom (cached map-matched rail geometry, per detail level);
 // v9: rail_edges.kind (OSM railway kind — type-constrained matching);
-// v10: rail_coverage.category ('rail' | 'road' — fetched & gated separately)
-export const SCHEMA_VERSION = 10
+// v10: rail_coverage.category ('rail' | 'road' — fetched & gated separately);
+// v11: segment_edits (user track edits as an overlay on raw points)
+export const SCHEMA_VERSION = 11
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -162,5 +163,21 @@ CREATE TABLE IF NOT EXISTS rail_matched_geom (
   point_count INTEGER NOT NULL,
   coords      BLOB NOT NULL,
   PRIMARY KEY (segment_id, detail)
+) WITHOUT ROWID;
+
+-- User track edits: an overlay on raw points. A row at an existing integer
+-- seq moves that point; a row at a fractional seq inserts a vertex between
+-- its neighbors. Drafts live here indefinitely (raw points untouched,
+-- revertible) until the user saves permanently, which bakes the overlay
+-- into points and clears it. Applied wherever raw points are read for
+-- display or map-matching, so edits always precede rail/road snapping.
+CREATE TABLE IF NOT EXISTS segment_edits (
+  segment_id   INTEGER NOT NULL,
+  seq          REAL NOT NULL,
+  kind         INTEGER NOT NULL DEFAULT 0, -- 0 = move, 1 = insert
+  lat          REAL NOT NULL,
+  lon          REAL NOT NULL,
+  edited_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (segment_id, seq)
 ) WITHOUT ROWID;
 `

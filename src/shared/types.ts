@@ -123,6 +123,45 @@ export function clampRailTuning(t: Partial<RailTuning> | undefined): RailTuning 
   }
 }
 
+/** How an editable point relates to the raw track. */
+export type EditKind = 'move' | 'insert'
+
+/**
+ * One vertex of a segment being edited. Raw points keep their integer seq;
+ * user-inserted points sit between neighbors at fractional seqs. `edit` is
+ * null for untouched raw points.
+ */
+export interface EditablePoint {
+  seq: number
+  lat: number
+  lon: number
+  tsMs: number | null
+  edit: EditKind | null
+}
+
+/** A segment's effective (raw + draft overlay) points, for the editor UI. */
+export interface SegmentEditState {
+  segmentId: number
+  type: string
+  points: EditablePoint[]
+  /** True when a saved draft overlay exists for this segment. */
+  hasDraft: boolean
+}
+
+/** One overlay row to persist: a moved raw point or an inserted vertex. */
+export interface SegmentEditInput {
+  seq: number
+  lat: number
+  lon: number
+  kind: EditKind
+}
+
+/**
+ * 'draft' keeps edits in an overlay table (raw points untouched, revertible);
+ * 'permanent' rewrites the segment's points with the edits baked in.
+ */
+export type EditSaveMode = 'draft' | 'permanent'
+
 export interface ViewportWaypoint {
   id: number
   lat: number
@@ -258,4 +297,19 @@ export interface ArcApi {
   onRailProgress(cb: (p: RailMatchProgress) => void): () => void
   getRailCoverage(): Promise<RailCoverage | null>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
+  /** Effective points of one segment (raw + draft edits) for the editor. */
+  getSegmentEditState(segmentId: number): Promise<SegmentEditState | null>
+  /**
+   * Persist the full edit overlay for a segment. Draft mode keeps raw points
+   * untouched (revertible); permanent mode rewrites them. Either way display
+   * geometry rebuilds and stale matched geometry is invalidated, so edits
+   * always precede rail/road snapping.
+   */
+  saveSegmentEdits(
+    segmentId: number,
+    edits: SegmentEditInput[],
+    mode: EditSaveMode
+  ): Promise<{ ok: boolean; error?: string }>
+  /** Drop a segment's draft edits and restore its original geometry. */
+  revertSegmentEdits(segmentId: number): Promise<{ ok: boolean; error?: string }>
 }
