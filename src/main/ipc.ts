@@ -25,6 +25,7 @@ import {
   saveSegmentEdits,
   revertSegmentEdits,
   splitSegment,
+  splitSegmentTyped,
   segmentStartTs,
   listMergeCandidates,
   mergeSegments
@@ -225,6 +226,25 @@ export function registerIpc(ctx: IpcContext): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
+  ipcMain.handle(
+    'edits:splitTyped',
+    (_e, segmentId: number, seq: number, firstType: string, secondType: string) => {
+      try {
+        if (
+          !Number.isInteger(segmentId) ||
+          !Number.isFinite(seq) ||
+          typeof firstType !== 'string' ||
+          typeof secondType !== 'string'
+        ) {
+          return { ok: false, error: 'invalid split request' }
+        }
+        const newSegmentId = splitSegmentTyped(ctx.db, segmentId, seq, firstType, secondType)
+        return { ok: true, newSegmentId }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
   ipcMain.handle('edits:mergeCandidates', (_e, anchor: MergeAnchor, windowMs?: number) => {
     const ts =
       anchor && 'segmentId' in anchor && Number.isInteger(anchor.segmentId)

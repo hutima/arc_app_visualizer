@@ -346,6 +346,16 @@ export interface ArcApi {
     seq: number
   ): Promise<{ ok: boolean; newSegmentId?: number; error?: string }>
   /**
+   * Precise split at any effective point, giving each half its own type.
+   * Commits the overlay; returns the new (second-half) segment's id.
+   */
+  splitSegmentTyped(
+    segmentId: number,
+    seq: number,
+    firstType: string,
+    secondType: string
+  ): Promise<{ ok: boolean; newSegmentId?: number; error?: string }>
+  /**
    * Tracks within `windowMs` (default a day) of the anchor's time, ordered
    * chronologically — the candidate sequence for a merge.
    */

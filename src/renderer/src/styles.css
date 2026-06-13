@@ -327,6 +327,30 @@ button:disabled {
   flex: 1;
 }
 
+/* Precise split tool (in the Edit points panel) */
+.split-tool {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.split-slider {
+  width: 100%;
+  accent-color: #e879f9;
+}
+
+.split-types {
+  display: flex;
+  gap: 8px;
+}
+
+.split-types .merge-type-pick {
+  flex: 1;
+}
+
 /* Merge candidate list */
 .merge-list {
   list-style: none;

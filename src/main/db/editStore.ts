@@ -265,18 +265,53 @@ export function revertSegmentEdits(db: DatabaseSync, segmentId: number): void {
 }
 
 /**
- * Split a segment into two at one of its effective points (identified by its
- * seq, which must be an original raw point — splitting at an inserted vertex
- * isn't supported). The split point belongs to both halves so the lines stay
- * contiguous; the current overlay is committed in the process. Returns the new
- * segment's id.
+ * Split a segment into two at one of its effective points by seq. The seq must
+ * be an original raw point (integer) — the quick shift-click gesture only ever
+ * splits at an existing vertex. Both halves keep the original type.
  */
 export function splitSegment(db: DatabaseSync, segmentId: number, atSeq: number): number {
+  if (!Number.isInteger(atSeq)) throw new Error('split point must be an original track point')
+  return performSplit(db, segmentId, atSeq, null, null)
+}
+
+/**
+ * Precise split: divide a segment at any effective point (raw or a saved
+ * inserted vertex, so the slider can land anywhere), optionally giving each
+ * half its own activity type. Returns the new (second-half) segment's id.
+ */
+export function splitSegmentTyped(
+  db: DatabaseSync,
+  segmentId: number,
+  atSeq: number,
+  firstType: string,
+  secondType: string
+): number {
+  return performSplit(db, segmentId, atSeq, firstType, secondType)
+}
+
+/**
+ * The shared split body. The split point belongs to both halves so the lines
+ * stay contiguous; the current overlay is committed in the process. A null
+ * type leaves that half as the original type; a provided type must be a known
+ * category. Effective points (raw + edits, flags + elevation preserved) are
+ * partitioned by seq and written to the original (first half) and a new
+ * segment (second half).
+ */
+function performSplit(
+  db: DatabaseSync,
+  segmentId: number,
+  atSeq: number,
+  firstType: string | null,
+  secondType: string | null
+): number {
   const seg = db.prepare('SELECT track_id, file_id, type FROM segments WHERE id = ?').get(segmentId) as
     | { track_id: number; file_id: number; type: string }
     | undefined
   if (!seg) throw new Error(`unknown segment ${segmentId}`)
-  if (!Number.isInteger(atSeq)) throw new Error('split point must be an original track point')
+  const ft = firstType ?? seg.type
+  const st = secondType ?? seg.type
+  if (firstType !== null && !categoryExists(db, ft)) throw new Error(`unknown type ${ft}`)
+  if (secondType !== null && !categoryExists(db, st)) throw new Error(`unknown type ${st}`)
 
   db.exec('BEGIN')
   try {
@@ -293,8 +328,9 @@ export function splitSegment(db: DatabaseSync, segmentId: number, atSeq: number)
         (track_id, file_id, type, start_ts_ms, end_ts_ms, point_count, clean_point_count,
          min_lat, min_lon, max_lat, max_lon, flags)
       VALUES (?, ?, ?, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL, 0)
-    `).run(seg.track_id, seg.file_id, seg.type)
+    `).run(seg.track_id, seg.file_id, st)
     const newId = Number(newRes.lastInsertRowid)
+    if (ft !== seg.type) db.prepare('UPDATE segments SET type = ? WHERE id = ?').run(ft, segmentId)
     writeMergedRows(db, segmentId, first)
     writeMergedRows(db, newId, second)
     db.exec('COMMIT')
@@ -304,6 +340,9 @@ export function splitSegment(db: DatabaseSync, segmentId: number, atSeq: number)
     throw err
   }
 }
+
+const categoryExists = (db: DatabaseSync, name: string): boolean =>
+  db.prepare('SELECT 1 FROM categories WHERE name = ?').get(name) !== undefined
 
 const drawableCount = (rows: RawRow[]): number =>
   rows.filter((r) => r.flags === 0 && r.lat !== null && r.lon !== null).length
