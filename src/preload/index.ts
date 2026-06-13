@@ -3,7 +3,8 @@ import type { ArcApi, ImportProgress, RailMatchProgress } from '../shared/types'
 
 const api: ArcApi = {
   selectPaths: (kind) => ipcRenderer.invoke('dialog:selectPaths', kind),
-  startImport: (paths) => ipcRenderer.invoke('import:start', paths),
+  startImport: (paths, overwrite) => ipcRenderer.invoke('import:start', paths, overwrite),
+  analyzeImportOverlap: (paths) => ipcRenderer.invoke('import:analyzeOverlap', paths),
   onImportProgress: (cb) => {
     const handler = (_event: unknown, p: ImportProgress): void => cb(p)
     ipcRenderer.on('import:progress', handler)

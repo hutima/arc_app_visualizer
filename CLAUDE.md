@@ -48,7 +48,8 @@ src/
     db/        schema.ts, db.ts (open+migrate), queries.ts, railStore.ts, railAverage.ts,
                editStore.ts (user track edits overlay), placeStore.ts (persistent
                place merge/assign + stats), placeCluster.ts (shared visit clustering)
-    importer/  parseGpx, clean, simplify, importFiles (+ importWorker thread)
+    importer/  parseGpx, clean, simplify, importFiles (+ importWorker thread),
+               importOverlap.ts (date-overlap scan + overwrite-window clearing)
     rail/      overpass.ts (fetch+parse), snapRail.ts (matcher), buildMatches.ts (cache pass)
     ipc.ts     all ipcMain.handle handlers; the main↔renderer contract
     index.ts   app entry, window creation
@@ -66,6 +67,14 @@ tests/         vitest; *.test.ts mirror the module they cover
 1. **Import** (worker thread, `importWorker.ts`): parse GPX → clean (flag, never
    delete) → write to SQLite. SHA-256 dedupe; per-file transactions; progress
    events; UI never blocks. Re-running a partial import self-heals.
+   **Overwrite mode** (`importOverlap.ts`, opt-in checkbox): re-exports overlap
+   in *dates* though not in *hash*, so the optional pass first
+   `analyzeImportOverlap`s the pending files (parses each for its date span,
+   reports the existing-data range it touches), the user edits a per-file
+   window, and `clearDateWindows` deletes existing in-window data (segments by
+   trip start, visits by timestamp; undated rows untouched) before the import —
+   recomputing partially-emptied files and dropping emptied ones, so
+   overlapping days replace instead of duplicating.
 2. **Index** (`schema.ts`): `points` keeps every raw point with cleaning flags
    (reprocessable forever); `display_geometries` holds per-zoom Douglas–Peucker
    simplifications (`DETAIL_LEVELS` in `shared/displayDetail.ts`) — what the map

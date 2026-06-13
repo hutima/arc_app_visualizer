@@ -16,15 +16,18 @@ import { cleanSegment, DEFAULT_CLEANING, type CleaningConfig } from './clean'
 import { simplifyIndices } from './simplify'
 import { isoWeekFromFilename, isoWeekFromTimestamp } from './isoWeek'
 import { hashFile } from './hashFile'
+import { clearDateWindows } from './importOverlap'
 import { DETAIL_LEVELS } from '../../shared/displayDetail'
 import { colorForCategory, IGNORED_BY_DEFAULT } from '../../shared/categories'
 import { emptyBounds, extendBounds, mergeBounds, boundsValid } from '../../shared/geo'
-import type { ImportProgress, ImportStats } from '../../shared/types'
+import type { ImportProgress, ImportStats, OverwriteWindow } from '../../shared/types'
 
 export interface ImportOptions {
   dbPath: string
   paths: string[]
   cleaning?: CleaningConfig
+  /** Date windows of existing data to clear before importing (overwrite mode). */
+  overwrite?: OverwriteWindow[]
   onProgress?: (p: ImportProgress) => void
 }
 
@@ -319,6 +322,11 @@ export async function runImport(options: ImportOptions): Promise<ImportStats> {
 
   const db = openDb(options.dbPath)
   try {
+    // Overwrite mode: clear existing data in the chosen windows before this
+    // import adds the replacement files (so overlapping dates don't duplicate).
+    if (options.overwrite && options.overwrite.length > 0) {
+      clearDateWindows(db, options.overwrite)
+    }
     const stmts = prepareAll(db)
     const stats: ImportStats = {
       filesProcessed: 0,

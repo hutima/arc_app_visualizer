@@ -294,6 +294,37 @@ export interface ImportStats {
   durationMs: number
 }
 
+/** A date window (inclusive ms) of existing data to clear before importing. */
+export interface OverwriteWindow {
+  startTsMs: number
+  endTsMs: number
+}
+
+/**
+ * One incoming file whose dates overlap data already in the database. The
+ * overlap span is the tightest range of *existing* data the file's dates touch
+ * — the suggested (editable) window to overwrite.
+ */
+export interface ImportOverlapFile {
+  path: string
+  filename: string
+  /** Date span the incoming file itself covers. */
+  fileStartTsMs: number | null
+  fileEndTsMs: number | null
+  /** Tightest span of existing DB data within the file's range. */
+  overlapStartTsMs: number
+  overlapEndTsMs: number
+  /** Existing tracks / visits within that overlap, for the review summary. */
+  overlapSegmentCount: number
+  overlapVisitCount: number
+}
+
+/** Result of scanning a pending import for date overlaps with existing data. */
+export interface ImportOverlapAnalysis {
+  totalFiles: number
+  overlaps: ImportOverlapFile[]
+}
+
 export type ImportProgress =
   | { kind: 'started'; totalFiles: number }
   | {
@@ -342,7 +373,18 @@ export interface DataBounds {
 /** API exposed to the renderer via contextBridge (window.api). */
 export interface ArcApi {
   selectPaths(kind: 'files' | 'folder'): Promise<string[] | null>
-  startImport(paths: string[]): Promise<{ started: boolean; reason?: string }>
+  /**
+   * Begin importing the given paths. With `overwrite` windows, existing data
+   * dated within each window is cleared first (partially-emptied files are
+   * recomputed), so re-exported / overlapping files replace the old data
+   * instead of duplicating it.
+   */
+  startImport(
+    paths: string[],
+    overwrite?: OverwriteWindow[]
+  ): Promise<{ started: boolean; reason?: string }>
+  /** Scan pending paths for date overlaps with existing data (for the review UI). */
+  analyzeImportOverlap(paths: string[]): Promise<ImportOverlapAnalysis>
   onImportProgress(cb: (p: ImportProgress) => void): () => void
   queryViewport(q: ViewportQuery): Promise<ViewportResult>
   getCategories(): Promise<CategoryInfo[]>
