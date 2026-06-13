@@ -2,7 +2,7 @@
  * Track editing: the overlay merge (pure), draft persistence + derived
  * geometry rebuild, the effective-point path the matcher and raw-detail
  * queries consume, revert, permanent baking into raw points, point deletion,
- * and splitting a segment in two.
+ * splitting a segment in two, and merging segments into one.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import type { DatabaseSync } from 'node:sqlite'
@@ -10,6 +10,8 @@ import { openDb } from '../src/main/db/db'
 import {
   applyEdits,
   getSegmentEditState,
+  listMergeCandidates,
+  mergeSegments,
   prepareEffectivePoints,
   revertSegmentEdits,
   saveSegmentEdits,
@@ -380,5 +382,124 @@ describe('split', () => {
     expect(() => splitSegment(db, segId, 1.5)).toThrow(/original track point/)
     expect(() => splitSegment(db, segId, 0)).toThrow(/too few points/)
     expect(() => splitSegment(db, 99999, 1)).toThrow(/unknown segment/)
+  })
+})
+
+/**
+ * A simple dated segment for merge tests: `n` clean points 60 s apart along a
+ * short east-west run, starting at `startMs` and longitude `lon0`.
+ */
+function seedAt(startMs: number, type: string, n = 3, lon0 = 0): number {
+  const fileRes = db.prepare(`
+    INSERT INTO imported_files (filename, source_path, file_hash, file_size, imported_at_ms)
+    VALUES ('m.gpx', '/m.gpx', ?, 1, 0)
+  `).run(`hash-${nextHash++}`)
+  const fileId = Number(fileRes.lastInsertRowid)
+  const trackId = Number(
+    db.prepare('INSERT INTO tracks (file_id, type) VALUES (?, ?)').run(fileId, type).lastInsertRowid
+  )
+  const endMs = startMs + (n - 1) * 60000
+  const segId = Number(
+    db.prepare(`
+      INSERT INTO segments
+        (track_id, file_id, type, start_ts_ms, end_ts_ms, point_count, clean_point_count,
+         min_lat, min_lon, max_lat, max_lon)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?)
+    `).run(trackId, fileId, type, startMs, endMs, n, n, lon0, lon0 + (n - 1) * 0.01).lastInsertRowid
+  )
+  const ins = db.prepare(
+    'INSERT INTO points (segment_id, seq, ts_ms, lat, lon, ele, flags) VALUES (?, ?, ?, 0, ?, NULL, 0)'
+  )
+  for (let i = 0; i < n; i++) ins.run(segId, i, startMs + i * 60000, lon0 + i * 0.01)
+  revertSegmentEdits(db, segId)
+  return segId
+}
+
+const HOUR = 3600000
+const DAY = 24 * HOUR
+
+describe('merge candidates', () => {
+  it('lists dated segments within 24h of the anchor, in time order', () => {
+    const a = seedAt(10 * HOUR, 'walking')
+    const b = seedAt(12 * HOUR, 'train')
+    seedAt(40 * HOUR, 'walking') // >24h after a → out of window
+    const anchorTs = 10 * HOUR
+
+    const cands = listMergeCandidates(db, anchorTs)
+    expect(cands.map((c) => c.segmentId)).toEqual([a, b])
+    expect(cands[0]).toMatchObject({ type: 'walking', startTsMs: 10 * HOUR, pointCount: 3 })
+  })
+
+  it('excludes ignored categories (bogus/unknown)', () => {
+    seedAt(10 * HOUR, 'bogus') // ignored by default
+    const ok = seedAt(11 * HOUR, 'walking')
+    expect(listMergeCandidates(db, 10 * HOUR).map((c) => c.segmentId)).toEqual([ok])
+  })
+})
+
+describe('merge', () => {
+  it('stitches segments into the earliest, concatenated in time order', () => {
+    const first = seedAt(10 * HOUR, 'walking', 3, 0) // lons 0, 0.01, 0.02
+    const second = seedAt(11 * HOUR, 'train', 2, 1) // lons 1, 1.01
+    const mergedId = mergeSegments(db, [second, first], 'train')
+
+    expect(mergedId).toBe(first) // earliest survives
+    expect(db.prepare('SELECT COUNT(*) AS n FROM segments WHERE id = ?').get(second)).toMatchObject({
+      n: 0
+    })
+    const pts = db.prepare(
+      'SELECT seq, lon, ts_ms AS ts FROM points WHERE segment_id = ? ORDER BY seq'
+    ).all(mergedId) as Array<{ seq: number; lon: number; ts: number }>
+    expect(pts.map((p) => p.seq)).toEqual([0, 1, 2, 3, 4]) // renumbered
+    expect(pts.map((p) => p.lon)).toEqual([0, 0.01, 0.02, 1, 1.01]) // time order
+    const seg = db.prepare(
+      'SELECT type, point_count, clean_point_count, start_ts_ms AS s, end_ts_ms AS e, max_lon FROM segments WHERE id = ?'
+    ).get(mergedId) as {
+      type: string
+      point_count: number
+      clean_point_count: number
+      s: number
+      e: number
+      max_lon: number
+    }
+    expect(seg).toMatchObject({ type: 'train', point_count: 5, clean_point_count: 5 })
+    expect(seg.s).toBe(10 * HOUR)
+    expect(seg.e).toBe(11 * HOUR + 60000)
+    expect(seg.max_lon).toBeCloseTo(1.01, 9)
+    // Display geometry rebuilt for the merged line.
+    expect(
+      db.prepare('SELECT COUNT(*) AS n FROM display_geometries WHERE segment_id = ?').get(mergedId)
+    ).toMatchObject({ n: DETAIL_LEVELS.length })
+  })
+
+  it('applies pending edits before stitching (effective points)', () => {
+    const a = seedAt(10 * HOUR, 'walking', 3, 0)
+    const b = seedAt(11 * HOUR, 'walking', 2, 1)
+    // Move a's last point far north; it should carry into the merged line.
+    saveSegmentEdits(db, a, [{ seq: 2, lat: 0.9, lon: 0.02, kind: 'move' }], 'draft')
+    const mergedId = mergeSegments(db, [a, b], 'walking')
+    const maxLat = db.prepare('SELECT max_lat AS m FROM segments WHERE id = ?').get(mergedId) as {
+      m: number
+    }
+    expect(maxLat.m).toBeCloseTo(0.9, 9)
+  })
+
+  it('preserves flagged points from each constituent', () => {
+    const a = seedSegment() // 5 raw points, seq 2 flagged (clean 4)
+    const b = seedAt(DAY, 'walking', 2, 1)
+    const mergedId = mergeSegments(db, [a, b], 'walking')
+    const seg = db.prepare(
+      'SELECT point_count, clean_point_count FROM segments WHERE id = ?'
+    ).get(mergedId) as { point_count: number; clean_point_count: number }
+    // 5 (incl. 1 flagged) + 2 = 7 total, 6 clean.
+    expect(seg).toMatchObject({ point_count: 7, clean_point_count: 6 })
+  })
+
+  it('rejects fewer than two, unknown ids, and a type not among the tracks', () => {
+    const a = seedAt(10 * HOUR, 'walking')
+    const b = seedAt(11 * HOUR, 'train')
+    expect(() => mergeSegments(db, [a], 'walking')).toThrow(/at least two/)
+    expect(() => mergeSegments(db, [a, 99999], 'walking')).toThrow(/unknown segment/)
+    expect(() => mergeSegments(db, [a, b], 'cycling')).toThrow(/one of the selected/)
   })
 })

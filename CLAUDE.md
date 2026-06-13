@@ -94,22 +94,39 @@ tests/         vitest; *.test.ts mirror the module they cover
   never mutated. The one sanctioned exception is an explicit **permanent**
   track-edit save (`editStore.ts`) — drafts exist precisely so originals
   survive by default.
-- **Track editing** (`db/editStore.ts` + the Track editing panel): user edits
-  live in `segment_edits`, an overlay keyed by seq — moves reuse the raw
-  point's integer seq, inserts take a fractional seq between neighbors, deletes
-  flag an integer seq for removal (`kind` 0/1/2). The map gestures: drag a
-  vertex to move, **click the line** to insert a point between two vertices
-  (seq + timestamp interpolated by the click's fraction along that segment, so
-  it's correctly time-ordered), alt-click to delete, shift-click to **split**
-  the segment in two. Draft saves keep raw points untouched and revertible;
-  permanent saves bake the overlay into `points` (renumbered, flagged points
-  preserved). Splitting is a permanent structural op (`splitSegment`): it
-  commits the overlay and divides the effective points into two segments at a
-  shared boundary vertex. Any save rebuilds the segment's `display_geometries`
-  + bbox and drops its cached `rail_matched_geom`. `prepareEffectivePoints` is
-  the raw-point read path for the match pass and 'all points' queries, so
-  **edits always apply before rail/road snapping** (re-run matching to re-snap
-  an edited ride). Edit geometry lives in `MapController`, never React state.
+- **Display vs Edit modes** (top-of-sidebar toggle in `App.tsx`): Display is
+  the normal view (filters, cleaning, basemap); Edit swaps in the editing tools
+  and de-emphasizes the base tracks (`MapController.applyEditEmphasis` dims them
+  so the working overlay reads clearly). Edit has two sub-tools (`EditTool`):
+  **Edit points** and **Merge tracks**; the active tool routes what a track
+  click does.
+- **Track editing** (`db/editStore.ts` + `TrackEditPanel`): user edits live in
+  `segment_edits`, an overlay keyed by seq — moves reuse the raw point's integer
+  seq, inserts take a fractional seq between neighbors, deletes flag an integer
+  seq for removal (`kind` 0/1/2). The map gestures: drag a vertex to move,
+  **click the line** to insert a point between two vertices (seq + timestamp
+  interpolated by the click's fraction along that segment, so it's correctly
+  time-ordered), alt-click to delete, shift-click to **split** the segment in
+  two. Draft saves keep raw points untouched and revertible; permanent saves
+  bake the overlay into `points` (renumbered, flagged points preserved).
+  Splitting is a permanent structural op (`splitSegment`): it commits the
+  overlay and divides the effective points into two segments at a shared
+  boundary vertex.
+- **Track merging** (`editStore.listMergeCandidates`/`mergeSegments` +
+  `MergePanel`): stitch fragmented pieces of one journey back together. Anchor a
+  ±24h window (`MERGE_WINDOW_MS`) by clicking a track or picking a date
+  (`listMergeCandidates` returns the dated, non-ignored segments in that window,
+  chronologically); tick a run in the panel and merge. `mergeSegments`
+  concatenates each segment's **effective points** (so edits apply first; flags
+  + elevation preserved) in time order into the **earliest** segment, deletes
+  the rest, and sets the chosen type (one of the constituents'). Permanent and
+  structural, like split. Map highlights candidate/selected segments by id
+  (`setMergeHighlight`, filtered on the tracks source).
+- Any edit/split/merge rebuilds the segment's `display_geometries` + bbox and
+  drops its cached `rail_matched_geom`. `prepareEffectivePoints` is the
+  raw-point read path for the match pass and 'all points' queries, so **edits
+  always apply before rail/road snapping** (re-run matching to re-snap an edited
+  ride). Edit geometry lives in `MapController`, never React state.
 
 ### Schema migrations
 

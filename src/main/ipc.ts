@@ -20,10 +20,18 @@ import { RAIL_SNAP_TYPES } from './rail/snapRail'
 import { rebuildRailMatches } from './rail/buildMatches'
 import { fetchRailNetwork } from './rail/overpass'
 import { addRailNetwork, getRailCoverage, clearRailNetwork } from './db/railStore'
-import { getSegmentEditState, saveSegmentEdits, revertSegmentEdits, splitSegment } from './db/editStore'
+import {
+  getSegmentEditState,
+  saveSegmentEdits,
+  revertSegmentEdits,
+  splitSegment,
+  segmentStartTs,
+  listMergeCandidates,
+  mergeSegments
+} from './db/editStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
-import { clampRailTuning, type OsmLayer } from '../shared/types'
+import { clampRailTuning, type MergeAnchor, type OsmLayer } from '../shared/types'
 import type {
   EditSaveMode,
   ImportProgress,
@@ -213,6 +221,27 @@ export function registerIpc(ctx: IpcContext): void {
       }
       const newSegmentId = splitSegment(ctx.db, segmentId, seq)
       return { ok: true, newSegmentId }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('edits:mergeCandidates', (_e, anchor: MergeAnchor, windowMs?: number) => {
+    const ts =
+      anchor && 'segmentId' in anchor && Number.isInteger(anchor.segmentId)
+        ? segmentStartTs(ctx.db, anchor.segmentId)
+        : anchor && 'tsMs' in anchor && Number.isFinite(anchor.tsMs)
+          ? anchor.tsMs
+          : null
+    if (ts === null) return []
+    return listMergeCandidates(ctx.db, ts, typeof windowMs === 'number' ? windowMs : undefined)
+  })
+  ipcMain.handle('edits:merge', (_e, segmentIds: number[], type: string) => {
+    try {
+      if (!Array.isArray(segmentIds) || !segmentIds.every((id) => Number.isInteger(id))) {
+        return { ok: false, error: 'invalid merge request' }
+      }
+      const mergedId = mergeSegments(ctx.db, segmentIds, type)
+      return { ok: true, mergedId }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }

@@ -54,11 +54,21 @@ const EDIT_LINE_SOURCE = 'arc-edit-line'
 const EDIT_LINE_LAYER = 'arc-edit-line-line'
 const EDIT_VERTEX_SOURCE = 'arc-edit-vertices'
 const EDIT_VERTEX_LAYER = 'arc-edit-vertices-circle'
+// Merge-mode highlights ride on the tracks source (filtered by segment id).
+const MERGE_CAND_LAYER = 'arc-merge-candidates-line'
+const MERGE_SEL_LAYER = 'arc-merge-selected-line'
 
 /** Click within this many screen px of the edit line inserts a vertex. */
 const LINE_INSERT_TOLERANCE_PX = 10
 
+/** Editing sub-tool: per-point vertex editing vs stitching tracks together. */
+export type EditTool = 'points' | 'merge'
+
 const EMPTY_FC: FeatureCollection = { type: 'FeatureCollection', features: [] }
+
+/** A MapLibre filter matching features whose id is in `ids` (empty ⇒ none). */
+const matchIds = (ids: number[]): ExpressionSpecification =>
+  ['in', ['id'], ['literal', ids]] as unknown as ExpressionSpecification
 
 /** Used when the online basemap style cannot be fetched (e.g. offline). */
 const FALLBACK_STYLE: StyleSpecification = {
@@ -100,6 +110,7 @@ export class MapController {
   private snapRoad = false
   /** Track editing: geometry being edited lives here, never in React. */
   private editMode = false
+  private editTool: EditTool = 'points'
   private editingId: number | null = null
   private editType = ''
   private editHasDraft = false
@@ -110,6 +121,10 @@ export class MapController {
   private editHandlersBound = false
   private editListener: ((s: EditSessionInfo | null) => void) | null = null
   private splitRequestListener: ((segmentId: number, seq: number) => void) | null = null
+  private mergeAnchorListener: ((segmentId: number) => void) | null = null
+  /** Last merge highlight ids, so a theme re-add can restore them. */
+  private mergeCandidateIds: number[] = []
+  private mergeSelectedIds: number[] = []
   private readonly roadDimOpacity: number
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
   private queryToken = 0
@@ -257,12 +272,35 @@ export class MapController {
         'circle-stroke-width': 1
       }
     } as LayerSpecification)
+
+    // Merge highlights: redraw the candidate / selected segments from the
+    // tracks source, filtered by segment id, hidden until merge mode turns
+    // them on. Selected paints over candidates.
+    this.map.addLayer({
+      id: MERGE_CAND_LAYER,
+      type: 'line',
+      source: TRACKS_SOURCE,
+      layout: { 'line-cap': 'round', 'line-join': 'round', visibility: 'none' },
+      filter: matchIds([]),
+      paint: { 'line-color': '#4f7ccf', 'line-width': 3, 'line-opacity': 0.9 }
+    } as LayerSpecification)
+    this.map.addLayer({
+      id: MERGE_SEL_LAYER,
+      type: 'line',
+      source: TRACKS_SOURCE,
+      layout: { 'line-cap': 'round', 'line-join': 'round', visibility: 'none' },
+      filter: matchIds([]),
+      paint: { 'line-color': '#ffd166', 'line-width': 5, 'line-opacity': 1 }
+    } as LayerSpecification)
     this.bindEditHandlers()
 
     this.applyTypeFilter()
     this.applyWaypointVisibility()
-    // Theme switches re-add everything; restore an in-flight edit overlay.
+    this.applyEditEmphasis()
+    // Theme switches re-add everything; restore an in-flight edit session and
+    // any merge highlights.
     if (this.editingId !== null) this.updateEditLayers()
+    this.setMergeHighlight(this.mergeCandidateIds, this.mergeSelectedIds)
   }
 
   /**
@@ -415,11 +453,55 @@ export class MapController {
     this.splitRequestListener = cb
   }
 
-  /** Toggle edit mode; leaving it discards any unsaved session. */
+  /** Receives the segment clicked as a merge anchor (merge tool only). */
+  setMergeAnchorListener(cb: (segmentId: number) => void): void {
+    this.mergeAnchorListener = cb
+  }
+
+  /**
+   * Toggle edit mode. Edit mode de-emphasizes the base tracks so the editing
+   * overlay (point handles or merge highlights) stands out; leaving it discards
+   * any unsaved session and clears highlights.
+   */
   setEditMode(on: boolean): void {
     if (on === this.editMode) return
     this.editMode = on
-    if (!on) this.closeEditSession()
+    if (!on) {
+      this.closeEditSession()
+      this.setMergeHighlight([], [])
+    }
+    this.applyEditEmphasis()
+  }
+
+  /** Switch editing sub-tool; the other tool's session/selection is cleared. */
+  setEditTool(tool: EditTool): void {
+    if (tool === this.editTool) return
+    this.editTool = tool
+    this.closeEditSession()
+    this.setMergeHighlight([], [])
+    this.applyEditEmphasis()
+  }
+
+  /** Dim base tracks while editing so the working overlay reads clearly. */
+  private applyEditEmphasis(): void {
+    if (!this.map.getLayer(TRACKS_LAYER)) return
+    this.map.setPaintProperty(TRACKS_LAYER, 'line-opacity', this.editMode ? 0.4 : 0.85)
+  }
+
+  /** Highlight the merge candidate / selected segments by id on the map. */
+  setMergeHighlight(candidateIds: number[], selectedIds: number[]): void {
+    this.mergeCandidateIds = candidateIds
+    this.mergeSelectedIds = selectedIds
+    if (!this.map.getLayer(MERGE_CAND_LAYER)) return
+    const show = this.editMode && this.editTool === 'merge'
+    // Candidates layer shows only the not-yet-selected ones (selected paints
+    // over them in its own color), so the two never double-draw.
+    const selSet = new Set(selectedIds)
+    this.map.setFilter(MERGE_CAND_LAYER, matchIds(candidateIds.filter((id) => !selSet.has(id))))
+    this.map.setFilter(MERGE_SEL_LAYER, matchIds(selectedIds))
+    for (const id of [MERGE_CAND_LAYER, MERGE_SEL_LAYER]) {
+      this.map.setLayoutProperty(id, 'visibility', show ? 'visible' : 'none')
+    }
   }
 
   /** Drop the in-memory session (saved drafts stay in the database). */
@@ -503,11 +585,17 @@ export class MapController {
 
   private handleTrackClick(e: MapLayerMouseEvent): void {
     if (!this.editMode) return
-    // An unsaved session must be saved or closed before switching tracks.
-    if (this.editingId !== null && this.editDirty) return
     const raw = e.features?.[0]?.id
     const id = typeof raw === 'number' ? raw : Number(raw)
     if (!Number.isInteger(id)) return
+    if (this.editTool === 'merge') {
+      // Clicking a track anchors the merge window on it; selection happens in
+      // the panel, so this is a fresh anchor each time.
+      this.mergeAnchorListener?.(id)
+      return
+    }
+    // Point tool: an unsaved session must be saved or closed before switching.
+    if (this.editingId !== null && this.editDirty) return
     void this.loadSegmentForEdit(id)
   }
 

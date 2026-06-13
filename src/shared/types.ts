@@ -167,6 +167,25 @@ export interface SegmentEditInput {
  */
 export type EditSaveMode = 'draft' | 'permanent'
 
+/**
+ * One track in the merge sequence: a segment near the anchor in time. The UI
+ * lists these chronologically so the user can pick a run to stitch together.
+ */
+export interface MergeCandidate {
+  segmentId: number
+  type: string
+  startTsMs: number | null
+  endTsMs: number | null
+  /** Clean point count — also the tie-breaker for the default merged type. */
+  pointCount: number
+}
+
+/** Anchor for the merge window: an existing track, or a picked moment in time. */
+export type MergeAnchor = { segmentId: number } | { tsMs: number }
+
+/** Default merge window: tracks within a day of the anchor are candidates. */
+export const MERGE_WINDOW_MS = 24 * 60 * 60 * 1000
+
 export interface ViewportWaypoint {
   id: number
   lat: number
@@ -326,4 +345,18 @@ export interface ArcApi {
     segmentId: number,
     seq: number
   ): Promise<{ ok: boolean; newSegmentId?: number; error?: string }>
+  /**
+   * Tracks within `windowMs` (default a day) of the anchor's time, ordered
+   * chronologically — the candidate sequence for a merge.
+   */
+  listMergeCandidates(anchor: MergeAnchor, windowMs?: number): Promise<MergeCandidate[]>
+  /**
+   * Stitch the given segments into one (their points concatenated in time
+   * order, the others removed). `type` is the merged track's activity type.
+   * Permanent and structural; returns the surviving segment's id.
+   */
+  mergeSegments(
+    segmentIds: number[],
+    type: string
+  ): Promise<{ ok: boolean; mergedId?: number; error?: string }>
 }
