@@ -8,20 +8,21 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type { BBox } from '../rail/overpass'
 import type { RailNodeInput, RailEdgeInput } from '../rail/snapRail'
-import type { LatLonBBox, RailCoverage } from '../../shared/types'
+import type { LatLonBBox, OsmLayer, RailCoverage } from '../../shared/types'
 
 /** A stored edge plus its OSM railway kind code (RAIL_KIND; 0 = unknown). */
 export type StoredRailEdge = RailEdgeInput & { kind: number }
 
 /**
- * Add a fetched region to the stored network. Nodes and edges from
- * overlapping fetches dedupe (OSM ids; canonical a < b edges); coverage
- * regions made redundant by the new bbox are absorbed into it.
+ * Add a fetched region (of one layer) to the stored network. Nodes and edges
+ * from overlapping fetches dedupe (OSM ids; canonical a < b edges); coverage
+ * regions of the *same layer* made redundant by the new bbox are absorbed.
  */
 export function addRailNetwork(
   db: DatabaseSync,
   rail: { nodes: RailNodeInput[]; edges: ReadonlyArray<RailEdgeInput & { kind?: number }> },
-  bbox: BBox
+  bbox: BBox,
+  layer: OsmLayer = 'rail'
 ): RailCoverage {
   const coords = new Map(rail.nodes.map((n) => [n.id, n]))
   db.exec('BEGIN')
@@ -47,16 +48,17 @@ export function addRailNetwork(
       )
     }
 
-    // A re-fetch of the same (or a larger) view replaces the rows it covers.
+    // A re-fetch of the same (or a larger) view replaces this layer's rows it
+    // covers — the other layer's coverage is untouched.
     db.prepare(
       `DELETE FROM rail_coverage
-       WHERE min_lat >= ? AND max_lat <= ? AND min_lon >= ? AND max_lon <= ?`
-    ).run(bbox.minLat, bbox.maxLat, bbox.minLon, bbox.maxLon)
+       WHERE category = ? AND min_lat >= ? AND max_lat <= ? AND min_lon >= ? AND max_lon <= ?`
+    ).run(layer, bbox.minLat, bbox.maxLat, bbox.minLon, bbox.maxLon)
     db.prepare(
-      `INSERT INTO rail_coverage (min_lat, min_lon, max_lat, max_lon, fetched_at_ms, node_count, edge_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO rail_coverage (category, min_lat, min_lon, max_lat, max_lon, fetched_at_ms, node_count, edge_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
-      bbox.minLat, bbox.minLon, bbox.maxLat, bbox.maxLon,
+      layer, bbox.minLat, bbox.minLon, bbox.maxLat, bbox.maxLon,
       Date.now(), rail.nodes.length, rail.edges.length
     )
     db.exec('COMMIT')
@@ -67,13 +69,13 @@ export function addRailNetwork(
   return getRailCoverage(db)!
 }
 
-/** All fetched regions plus live totals; null when nothing is fetched yet. */
+/** All fetched regions (layer-tagged) plus live totals; null when empty. */
 export function getRailCoverage(db: DatabaseSync): RailCoverage | null {
   const rows = db.prepare(
-    `SELECT min_lat AS minLat, min_lon AS minLon, max_lat AS maxLat, max_lon AS maxLon,
+    `SELECT category, min_lat AS minLat, min_lon AS minLon, max_lat AS maxLat, max_lon AS maxLon,
             fetched_at_ms AS fetchedAtMs
      FROM rail_coverage ORDER BY fetched_at_ms ASC, id ASC`
-  ).all() as Array<{ minLat: number; minLon: number; maxLat: number; maxLon: number; fetchedAtMs: number }>
+  ).all() as Array<{ category: string; minLat: number; minLon: number; maxLat: number; maxLon: number; fetchedAtMs: number }>
   if (rows.length === 0) return null
 
   // Counts come from the tables, not per-region sums: overlaps would double-count.
@@ -82,7 +84,8 @@ export function getRailCoverage(db: DatabaseSync): RailCoverage | null {
   return {
     regions: rows.map((r) => ({
       bbox: { minLat: r.minLat, minLon: r.minLon, maxLat: r.maxLat, maxLon: r.maxLon },
-      fetchedAtMs: r.fetchedAtMs
+      fetchedAtMs: r.fetchedAtMs,
+      layer: r.category === 'road' ? 'road' : 'rail'
     })),
     nodeCount: n,
     edgeCount: e,
@@ -91,12 +94,27 @@ export function getRailCoverage(db: DatabaseSync): RailCoverage | null {
   }
 }
 
-/** Every fetched region's bbox (for the coverage gate during a match pass). */
-export function coverageBoxes(db: DatabaseSync): LatLonBBox[] {
+/** A layer's fetched bboxes (the coverage gate during a match pass). */
+export function coverageBoxes(db: DatabaseSync, layer: OsmLayer): LatLonBBox[] {
   return db.prepare(
     `SELECT min_lat AS minLat, min_lon AS minLon, max_lat AS maxLat, max_lon AS maxLon
-     FROM rail_coverage`
-  ).all() as unknown as LatLonBBox[]
+     FROM rail_coverage WHERE category = ?`
+  ).all(layer) as unknown as LatLonBBox[]
+}
+
+/** Wipe all fetched OSM data and the cached matched geometry. */
+export function clearRailNetwork(db: DatabaseSync): void {
+  db.exec('BEGIN')
+  try {
+    db.exec('DELETE FROM rail_matched_geom')
+    db.exec('DELETE FROM rail_edges')
+    db.exec('DELETE FROM rail_nodes')
+    db.exec('DELETE FROM rail_coverage')
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
 }
 
 /** The whole stored network (edges carry kind), for building match graphs. */

@@ -8,7 +8,7 @@ import type {
   TrackColorMode
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
-import type { RailCoverage, RailMatchProgress, RailTuning } from '../../shared/types'
+import type { OsmLayer, RailCoverage, RailMatchProgress, RailTuning } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { yearRange } from '../../shared/yearColors'
 import { MapController, type RenderStats } from './map/MapController'
@@ -238,15 +238,16 @@ export function App(): React.JSX.Element {
     })
   }, [])
 
-  // Fetch the area on screen (regions accumulate), then cache its matched
-  // geometry; both phases report through railFetching / railProgress.
-  const handleFetchRail = useCallback((): void => {
+  // Fetch one layer for the area on screen (regions accumulate per layer),
+  // then cache its matched geometry; both phases report through
+  // railFetching / railProgress.
+  const handleFetchRail = useCallback((layer: OsmLayer): void => {
     const view = controllerRef.current?.getViewBounds()
     if (!view) return
     setRailFetching(true)
     setRailError(null)
     setRailProgress(null)
-    void window.api.fetchRailNetwork(view).then((res) => {
+    void window.api.fetchRailNetwork(view, layer).then((res) => {
       setRailFetching(false)
       setRailProgress(null)
       if (res.ok && res.coverage) {
@@ -255,8 +256,19 @@ export function App(): React.JSX.Element {
         controllerRef.current?.setSnapRail(true)
         controllerRef.current?.scheduleRefresh(0) // new area snaps immediately
       } else {
-        setRailError(res.error ?? 'rail fetch failed')
+        setRailError(res.error ?? 'fetch failed')
       }
+    })
+  }, [])
+
+  // Wipe all fetched OSM data and cached geometry.
+  const handleClearRail = useCallback((): void => {
+    void window.api.clearRailNetwork().then(() => {
+      setRailCoverage(null)
+      setRailError(null)
+      setSnapRail(false)
+      controllerRef.current?.setSnapRail(false)
+      controllerRef.current?.scheduleRefresh(0)
     })
   }, [])
 
@@ -298,6 +310,7 @@ export function App(): React.JSX.Element {
           onChangeAverage={handleAverageRail}
           onChangeSnap={handleSnapRail}
           onFetchRail={handleFetchRail}
+          onClearRail={handleClearRail}
           onApplyTuning={handleApplyTuning}
         />
         {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}

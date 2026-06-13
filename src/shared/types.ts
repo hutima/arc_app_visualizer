@@ -59,21 +59,30 @@ export interface LatLonBBox {
   maxLon: number
 }
 
-/** One fetched OSM rail region (a past viewport). */
+/**
+ * The two OSM layers, fetched and gated independently: `rail` (subway/tram/
+ * commuter geometry, fully map-matched for metro/tram/train rides) and `road`
+ * (highway tunnels only, used to bridge car/taxi/bus GPS gaps).
+ */
+export type OsmLayer = 'rail' | 'road'
+
+/** One fetched OSM region (a past viewport), tagged with its layer. */
 export interface RailRegion {
   bbox: LatLonBBox
   fetchedAtMs: number
+  layer: OsmLayer
 }
 
 /**
- * Everything fetched so far. Regions accumulate one viewport at a time and
- * gate snapping: rides keep raw GPS wherever they leave fetched areas.
+ * Everything fetched so far. Regions accumulate one viewport at a time, per
+ * layer, and gate matching: rides keep raw GPS wherever they leave their
+ * layer's fetched areas.
  */
 export interface RailCoverage {
   regions: RailRegion[]
   nodeCount: number
   edgeCount: number
-  /** Rail rides with cached map-matched geometry (built after each fetch). */
+  /** Rail rides + car trips with cached matched/bridged geometry. */
   matchedRides: number
   lastFetchedAtMs: number
 }
@@ -225,15 +234,21 @@ export interface ArcApi {
   /** Saves a rendered map frame; the user picks the destination. */
   exportMapPng(dataUrl: string): Promise<{ saved: boolean; path?: string }>
   /**
-   * Fetch OSM rail for the given (on-screen) bbox; regions accumulate. On
-   * success the map-matched geometry is rebuilt (progress via onRailProgress),
-   * so the returned coverage reflects the new matchedRides count.
+   * Fetch one OSM layer (`rail` or `road` tunnels) for the given on-screen
+   * bbox; regions accumulate per layer. On success the matched geometry is
+   * rebuilt (progress via onRailProgress), so the returned coverage reflects
+   * the new matchedRides count.
    */
-  fetchRailNetwork(bbox: LatLonBBox): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
+  fetchRailNetwork(
+    bbox: LatLonBBox,
+    layer: OsmLayer
+  ): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
   /** Re-run the match pass over all fetched coverage (e.g. when enabling snap). */
   rebuildRailMatches(): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
   /** Persist new matcher ranges and re-run the match pass with them. */
   setRailTuning(t: RailTuning): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
+  /** Wipe all fetched OSM data (both layers) and the cached matched geometry. */
+  clearRailNetwork(): Promise<{ ok: boolean }>
   /** Progress of the post-fetch / rebuild map-matching pass. */
   onRailProgress(cb: (p: RailMatchProgress) => void): () => void
   getRailCoverage(): Promise<RailCoverage | null>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { DEFAULT_RAIL_TUNING } from '../../../shared/types'
-import type { RailCoverage, RailMatchProgress, RailTuning } from '../../../shared/types'
+import type { OsmLayer, RailCoverage, RailMatchProgress, RailTuning } from '../../../shared/types'
 
 interface Props {
   averageRail: boolean
@@ -13,7 +13,8 @@ interface Props {
   railTuning: RailTuning | null
   onChangeAverage: (on: boolean) => void
   onChangeSnap: (on: boolean) => void
-  onFetchRail: () => void
+  onFetchRail: (layer: OsmLayer) => void
+  onClearRail: () => void
   onApplyTuning: (t: RailTuning) => void
 }
 
@@ -36,10 +37,13 @@ export function CleaningControl({
   onChangeAverage,
   onChangeSnap,
   onFetchRail,
+  onClearRail,
   onApplyTuning
 }: Props): React.JSX.Element {
   const hasNetwork = railCoverage !== null
   const busy = railFetching || railRebuilding
+  const railAreas = railCoverage?.regions.filter((r) => r.layer === 'rail').length ?? 0
+  const roadAreas = railCoverage?.regions.filter((r) => r.layer === 'road').length ?? 0
 
   // Range inputs are local drafts; Apply persists + re-matches.
   const [snapM, setSnapM] = useState(String(railTuning?.snapRadiusM ?? DEFAULT_RAIL_TUNING.snapRadiusM))
@@ -78,38 +82,43 @@ export function CleaningControl({
         Map-matches metro/tram/train rides onto real OpenStreetMap rail geometry,
         routing through tunnels and across transfers — fixing the spots where GPS
         is worst. Each mode matches only its own track kind (metro→subway,
-        train→commuter rail, tram→tram/light-rail), so rides don&apos;t grab a
-        parallel line. Car/taxi/bus trips stay raw except long GPS gaps
-        (&gt;~200 m) whose ends sit near a mapped <strong>road tunnel</strong> —
-        those are bridged through the tunnel instead of a straight jump across
-        downtown. Fetch loads the area on screen; pan to each city and fetch it —
-        areas add up, and matching is cached so panning stays fast.{' '}
-        <em>Re-fetch areas fetched before this update to pull road tunnels.</em>
+        train→commuter rail, tram→tram/light-rail). Car/taxi/bus trips stay raw
+        except long GPS gaps (&gt;~200 m) whose ends sit near a mapped road
+        tunnel — bridged through the tunnel instead of a straight jump across
+        downtown. <strong>Transit rail</strong> and <strong>road tunnels</strong>
+        {' '}are fetched separately; load the area on screen, pan to each city and
+        fetch — areas add up and matching is cached so panning stays fast.
       </p>
-      <button type="button" onClick={onFetchRail} disabled={busy}>
-        {railFetching
-          ? railProgress
-            ? `Matching rides… ${fmt(railProgress.done)}/${fmt(railProgress.total)}`
-            : 'Fetching rail in view…'
-          : hasNetwork
-            ? 'Add rail in current view'
-            : 'Fetch rail in current view'}
-      </button>
-      {railRebuilding && (
+      <div className="rail-fetch-actions">
+        <button type="button" onClick={() => onFetchRail('rail')} disabled={busy}>
+          {railFetching
+            ? 'Fetching…'
+            : `${railAreas > 0 ? 'Add' : 'Fetch'} transit rail in view`}
+        </button>
+        <button type="button" onClick={() => onFetchRail('road')} disabled={busy}>
+          {railFetching ? 'Fetching…' : `${roadAreas > 0 ? 'Add' : 'Fetch'} road tunnels in view`}
+        </button>
+      </div>
+      {(railFetching || railRebuilding) && (
         <p className="hint status-line">
           {railProgress
-            ? `Matching rides… ${fmt(railProgress.done)}/${fmt(railProgress.total)} (${fmt(
+            ? `Matching… ${fmt(railProgress.done)}/${fmt(railProgress.total)} (${fmt(
                 railProgress.matched
-              )} snapped)`
-            : 'Matching rides to rail…'}
+              )} done)`
+            : railFetching
+              ? 'Fetching from OpenStreetMap…'
+              : 'Matching rides…'}
         </p>
       )}
       {railCoverage && !busy && (
         <p className="hint">
-          OSM rail: {railCoverage.regions.length}{' '}
-          {railCoverage.regions.length === 1 ? 'area' : 'areas'} — {fmt(railCoverage.edgeCount)}{' '}
-          segments; <strong>{fmt(railCoverage.matchedRides)} rides snapped</strong> (updated{' '}
-          {fmtDate(railCoverage.lastFetchedAtMs)}).
+          OSM: <strong>{railAreas}</strong> rail{railAreas === 1 ? ' area' : ' areas'},{' '}
+          <strong>{roadAreas}</strong> road-tunnel{roadAreas === 1 ? ' area' : ' areas'} —{' '}
+          {fmt(railCoverage.edgeCount)} segments; <strong>{fmt(railCoverage.matchedRides)} rides
+          matched</strong> (updated {fmtDate(railCoverage.lastFetchedAtMs)}).{' '}
+          <button type="button" className="link-button" onClick={onClearRail}>
+            Clear OSM tracks
+          </button>
         </p>
       )}
       {railError && <p className="hint status-line error">{railError}</p>}

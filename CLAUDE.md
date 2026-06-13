@@ -118,19 +118,26 @@ where OSM is best) by map-matching rides onto real OSM rail geometry.
   sends an identifying `User-Agent` (Overpass 406s anonymous requests), and
   surfaces the server's error text.
 - **`db/railStore.ts`** — fetched regions **accumulate** one viewport at a time
-  (load each city separately). Nodes dedupe by OSM id; edges stored canonically
-  (`a < b`, unique) with their OSM `railway` **kind** (`rail_edges.kind`,
-  `RAIL_KIND`; re-fetch upserts the kind onto legacy `0`/unknown rows). Coverage
-  bboxes gate matching. `rail_matched_geom` caches the matched output.
+  (load each city separately). Two **layers** fetched & gated independently
+  (`rail_coverage.category` = `'rail'` | `'road'`): transit track vs highway
+  tunnels. Nodes dedupe by OSM id; edges stored canonically (`a < b`, unique)
+  with their OSM `railway`/road **kind** (`rail_edges.kind`, `RAIL_KIND`;
+  re-fetch upserts the kind onto legacy `0`/unknown rows). Per-layer coverage
+  bboxes gate matching. `rail_matched_geom` caches the matched output;
+  `clearRailNetwork` wipes everything.
 - **`rail/snapRail.ts` (`matchRideToRail`)** — the matcher. **Segment-local, not
   all-or-nothing:** anchor each vertex to the nearest point on the *track* (edge
   distance — OSM nodes are sparse on straight runs), join consecutive anchors by
   Dijkstra along the graph (fills tunnels, crosses lines via transfer edges),
   and **keep raw GPS** for any stretch that's off-network/off-coverage or a gap
-  too long to route. The user-facing ranges (`RailTuning`: snap radius, transfer
-  radius — meters) live in `settings.json` under `rail` and in the Cleaning
-  panel ("Apply & re-match" persists + rebuilds); gap factor/slack and the soft
-  bridge stay named constants at the top.
+  too long to route. **Contiguity:** anchoring is sticky to the previous
+  vertex's *track component* (`graph.comp`, union-find over real edges only) so
+  a noisy point near a parallel line doesn't flip the ride onto it, and transfer
+  edges carry a flat penalty (`TRANSFER_PENALTY_DEG`) so fills prefer one track
+  and transfer only at genuine interchanges. The user-facing ranges
+  (`RailTuning`: snap radius, transfer radius — meters) live in `settings.json`
+  under `rail` and in the Cleaning panel ("Apply & re-match" persists +
+  rebuilds); gap factor/slack, soft bridge, transfer penalty stay constants.
 - **`rail/buildMatches.ts`** — runs the matcher over every rail ride's **raw
   points** once (not zoom-simplified geometry), simplifies into the per-zoom
   detail levels, and caches in `rail_matched_geom`. **Type-constrained:** builds

@@ -120,14 +120,16 @@ describe('cached rail matching', () => {
     insPt.run(0, 0.0001, 0.009)
     insPt.run(1, -0.0001, 0.031)
 
-    // Network contains ONLY a road tunnel (lon 0.01..0.03 at lat 0).
+    // Road LAYER contains ONLY a road tunnel (lon 0.01..0.03 at lat 0). Road
+    // bridging is gated by road coverage, so it must be fetched as 'road'.
     addRailNetwork(
       db,
       {
         nodes: [0.01, 0.015, 0.02, 0.025, 0.03].map((lon, i) => ({ id: 50 + i, lat: 0, lon })),
         edges: [50, 51, 52, 53].map((a) => ({ a, b: a + 1, kind: RAIL_KIND.road_tunnel }))
       },
-      railBox
+      railBox,
+      'road'
     )
     const r = await rebuildRailMatches(db)
     // The car trip bridged; the metro ride (seg 1) must not touch road edges.
