@@ -130,10 +130,16 @@ export class MapController {
   private deletedSeqs = new Map<number, { lat: number; lon: number }>()
   /** Split tool: editPts index previewed as the split point (null = none). */
   private splitPreviewIndex: number | null = null
+  /** How a click-off auto-save commits the session ('permanent' in skip mode). */
+  private leaveSaveMode: EditSaveMode = 'draft'
+  /** A mousedown that grabbed/inserted suppresses the click-off it precedes. */
+  private suppressClickOff = false
   private editHandlersBound = false
   private editListener: ((s: EditSessionInfo | null) => void) | null = null
   private splitRequestListener: ((segmentId: number, seq: number) => void) | null = null
   private mergeAnchorListener: ((segmentId: number) => void) | null = null
+  /** Notified after a permanent/structural change so React can refresh stats. */
+  private datasetChangeListener: (() => void) | null = null
   /** Last merge highlight ids, so a theme re-add can restore them. */
   private mergeCandidateIds: number[] = []
   private mergeSelectedIds: number[] = []
@@ -343,6 +349,8 @@ export class MapController {
     this.map.on('click', TRACKS_LAYER, (e) => this.handleTrackClick(e))
     this.map.on('mousedown', (e) => this.handleMapDown(e))
     this.map.on('mousemove', (e) => this.updateEditCursor(e))
+    // Clicking off the edited track (empty map) commits and deselects it.
+    this.map.on('click', (e) => this.handleEmptyClick(e))
   }
 
   private firstSymbolLayerId(): string | undefined {
@@ -483,6 +491,16 @@ export class MapController {
   /** Receives the segment clicked as a merge anchor (merge tool only). */
   setMergeAnchorListener(cb: (segmentId: number) => void): void {
     this.mergeAnchorListener = cb
+  }
+
+  /** Notified after a permanent/structural change so React can refresh stats. */
+  setDatasetChangeListener(cb: () => void): void {
+    this.datasetChangeListener = cb
+  }
+
+  /** How a click-off auto-save commits: 'permanent' in skip-confirm mode. */
+  setLeaveSaveMode(mode: EditSaveMode): void {
+    this.leaveSaveMode = mode
   }
 
   /**
@@ -676,9 +694,69 @@ export class MapController {
       this.mergeAnchorListener?.(id)
       return
     }
-    // Point tool: an unsaved session must be saved or closed before switching.
-    if (this.editingId !== null && this.editDirty) return
-    void this.loadSegmentForEdit(id)
+    // Point tool: switching tracks auto-saves the current one (click-off save).
+    if (id === this.editingId) return
+    void this.commitAndLeave(id)
+  }
+
+  /**
+   * Leave the current edit session, auto-saving it first if dirty (draft, or
+   * permanent in skip-confirm mode), then optionally open another track. The
+   * non-destructive default means clicking away never silently loses work.
+   */
+  private async commitAndLeave(nextSegmentId: number | null): Promise<void> {
+    const leaving = this.editingId
+    if (leaving !== null && this.editDirty) {
+      const res = await window.api.saveSegmentEdits(leaving, this.buildOverlay(), this.leaveSaveMode)
+      if (this.destroyed) return
+      if (!res.ok) return // keep the session open so the work isn't lost
+      if (this.leaveSaveMode === 'permanent') this.datasetChangeListener?.()
+    }
+    if (leaving !== null) this.closeEditSession()
+    if (nextSegmentId !== null && nextSegmentId !== leaving) {
+      await this.loadSegmentForEdit(nextSegmentId)
+    }
+    this.scheduleRefresh(0)
+  }
+
+  /** A plain click off the edited track (empty map) commits + deselects it. */
+  private handleEmptyClick(e: MapMouseEvent): void {
+    if (!this.editMode || this.editTool !== 'points' || this.editingId === null) return
+    if (this.suppressClickOff) {
+      this.suppressClickOff = false
+      return
+    }
+    // A click on the edited geometry is editing; a click on a track switches
+    // (handleTrackClick). Only genuine empty space commits + deselects.
+    if ((this.nearestEditVertex(e.point)?.distPx ?? Infinity) <= VERTEX_GRAB_TOLERANCE_PX) return
+    if ((this.nearestEditSegment(e.point)?.distPx ?? Infinity) <= LINE_INSERT_TOLERANCE_PX) return
+    if (this.map.queryRenderedFeatures(e.point, { layers: [TRACKS_LAYER] }).length > 0) return
+    void this.commitAndLeave(null)
+  }
+
+  /** Change the edited track's type (persisted immediately, re-snapped). */
+  async setSegmentType(type: string): Promise<{ ok: boolean; error?: string }> {
+    if (this.editingId === null) return { ok: false, error: 'no segment selected' }
+    const res = await window.api.setSegmentType(this.editingId, type)
+    if (res.ok && !this.destroyed) {
+      this.editType = type
+      this.notifyEdit()
+      this.datasetChangeListener?.()
+      this.scheduleRefresh(0)
+    }
+    return res
+  }
+
+  /** Delete the edited track entirely and close the session. */
+  async deleteSegment(): Promise<{ ok: boolean; error?: string }> {
+    if (this.editingId === null) return { ok: false, error: 'no segment selected' }
+    const res = await window.api.deleteSegment(this.editingId)
+    if (res.ok && !this.destroyed) {
+      this.closeEditSession()
+      this.datasetChangeListener?.()
+      this.scheduleRefresh(0)
+    }
+    return res
   }
 
   private async loadSegmentForEdit(segmentId: number): Promise<void> {
@@ -689,11 +767,13 @@ export class MapController {
     this.editHasDraft = state.hasDraft
     this.editDirty = false
     this.editPts = state.points
+    this.splitPreviewIndex = null
     // Re-loading a draft: keep its deletes so a re-save round-trips them
     // (coords are unused for delete rows).
     this.deletedSeqs = new Map(state.deletedSeqs.map((seq) => [seq, { lat: 0, lon: 0 }]))
     this.applyTypeFilter()
     this.updateEditLayers()
+    this.updateSplitPreview()
     this.notifyEdit()
   }
 
@@ -705,16 +785,19 @@ export class MapController {
    * away from both fall through to normal map panning.
    */
   private handleMapDown(e: MapMouseEvent): void {
+    this.suppressClickOff = false
     if (!this.editMode || this.editingId === null) return
     const v = this.nearestEditVertex(e.point)
     if (v && v.distPx <= VERTEX_GRAB_TOLERANCE_PX) {
       e.preventDefault()
+      this.suppressClickOff = true // this mousedown is an edit, not a click-off
       this.grabVertex(v.idx, e.originalEvent)
       return
     }
     const hit = this.nearestEditSegment(e.point)
     if (!hit || hit.distPx > LINE_INSERT_TOLERANCE_PX) return
     e.preventDefault()
+    this.suppressClickOff = true
     const idx = this.insertOnSegment(hit)
     if (idx !== null) this.beginVertexDrag(idx)
   }

@@ -117,6 +117,12 @@ tests/         vitest; *.test.ts mirror the module they cover
   and give each half its own type. Hit-testing for the point tool is pixel
   space on the map's own mousedown: a vertex grab (larger radius) wins over a
   line insert, so endpoints stay draggable and clicks near a point move it.
+  The panel also changes a track's **type** (`setSegmentType`, re-snaps if it
+  was snapped) and **deletes** a track (`deleteSegment`). **Clicking off** the
+  edited track (empty map or another track) auto-commits it
+  (`commitAndLeave`) — a draft normally, or permanently when the **Skip
+  confirmations** checkbox is on, which also bypasses the destructive-action
+  `window.confirm`s (`skipConfirmRef`).
 - **Track merging** (`editStore.listMergeCandidates`/`mergeSegments` +
   `MergePanel`): stitch fragmented pieces of one journey back together. Anchor a
   ±24h window (`MERGE_WINDOW_MS`) by clicking a track or picking a date

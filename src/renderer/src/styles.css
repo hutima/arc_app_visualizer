@@ -327,6 +327,14 @@ button:disabled {
   flex: 1;
 }
 
+.edit-actions button.danger {
+  color: #f87171;
+}
+
+.edit-actions button.danger:hover:not(:disabled) {
+  border-color: #f87171;
+}
+
 /* Precise split tool (in the Edit points panel) */
 .split-tool {
   margin-top: 10px;

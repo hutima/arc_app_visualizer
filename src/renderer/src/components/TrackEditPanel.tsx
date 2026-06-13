@@ -6,7 +6,7 @@ interface Props {
   session: EditSessionInfo | null
   busy: boolean
   error: string | null
-  /** Activity types offered for the per-half split. */
+  /** Every existing activity type (for changing type and per-half split). */
   categoryNames: string[]
   onSave: (mode: EditSaveMode) => void
   onRevert: () => void
@@ -14,6 +14,8 @@ interface Props {
   /** Preview the split point at an editPts index (null clears the marker). */
   onSplitPreview: (index: number | null) => void
   onSplit: (index: number, firstType: string, secondType: string) => void
+  onChangeType: (type: string) => void
+  onDeleteTrack: () => void
 }
 
 /**
@@ -32,10 +34,13 @@ export function TrackEditPanel({
   onRevert,
   onClose,
   onSplitPreview,
-  onSplit
+  onSplit,
+  onChangeType,
+  onDeleteTrack
 }: Props): React.JSX.Element {
   const canSave = session !== null && session.dirty
   const canCommit = session !== null && (session.dirty || session.hasDraft)
+  const typeOptions = session ? [...new Set([session.type, ...categoryNames])] : []
   return (
     <section className="panel">
       <h2>Edit points</h2>
@@ -59,8 +64,23 @@ export function TrackEditPanel({
             <strong>Drag</strong> a point to move it. <strong>Click the line</strong>{' '}
             between two points to add one (placed in time between them).{' '}
             <strong>Alt-click</strong> a point to delete it. <strong>Shift-click</strong>{' '}
-            a point to split the track into two there.
+            a point to split the track into two there. Clicking off saves.
           </p>
+          <label className="merge-type-pick">
+            <span>Type</span>
+            <select
+              className="detail-select"
+              value={session.type}
+              disabled={busy}
+              onChange={(e) => onChangeType(e.target.value)}
+            >
+              {typeOptions.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </label>
           <div className="edit-actions">
             <button type="button" disabled={busy || !canSave} onClick={() => onSave('draft')}>
               Save draft
@@ -75,6 +95,11 @@ export function TrackEditPanel({
             </button>
             <button type="button" disabled={busy} onClick={onClose}>
               Close
+            </button>
+          </div>
+          <div className="edit-actions">
+            <button type="button" className="danger" disabled={busy} onClick={onDeleteTrack}>
+              Delete track
             </button>
           </div>
           <SplitTool

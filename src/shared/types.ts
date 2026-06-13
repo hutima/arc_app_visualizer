@@ -336,6 +336,10 @@ export interface ArcApi {
   ): Promise<{ ok: boolean; error?: string }>
   /** Drop a segment's draft edits and restore its original geometry. */
   revertSegmentEdits(segmentId: number): Promise<{ ok: boolean; error?: string }>
+  /** Change a segment's activity type (re-snaps it if it was snapped). */
+  setSegmentType(segmentId: number, type: string): Promise<{ ok: boolean; error?: string }>
+  /** Delete a whole track (segment) and everything derived from it. */
+  deleteSegment(segmentId: number): Promise<{ ok: boolean; error?: string }>
   /**
    * Split a segment into two at one of its points (by seq). Commits the
    * segment's current overlay; returns the id of the new (second-half)

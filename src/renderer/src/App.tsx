@@ -70,6 +70,9 @@ export function App(): React.JSX.Element {
   const [editSession, setEditSession] = useState<EditSessionInfo | null>(null)
   const [editBusy, setEditBusy] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
+  // Skip confirmations; also makes a click-off auto-save permanently (vs draft).
+  const [skipConfirm, setSkipConfirm] = useState(false)
+  const skipConfirmRef = useRef(false)
   const [mergeCandidates, setMergeCandidates] = useState<MergeCandidate[]>([])
   const [mergeSelected, setMergeSelected] = useState<number[]>([])
   const [mergeType, setMergeType] = useState('')
@@ -108,10 +111,14 @@ export function App(): React.JSX.Element {
       }
       controllerRef.current = controller
       controller.setEditListener((s) => setEditSession(s))
+      // Permanent/structural changes (incl. a permanent click-off save) change
+      // counts/types, so refresh the dataset stats afterward.
+      controller.setDatasetChangeListener(() => void refreshData())
       // Splitting is destructive (commits edits, restructures): confirm here,
       // then refresh dataset stats since point counts change.
       controller.setSplitRequestListener((segmentId, seq) => {
         if (
+          !skipConfirmRef.current &&
           !window.confirm(
             'Split this track into two at the selected point? This commits the current edits and cannot be undone.'
           )
@@ -152,6 +159,13 @@ export function App(): React.JSX.Element {
       controllerRef.current = null
     }
   }, [refreshData])
+
+  // Skip-confirm drives two things: a ref the confirm sites read, and the
+  // mode a click-off auto-save commits in (permanent when skipping, else draft).
+  useEffect(() => {
+    skipConfirmRef.current = skipConfirm
+    controllerRef.current?.setLeaveSaveMode(skipConfirm ? 'permanent' : 'draft')
+  }, [skipConfirm])
 
   // Feed the dataset's year span to the gradient whenever the summary changes.
   useEffect(() => {
@@ -426,6 +440,7 @@ export function App(): React.JSX.Element {
   const handleMerge = useCallback((): void => {
     if (mergeSelected.length < 2 || !mergeType) return
     if (
+      !skipConfirmRef.current &&
       !window.confirm(
         `Merge ${mergeSelected.length} tracks into one ${mergeType} track? The separate tracks are replaced and this cannot be undone.`
       )
@@ -452,6 +467,7 @@ export function App(): React.JSX.Element {
       if (!controller) return
       if (
         mode === 'permanent' &&
+        !skipConfirmRef.current &&
         !window.confirm(
           "Permanently rewrite this track's original points with the edited line? This cannot be undone."
         )
@@ -503,6 +519,7 @@ export function App(): React.JSX.Element {
           ? `into two ${firstType} tracks`
           : `into a ${firstType} track and a ${secondType} track`
       if (
+        !skipConfirmRef.current &&
         !window.confirm(`Split this track ${into}? This commits the current edits and cannot be undone.`)
       ) {
         return
@@ -517,6 +534,34 @@ export function App(): React.JSX.Element {
     },
     [refreshData]
   )
+
+  const handleChangeType = useCallback((type: string): void => {
+    const controller = controllerRef.current
+    if (!controller) return
+    setEditBusy(true)
+    setEditError(null)
+    void controller.setSegmentType(type).then((res) => {
+      setEditBusy(false)
+      if (!res.ok) setEditError(res.error ?? 'type change failed')
+    })
+  }, [])
+
+  const handleDeleteTrack = useCallback((): void => {
+    const controller = controllerRef.current
+    if (!controller) return
+    if (
+      !skipConfirmRef.current &&
+      !window.confirm('Delete this entire track? This removes it for good and cannot be undone.')
+    ) {
+      return
+    }
+    setEditBusy(true)
+    setEditError(null)
+    void controller.deleteSegment().then((res) => {
+      setEditBusy(false)
+      if (!res.ok) setEditError(res.error ?? 'delete failed')
+    })
+  }, [])
 
   const handleBasemapTheme = useCallback((theme: 'dark' | 'light'): void => {
     setConfig((prev) => {
@@ -604,6 +649,14 @@ export function App(): React.JSX.Element {
                 Merge tracks
               </button>
             </div>
+            <label className="color-mode-option" title="Also bakes a click-off save permanently">
+              <input
+                type="checkbox"
+                checked={skipConfirm}
+                onChange={(e) => setSkipConfirm(e.target.checked)}
+              />
+              <span>Skip confirmations (click-off saves permanently)</span>
+            </label>
             {editTool === 'points' ? (
               <TrackEditPanel
                 session={editSession}
@@ -615,6 +668,8 @@ export function App(): React.JSX.Element {
                 onClose={handleCloseEdit}
                 onSplitPreview={handleSplitPreview}
                 onSplit={handleSplit}
+                onChangeType={handleChangeType}
+                onDeleteTrack={handleDeleteTrack}
               />
             ) : (
               <MergePanel
