@@ -33,6 +33,7 @@ export function App(): React.JSX.Element {
   const [colorMode, setColorMode] = useState<TrackColorMode>('type')
   const [averageRail, setAverageRail] = useState(false)
   const [snapRail, setSnapRail] = useState(false)
+  const [snapRoad, setSnapRoad] = useState(false)
   const [railCoverage, setRailCoverage] = useState<RailCoverage | null>(null)
   const [railFetching, setRailFetching] = useState(false)
   const [railRebuilding, setRailRebuilding] = useState(false)
@@ -192,29 +193,41 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setAverageRail(on)
   }, [])
 
+  // Enabling a snap toggle with coverage but no cached matches (e.g. a fetch
+  // from an older version): build them now so the toggle shows something.
+  const ensureMatchesBuilt = useCallback((): void => {
+    if (!railCoverage || railCoverage.matchedRides > 0 || railRebuilding || railFetching) return
+    setRailRebuilding(true)
+    setRailError(null)
+    setRailProgress(null)
+    void window.api.rebuildRailMatches().then((res) => {
+      setRailRebuilding(false)
+      setRailProgress(null)
+      if (res.ok && res.coverage) {
+        setRailCoverage(res.coverage)
+        controllerRef.current?.scheduleRefresh(0)
+      } else if (res.error) {
+        setRailError(res.error)
+      }
+    })
+  }, [railCoverage, railRebuilding, railFetching])
+
   const handleSnapRail = useCallback(
     (on: boolean): void => {
       setSnapRail(on)
       controllerRef.current?.setSnapRail(on)
-      // Enabling snap with coverage but no cached matches (e.g. a fetch from an
-      // older version): build them now so the toggle actually shows something.
-      if (on && railCoverage && railCoverage.matchedRides === 0 && !railRebuilding && !railFetching) {
-        setRailRebuilding(true)
-        setRailError(null)
-        setRailProgress(null)
-        void window.api.rebuildRailMatches().then((res) => {
-          setRailRebuilding(false)
-          setRailProgress(null)
-          if (res.ok && res.coverage) {
-            setRailCoverage(res.coverage)
-            controllerRef.current?.scheduleRefresh(0)
-          } else if (res.error) {
-            setRailError(res.error)
-          }
-        })
-      }
+      if (on) ensureMatchesBuilt()
     },
-    [railCoverage, railRebuilding, railFetching]
+    [ensureMatchesBuilt]
+  )
+
+  const handleSnapRoad = useCallback(
+    (on: boolean): void => {
+      setSnapRoad(on)
+      controllerRef.current?.setSnapRoad(on)
+      if (on) ensureMatchesBuilt()
+    },
+    [ensureMatchesBuilt]
   )
 
   // Stream of the post-fetch map-matching pass.
@@ -252,8 +265,14 @@ export function App(): React.JSX.Element {
       setRailProgress(null)
       if (res.ok && res.coverage) {
         setRailCoverage(res.coverage)
-        setSnapRail(true)
-        controllerRef.current?.setSnapRail(true)
+        // Turn on the toggle for the layer just fetched, so the result shows.
+        if (layer === 'road') {
+          setSnapRoad(true)
+          controllerRef.current?.setSnapRoad(true)
+        } else {
+          setSnapRail(true)
+          controllerRef.current?.setSnapRail(true)
+        }
         controllerRef.current?.scheduleRefresh(0) // new area snaps immediately
       } else {
         setRailError(res.error ?? 'fetch failed')
@@ -268,6 +287,8 @@ export function App(): React.JSX.Element {
       setRailError(null)
       setSnapRail(false)
       controllerRef.current?.setSnapRail(false)
+      setSnapRoad(false)
+      controllerRef.current?.setSnapRoad(false)
       controllerRef.current?.scheduleRefresh(0)
     })
   }, [])
@@ -301,6 +322,7 @@ export function App(): React.JSX.Element {
         <CleaningControl
           averageRail={averageRail}
           snapRail={snapRail}
+          snapRoad={snapRoad}
           railCoverage={railCoverage}
           railFetching={railFetching}
           railRebuilding={railRebuilding}
@@ -309,6 +331,7 @@ export function App(): React.JSX.Element {
           railTuning={config?.railTuning ?? null}
           onChangeAverage={handleAverageRail}
           onChangeSnap={handleSnapRail}
+          onChangeSnapRoad={handleSnapRoad}
           onFetchRail={handleFetchRail}
           onClearRail={handleClearRail}
           onApplyTuning={handleApplyTuning}

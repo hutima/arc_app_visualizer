@@ -293,7 +293,7 @@ describe('matchRideToRail — segment-local fallback', () => {
   }
   const graph = buildRailGraph(nodes, edges)
 
-  it('snaps the on-rail stretches and keeps the un-routable jump raw', () => {
+  it('snaps both on-rail stretches and breaks the line at the impossible jump', () => {
     const ride = new Float32Array([
       0, 0.0003, 0.02, -0.0003, 0.04, 0.0003, // along line A
       0.04, 1.0003, 0.02, 0.9997, 0, 1.0003 // along line B (after a big jump)
@@ -303,9 +303,9 @@ describe('matchRideToRail — segment-local fallback', () => {
     // Both halves land on a rail (lat 0 or lat 1): ≥5 on A + ≥3 on B.
     const onRail = lats.filter((lat) => lat === 0 || lat === 1)
     expect(onRail.length).toBeGreaterThanOrEqual(8)
-    // The cross-line jump can't route, so it survives as a raw vertex
-    // (lat ≈ 1.0003) rather than nuking the whole match.
-    expect(lats.some((lat) => lat > 1 && lat < 1.001)).toBe(true)
+    // The cross-line jump can't route: instead of drawing a connection that
+    // never happened, the line is split there (NaN break sentinel).
+    expect(lats.some((lat) => Number.isNaN(lat))).toBe(true)
   })
 
   it('returns null when nothing routes (single far point is not a snap)', () => {
@@ -521,5 +521,90 @@ describe('bridgeRoadGaps (car tunnels)', () => {
   it('does not invent a tunnel for gaps far from any', () => {
     const trip = new Float32Array([0.5, 0.5, 0.55, 0.5])
     expect(bridgeRoadGaps(trip, g)).toBeNull()
+  })
+
+  it('does not bridge when elapsed time says the driver went elsewhere', () => {
+    // Portal-to-portal fixes, but 40 minutes apart: parked downtown and came
+    // back, not a 2 km tunnel run — the bridge would be a lie.
+    const trip = new Float32Array([0.009, 0.0001, 0.031, -0.0001])
+    expect(bridgeRoadGaps(trip, g, undefined, [0, 40 * 60_000])).toBeNull()
+    // The same trip in 4 minutes is a normal tunnel transit — bridge it.
+    expect(bridgeRoadGaps(trip, g, undefined, [0, 4 * 60_000])).not.toBeNull()
+  })
+})
+
+describe('time plausibility (out-and-back wormholes)', () => {
+  const graph = buildRailGraph(LINE_NODES, LINE_EDGES)
+
+  it('rejects a short routed fill when the elapsed time implies a long journey', () => {
+    // Two fixes ~1.1 km apart on the corridor, 30 minutes apart: the rider
+    // went downtown and back with dead GPS. Routing the short way would draw
+    // a track jump that never happened — keep raw instead.
+    const ride = new Float32Array([0, 0.0003, 0.01, -0.0003])
+    expect(matchRideToRail(ride, graph, undefined, [0, 30 * 60_000])).toBeNull()
+    // The same hop in 2 minutes is an ordinary tunnel fill — snap it.
+    expect(matchRideToRail(ride, graph, undefined, [0, 2 * 60_000])).not.toBeNull()
+    // No timestamps → no gate (legacy data without times still snaps).
+    expect(matchRideToRail(ride, graph)).not.toBeNull()
+  })
+
+  it('platform dwell does not poison the next hop', () => {
+    // Sit at one station for 10 minutes, then ride one stop in 90 seconds:
+    // dt for the moving hop is measured from the *latest* sighting at the
+    // anchor, so the short hop stays snappable.
+    const ride = new Float32Array([0, 0.0002, 0.0002, -0.0002, 0.008, 0.0003])
+    const times = [0, 10 * 60_000, 10 * 60_000 + 90_000]
+    const c = coordsOf(matchRideToRail(ride, graph, undefined, times)!)
+    for (let i = 1; i < c.length; i += 2) expect(c[i]).toBe(0) // snapped to the line
+  })
+
+  it('breaks the line at a mid-ride wormhole and keeps snapping after it', () => {
+    // Normal hop, then a 30-minute hole over ~1 km (out-and-back, unseen),
+    // then a normal hop: the hole becomes a gap in the line — never a jump —
+    // and both flanks stay snapped.
+    const ride = new Float32Array([0, 0.0003, 0.01, -0.0003, 0.02, 0.0003, 0.03, -0.0003])
+    const times = [0, 60_000, 60_000 + 30 * 60_000, 60_000 + 32 * 60_000]
+    const c = coordsOf(matchRideToRail(ride, graph, undefined, times)!)
+    const lats = c.filter((_, k) => k % 2 === 1)
+    expect(lats.some((lat) => Number.isNaN(lat))).toBe(true) // the gap
+    expect(lats.filter((lat) => lat === 0).length).toBeGreaterThanOrEqual(4) // both flanks
+  })
+})
+
+describe('most-likely route through scatter (rescue)', () => {
+  // One straight line, lon 0..0.04, node every 0.001.
+  const nodes: RailNodeInput[] = Array.from({ length: 41 }, (_, i) => ({
+    id: i + 1,
+    lat: 0,
+    lon: i * 0.001
+  }))
+  const edges: RailEdgeInput[] = Array.from({ length: 40 }, (_, i) => ({ a: i + 1, b: i + 2 }))
+  const graph = buildRailGraph(nodes, edges)
+
+  it('recovers an out-and-back from mid-gap scatter instead of shortcutting', () => {
+    // Start at lon 0, end at lon 0.005 thirty minutes later — the direct fill
+    // is far too short for the time. One wild mid-gap fix (~330 m off-track,
+    // beyond the normal snap radius) betrays the rider went out to ~0.03:
+    // rescue anchoring routes out and back, explaining the elapsed time.
+    const ride = new Float32Array([0, 0.00005, 0.03, 0.003, 0.005, -0.00005])
+    const times = [0, 15 * 60_000, 30 * 60_000]
+    const c = coordsOf(matchRideToRail(ride, graph, undefined, times)!)
+    const lons = c.filter((_, k) => k % 2 === 0)
+    expect(lons.some((lon) => lon === Math.fround(0.03))).toBe(true) // reached the turnaround
+    expect(c[c.length - 2]).toBe(Math.fround(0.005)) // and came back
+    // The wild fix itself is rejected — explained by the route, not drawn.
+    const lats = c.filter((_, k) => k % 2 === 1)
+    expect(lats.every((lat) => lat === 0)).toBe(true)
+  })
+
+  it('rejects covered scatter explained by the reconstructed route', () => {
+    // A short tunnel hop with one wild fix (~280 m off-track, beyond the
+    // snap radius) inside it: the route explains the journey, so the scatter
+    // is dropped instead of drawn as a spike.
+    const ride = new Float32Array([0, 0.00005, 0.005, 0.0025, 0.01, -0.00005])
+    const times = [0, 60_000, 2 * 60_000]
+    const c = coordsOf(matchRideToRail(ride, graph, undefined, times)!)
+    const lats = c.filter((_, k) => k % 2 === 1)
+    expect(lats.every((lat) => lat === 0)).toBe(true) // no 0.0025 spike
   })
 })

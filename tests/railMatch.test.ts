@@ -119,6 +119,12 @@ describe('cached rail matching', () => {
     )
     insPt.run(0, 0.0001, 0.009)
     insPt.run(1, -0.0001, 0.031)
+    const carBlob = new Uint8Array(new Float32Array([0.009, 0.0001, 0.031, -0.0001]).buffer)
+    for (const detail of [0, 1, 2]) {
+      db.prepare(
+        'INSERT INTO display_geometries (segment_id, detail, point_count, coords) VALUES (2, ?, 2, ?)'
+      ).run(detail, carBlob)
+    }
 
     // Road LAYER contains ONLY a road tunnel (lon 0.01..0.03 at lat 0). Road
     // bridging is gated by road coverage, so it must be fetched as 'road'.
@@ -139,5 +145,44 @@ describe('cached rail matching', () => {
       'SELECT point_count FROM rail_matched_geom WHERE segment_id = 2 AND detail = 2'
     ).get() as { point_count: number }
     expect(row.point_count).toBeGreaterThan(2) // tunnel alignment spliced in
+
+    // Each toggle swaps geometry for its own type group only.
+    const carRow = (q: object): ViewportSegmentRow =>
+      queryViewportSegments(db, { ...VIEW, ...q }, LIMITS).rows.find((s) => s.id === 2)!
+    expect(carRow({ snapRail: true })._matched).toBeFalsy()
+    expect(carRow({ snapRoad: true })._matched).toBe(1)
+  })
+
+  it('a mid-ride wormhole is cached as two parts split by a break sentinel', async () => {
+    // Metro ride: a normal first hop, a 30-minute hole, a normal last hop.
+    db.prepare(
+      `INSERT INTO segments (id, track_id, file_id, type, point_count, clean_point_count,
+                             min_lat, max_lat, min_lon, max_lon)
+       VALUES (3, 1, 1, 'metro', 4, 4, -0.001, 0.001, 0, 0.03)`
+    ).run()
+    const ins = db.prepare(
+      'INSERT INTO points (segment_id, seq, lat, lon, ts_ms, flags) VALUES (3, ?, ?, ?, ?, 0)'
+    )
+    ins.run(0, 0.0001, 0, 0)
+    ins.run(1, -0.0001, 0.005, 60_000)
+    ins.run(2, 0.0001, 0.02, 60_000 + 30 * 60_000)
+    ins.run(3, -0.0001, 0.025, 60_000 + 32 * 60_000)
+
+    addRailNetwork(
+      db,
+      {
+        nodes: [0, 0.005, 0.01, 0.015, 0.02, 0.025].map((lon, i) => ({ id: 80 + i, lat: 0, lon })),
+        edges: [80, 81, 82, 83, 84].map((a) => ({ a, b: a + 1, kind: RAIL_KIND.subway }))
+      },
+      railBox
+    )
+    await rebuildRailMatches(db)
+    const row = db.prepare(
+      'SELECT coords FROM rail_matched_geom WHERE segment_id = 3 AND detail = 2'
+    ).get() as { coords: Uint8Array }
+    const f = new Float32Array(row.coords.slice().buffer)
+    let breaks = 0
+    for (let i = 0; i < f.length; i += 2) if (Number.isNaN(f[i]!)) breaks++
+    expect(breaks).toBe(1) // the impossible hop is a gap, not a jump
   })
 })

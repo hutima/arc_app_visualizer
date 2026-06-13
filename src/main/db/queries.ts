@@ -8,6 +8,7 @@ import type {
 } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { resolveDetail, type ResolvedDetail } from '../../shared/displayDetail'
+import { RAIL_SNAP_TYPES, ROAD_TUNNEL_TYPES } from '../rail/snapRail'
 
 export interface ViewportSegmentRow {
   id: number
@@ -74,17 +75,20 @@ export function queryViewportSegments(
   q: ViewportQuery,
   limits: ViewportLimits
 ): ViewportRowsResult {
-  // Snap mode swaps cached map-matched geometry in for rail rides that have it.
-  const snap = q.snapRail === true
+  // Each snap toggle swaps cached matched geometry in for its own type group:
+  // rail rides under snapRail, road (tunnel-bridged) trips under snapRoad.
+  const snapTypes: string[] = []
+  if (q.snapRail) snapTypes.push(...RAIL_SNAP_TYPES)
+  if (q.snapRoad) snapTypes.push(...ROAD_TUNNEL_TYPES)
   let detail = resolveDetail(q.detailMode, q.zoom)
   if ((q.detailMode ?? 'auto') === 'auto' && typeof detail === 'number') {
-    while (detail > 0 && countDisplayPoints(db, q, detail, snap) > limits.points) detail--
+    while (detail > 0 && countDisplayPoints(db, q, detail, snapTypes) > limits.points) detail--
   }
 
   const { rows, truncated } =
     detail === 'raw'
       ? rawRows(db, q, limits.segments)
-      : displayRows(db, q, detail, limits.segments, snap)
+      : displayRows(db, q, detail, limits.segments, snapTypes)
 
   const total = rows.reduce((sum, r) => sum + r.point_count, 0)
   const stride = total > limits.points ? Math.ceil(total / limits.points) : 1
@@ -94,11 +98,24 @@ export function queryViewportSegments(
   return { rows, truncated, detail, downsampleStride: stride }
 }
 
-function countDisplayPoints(db: DatabaseSync, q: ViewportQuery, detail: number, snap: boolean): number {
-  // In snap mode, matched geometry (when present) decides a rail row's size.
-  const join = snap
-    ? 'LEFT JOIN rail_matched_geom m ON m.segment_id = s.id AND m.detail = ?'
+/**
+ * Matched-geometry join for the enabled type groups. The type names are code
+ * constants (RAIL_SNAP_TYPES / ROAD_TUNNEL_TYPES), never user input.
+ */
+const matchedJoin = (snapTypes: string[]): string =>
+  snapTypes.length > 0
+    ? `LEFT JOIN rail_matched_geom m ON m.segment_id = s.id AND m.detail = ?
+       AND s.type IN (${snapTypes.map((t) => `'${t}'`).join(',')})`
     : ''
+
+function countDisplayPoints(
+  db: DatabaseSync,
+  q: ViewportQuery,
+  detail: number,
+  snapTypes: string[]
+): number {
+  // Under a snap toggle, matched geometry (when present) decides a row's size.
+  const snap = snapTypes.length > 0
   const sizeExpr = snap ? 'COALESCE(m.point_count, d.point_count)' : 'd.point_count'
   const params = snap
     ? [detail, detail, ...viewportParams(q)]
@@ -107,7 +124,7 @@ function countDisplayPoints(db: DatabaseSync, q: ViewportQuery, detail: number, 
     SELECT COALESCE(SUM(${sizeExpr}), 0) AS total
     FROM segments s
     JOIN display_geometries d ON d.segment_id = s.id AND d.detail = ?
-    ${join}
+    ${matchedJoin(snapTypes)}
     WHERE ${VIEWPORT_WHERE}
   `).get(...params) as { total: number }
   return row.total
@@ -118,19 +135,18 @@ function displayRows(
   q: ViewportQuery,
   detail: number,
   segmentLimit: number,
-  snap: boolean
+  snapTypes: string[]
 ): { rows: ViewportSegmentRow[]; truncated: boolean } {
-  // Snap mode: prefer cached matched geometry per rail segment, falling back to
-  // the normal display polyline; `_matched` flags which rows were swapped.
+  // Snap toggles: prefer cached matched geometry per enabled segment type,
+  // falling back to the normal display polyline; `_matched` flags swaps.
+  const snap = snapTypes.length > 0
   const cols = snap
     ? `s.id, s.type, s.start_ts_ms,
        COALESCE(m.point_count, d.point_count) AS point_count,
        COALESCE(m.coords, d.coords) AS coords,
        (m.segment_id IS NOT NULL) AS _matched`
     : 's.id, s.type, s.start_ts_ms, d.point_count, d.coords'
-  const join = snap
-    ? 'LEFT JOIN rail_matched_geom m ON m.segment_id = s.id AND m.detail = ?'
-    : ''
+  const join = matchedJoin(snapTypes)
   const params = snap
     ? [detail, detail, ...viewportParams(q), segmentLimit + 1]
     : [detail, ...viewportParams(q), segmentLimit + 1]
@@ -197,7 +213,12 @@ function rawRows(
   return { rows, truncated }
 }
 
-/** Thin a polyline to every `stride`-th vertex, always keeping both endpoints. */
+/**
+ * Thin a polyline to every `stride`-th vertex, always keeping endpoints.
+ * Matched geometry may contain NaN break sentinels (deliberate gaps); those
+ * and each part's endpoints are always kept, or thinning would re-connect
+ * parts the matcher intentionally separated.
+ */
 function decimateRow(row: ViewportSegmentRow, stride: number): void {
   const n = row.point_count
   if (n <= 2) return
@@ -207,8 +228,19 @@ function decimateRow(row: ViewportSegmentRow, stride: number): void {
       ? new Float32Array(row.coords.buffer, row.coords.byteOffset, n * 2)
       : new Float32Array(row.coords.slice().buffer)
   const kept: number[] = []
-  for (let i = 0; i < n - 1; i += stride) kept.push(i)
-  kept.push(n - 1)
+  const keepPart = (from: number, to: number): void => {
+    for (let i = from; i < to - 1; i += stride) kept.push(i)
+    if (to - 1 >= from) kept.push(to - 1)
+  }
+  let partStart = 0
+  for (let i = 0; i < n; i++) {
+    if (Number.isNaN(src[i * 2]!)) {
+      keepPart(partStart, i)
+      kept.push(i) // the break itself
+      partStart = i + 1
+    }
+  }
+  keepPart(partStart, n)
   const out = new Float32Array(kept.length * 2)
   for (let i = 0; i < kept.length; i++) {
     out[i * 2] = src[kept[i]! * 2]!
