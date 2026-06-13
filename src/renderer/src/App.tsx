@@ -83,6 +83,24 @@ export function App(): React.JSX.Element {
       }
       controllerRef.current = controller
       controller.setEditListener((s) => setEditSession(s))
+      // Splitting is destructive (commits edits, restructures): confirm here,
+      // then refresh dataset stats since point counts change.
+      controller.setSplitRequestListener((segmentId, seq) => {
+        if (
+          !window.confirm(
+            'Split this track into two at the selected point? This commits the current edits and cannot be undone.'
+          )
+        ) {
+          return
+        }
+        setEditBusy(true)
+        setEditError(null)
+        void controller.commitSplit(segmentId, seq).then((res) => {
+          setEditBusy(false)
+          if (res.ok) void refreshData()
+          else setEditError(res.error ?? 'split failed')
+        })
+      })
       await refreshData()
       void window.api.getRailCoverage().then((cov) => {
         if (!disposed) setRailCoverage(cov)

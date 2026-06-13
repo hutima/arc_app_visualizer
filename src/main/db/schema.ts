@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS rail_matched_geom (
 CREATE TABLE IF NOT EXISTS segment_edits (
   segment_id   INTEGER NOT NULL,
   seq          REAL NOT NULL,
-  kind         INTEGER NOT NULL DEFAULT 0, -- 0 = move, 1 = insert
+  kind         INTEGER NOT NULL DEFAULT 0, -- 0 = move, 1 = insert, 2 = delete
   lat          REAL NOT NULL,
   lon          REAL NOT NULL,
   edited_at_ms INTEGER NOT NULL,

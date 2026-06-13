@@ -1,8 +1,9 @@
 /**
- * User track editing: moved/inserted vertices stored as an overlay on raw
- * points (`segment_edits`), keyed by seq — moves reuse the raw point's
- * integer seq, inserts take a fractional seq between their neighbors, so the
- * overlay merges back deterministically without renumbering anything.
+ * User track editing: moved/inserted/deleted vertices stored as an overlay on
+ * raw points (`segment_edits`), keyed by seq — moves reuse the raw point's
+ * integer seq, inserts take a fractional seq between their neighbors, deletes
+ * mark an integer seq for removal — so the overlay merges back
+ * deterministically without renumbering anything.
  *
  * Two save modes:
  * - draft: only the overlay changes; raw points stay untouched and a revert
@@ -10,6 +11,9 @@
  * - permanent: the overlay is baked into `points` (renumbered, flagged
  *   points preserved in place) and cleared. The one sanctioned mutation of
  *   raw points, and only ever on the user's explicit request.
+ *
+ * Splitting a track is a structural permanent change: it commits the overlay
+ * and divides the segment's effective points into two segments.
  *
  * Either way the segment's display geometry and bounds are rebuilt and its
  * cached matched geometry is dropped, and `prepareEffectivePoints` is the
@@ -22,6 +26,7 @@ import { DETAIL_LEVELS } from '../../shared/displayDetail'
 import { emptyBounds, extendBounds, boundsValid } from '../../shared/geo'
 import type {
   EditablePoint,
+  EditKind,
   EditSaveMode,
   SegmentEditInput,
   SegmentEditState
@@ -29,6 +34,10 @@ import type {
 
 const KIND_MOVE = 0
 const KIND_INSERT = 1
+const KIND_DELETE = 2
+
+const kindToInt = (kind: EditKind): number =>
+  kind === 'insert' ? KIND_INSERT : kind === 'delete' ? KIND_DELETE : KIND_MOVE
 
 export interface CleanPoint {
   seq: number
@@ -44,12 +53,26 @@ interface EditRow {
   lon: number
 }
 
+/** Raw point row with the columns baking/splitting must preserve. */
+interface RawRow {
+  seq: number
+  tsMs: number | null
+  lat: number | null
+  lon: number | null
+  ele: number | null
+  flags: number
+}
+
+/** A raw row after the overlay is applied; `inserted` drives ts interpolation. */
+interface MergedRow extends RawRow {
+  inserted: boolean
+}
+
 /**
- * Merge a segment's clean raw points with its edit overlay. An edit landing
- * exactly on a raw seq overrides that point regardless of its stored kind
- * (defensive — insert seqs are always strictly between existing ones);
- * remaining edits become inserted vertices, timestamped by interpolation so
- * the matcher's time-plausibility gates keep working on edited rides.
+ * Merge a segment's clean raw points with its edit overlay. A move overrides
+ * the point at its seq, a delete drops it, and remaining inserts become new
+ * vertices timestamped by interpolation so the matcher's time-plausibility
+ * gates keep working on edited rides.
  */
 export function applyEdits(points: CleanPoint[], edits: EditRow[]): EditablePoint[] {
   if (edits.length === 0) {
@@ -60,14 +83,20 @@ export function applyEdits(points: CleanPoint[], edits: EditRow[]): EditablePoin
   for (const p of points) {
     const e = bySeq.get(p.seq)
     if (e) {
-      out.push({ seq: p.seq, lat: e.lat, lon: e.lon, tsMs: p.tsMs, edit: 'move' })
       bySeq.delete(p.seq)
-    } else {
-      out.push({ seq: p.seq, lat: p.lat, lon: p.lon, tsMs: p.tsMs, edit: null })
+      if (e.kind === KIND_DELETE) continue
+      if (e.kind === KIND_MOVE) {
+        out.push({ seq: p.seq, lat: e.lat, lon: e.lon, tsMs: p.tsMs, edit: 'move' })
+        continue
+      }
     }
+    out.push({ seq: p.seq, lat: p.lat, lon: p.lon, tsMs: p.tsMs, edit: null })
   }
+  // Anything left is an insert (a stray delete/move on a missing seq is inert).
   for (const e of bySeq.values()) {
-    out.push({ seq: e.seq, lat: e.lat, lon: e.lon, tsMs: null, edit: 'insert' })
+    if (e.kind === KIND_INSERT) {
+      out.push({ seq: e.seq, lat: e.lat, lon: e.lon, tsMs: null, edit: 'insert' })
+    }
   }
   out.sort((a, b) => a.seq - b.seq)
   interpolateInsertTimes(out)
@@ -79,25 +108,33 @@ function interpolateInsertTimes(pts: EditablePoint[]): void {
   for (let i = 0; i < pts.length; i++) {
     const p = pts[i]!
     if (p.edit !== 'insert' || p.tsMs !== null) continue
-    let prev: EditablePoint | null = null
-    for (let j = i - 1; j >= 0; j--) {
-      if (pts[j]!.tsMs !== null) {
-        prev = pts[j]!
-        break
-      }
-    }
-    let next: EditablePoint | null = null
-    for (let j = i + 1; j < pts.length; j++) {
-      if (pts[j]!.tsMs !== null) {
-        next = pts[j]!
-        break
-      }
-    }
-    if (prev && next && next.seq !== prev.seq) {
-      const f = (p.seq - prev.seq) / (next.seq - prev.seq)
-      p.tsMs = Math.round(prev.tsMs! + (next.tsMs! - prev.tsMs!) * f)
+    const ts = lerpTime(pts, i)
+    if (ts !== null) p.tsMs = ts
+  }
+}
+
+/** Interpolate a timestamp at index i from the nearest dated neighbors by seq. */
+function lerpTime(
+  pts: ReadonlyArray<{ seq: number; tsMs: number | null }>,
+  i: number
+): number | null {
+  let prev: { seq: number; tsMs: number | null } | null = null
+  for (let j = i - 1; j >= 0; j--) {
+    if (pts[j]!.tsMs !== null) {
+      prev = pts[j]!
+      break
     }
   }
+  let next: { seq: number; tsMs: number | null } | null = null
+  for (let j = i + 1; j < pts.length; j++) {
+    if (pts[j]!.tsMs !== null) {
+      next = pts[j]!
+      break
+    }
+  }
+  if (!prev || !next || next.seq === prev.seq) return null
+  const f = (pts[i]!.seq - prev.seq) / (next.seq - prev.seq)
+  return Math.round(prev.tsMs! + (next.tsMs! - prev.tsMs!) * f)
 }
 
 /**
@@ -128,26 +165,58 @@ export function getSegmentEditState(db: DatabaseSync, segmentId: number): Segmen
     | undefined
   if (!seg) return null
   const points = prepareEffectivePoints(db)(segmentId)
-  const draft = db
-    .prepare('SELECT COUNT(*) AS n FROM segment_edits WHERE segment_id = ?')
-    .get(segmentId) as { n: number }
-  return { segmentId, type: seg.type, points, hasDraft: draft.n > 0 }
+  const overlay = db
+    .prepare('SELECT seq, kind FROM segment_edits WHERE segment_id = ?')
+    .all(segmentId) as unknown as Array<{ seq: number; kind: number }>
+  const deletedSeqs = overlay.filter((e) => e.kind === KIND_DELETE).map((e) => e.seq)
+  return { segmentId, type: seg.type, points, hasDraft: overlay.length > 0, deletedSeqs }
 }
 
 function validOverlay(edits: SegmentEditInput[]): boolean {
-  return edits.every(
-    (e) =>
-      Number.isFinite(e.seq) &&
+  return edits.every((e) => {
+    if (!Number.isFinite(e.seq)) return false
+    if (e.kind === 'delete') return true // coords irrelevant; only the seq matters
+    if (e.kind !== 'move' && e.kind !== 'insert') return false
+    return (
       Number.isFinite(e.lat) && Math.abs(e.lat) <= 90 &&
-      Number.isFinite(e.lon) && Math.abs(e.lon) <= 180 &&
-      (e.kind === 'move' || e.kind === 'insert')
-  )
+      Number.isFinite(e.lon) && Math.abs(e.lon) <= 180
+    )
+  })
+}
+
+const toEditRow = (e: SegmentEditInput): EditRow => ({
+  seq: e.seq,
+  kind: kindToInt(e.kind),
+  lat: e.lat,
+  lon: e.lon
+})
+
+function loadCleanPoints(db: DatabaseSync, segmentId: number): CleanPoint[] {
+  return db.prepare(`
+    SELECT seq, lon, lat, ts_ms AS tsMs FROM points
+    WHERE segment_id = ? AND flags = 0 AND lat IS NOT NULL AND lon IS NOT NULL
+    ORDER BY seq
+  `).all(segmentId) as unknown as CleanPoint[]
+}
+
+function loadRawRows(db: DatabaseSync, segmentId: number): RawRow[] {
+  return db.prepare(`
+    SELECT seq, ts_ms AS tsMs, lat, lon, ele, flags FROM points
+    WHERE segment_id = ? ORDER BY seq
+  `).all(segmentId) as unknown as RawRow[]
+}
+
+function loadOverlay(db: DatabaseSync, segmentId: number): EditRow[] {
+  return db
+    .prepare('SELECT seq, kind, lat, lon FROM segment_edits WHERE segment_id = ?')
+    .all(segmentId) as unknown as EditRow[]
 }
 
 /**
  * Replace a segment's edit overlay with the given rows (the renderer always
  * sends the complete overlay, so re-saving a re-edited draft round-trips).
- * Permanent mode then bakes the overlay into the raw points.
+ * Rejected if it would leave fewer than two drawable points. Permanent mode
+ * then bakes the overlay into the raw points.
  */
 export function saveSegmentEdits(
   db: DatabaseSync,
@@ -158,6 +227,10 @@ export function saveSegmentEdits(
   if (!validOverlay(edits)) throw new Error('invalid edit payload')
   const seg = db.prepare('SELECT id FROM segments WHERE id = ?').get(segmentId)
   if (!seg) throw new Error(`unknown segment ${segmentId}`)
+  // A track must stay drawable: never let edits strand it below two points.
+  const effective = applyEdits(loadCleanPoints(db, segmentId), edits.map(toEditRow))
+  if (effective.length < 2) throw new Error('edit would leave fewer than 2 points')
+
   db.exec('BEGIN')
   try {
     db.prepare('DELETE FROM segment_edits WHERE segment_id = ?').run(segmentId)
@@ -165,11 +238,10 @@ export function saveSegmentEdits(
       'INSERT INTO segment_edits (segment_id, seq, kind, lat, lon, edited_at_ms) VALUES (?, ?, ?, ?, ?, ?)'
     )
     const now = Date.now()
-    for (const e of edits) {
-      ins.run(segmentId, e.seq, e.kind === 'insert' ? KIND_INSERT : KIND_MOVE, e.lat, e.lon, now)
-    }
+    for (const e of edits) ins.run(segmentId, e.seq, kindToInt(e.kind), e.lat, e.lon, now)
+    // Permanent baking rewrites points and rebuilds; draft just rebuilds.
     if (mode === 'permanent') bakeEditsIntoPoints(db, segmentId)
-    rebuildDerivedGeometry(db, segmentId)
+    else rebuildDerivedGeometry(db, segmentId)
     db.exec('COMMIT')
   } catch (err) {
     db.exec('ROLLBACK')
@@ -191,59 +263,120 @@ export function revertSegmentEdits(db: DatabaseSync, segmentId: number): void {
 }
 
 /**
- * Rewrite the segment's points with the overlay applied: moves replace
- * coordinates in place, inserts are interleaved by seq, flagged (cleaned)
- * points survive at their original relative position, and the result is
- * renumbered 0..n-1. Inserted points get the interpolated timestamps the
- * matcher already sees.
+ * Split a segment into two at one of its effective points (identified by its
+ * seq, which must be an original raw point — splitting at an inserted vertex
+ * isn't supported). The split point belongs to both halves so the lines stay
+ * contiguous; the current overlay is committed in the process. Returns the new
+ * segment's id.
  */
-function bakeEditsIntoPoints(db: DatabaseSync, segmentId: number): void {
-  const overlay = db
-    .prepare('SELECT seq, kind, lat, lon FROM segment_edits WHERE segment_id = ?')
-    .all(segmentId) as unknown as EditRow[]
-  if (overlay.length === 0) return
-  const raw = db.prepare(`
-    SELECT seq, ts_ms AS tsMs, lat, lon, ele, flags FROM points
-    WHERE segment_id = ? ORDER BY seq
-  `).all(segmentId) as unknown as Array<{
-    seq: number
-    tsMs: number | null
-    lat: number | null
-    lon: number | null
-    ele: number | null
-    flags: number
-  }>
+export function splitSegment(db: DatabaseSync, segmentId: number, atSeq: number): number {
+  const seg = db.prepare('SELECT track_id, file_id, type FROM segments WHERE id = ?').get(segmentId) as
+    | { track_id: number; file_id: number; type: string }
+    | undefined
+  if (!seg) throw new Error(`unknown segment ${segmentId}`)
+  if (!Number.isInteger(atSeq)) throw new Error('split point must be an original track point')
 
-  const clean: CleanPoint[] = []
+  db.exec('BEGIN')
+  try {
+    const merged = mergeOverlay(loadRawRows(db, segmentId), loadOverlay(db, segmentId))
+    if (!merged.some((r) => r.seq === atSeq)) throw new Error('split point not found')
+    // Shared boundary vertex: it ends the first half and starts the second.
+    const first = merged.filter((r) => r.seq <= atSeq)
+    const second = merged.filter((r) => r.seq >= atSeq)
+    if (drawableCount(first) < 2 || drawableCount(second) < 2) {
+      throw new Error('split would leave a piece with too few points')
+    }
+    const newRes = db.prepare(`
+      INSERT INTO segments
+        (track_id, file_id, type, start_ts_ms, end_ts_ms, point_count, clean_point_count,
+         min_lat, min_lon, max_lat, max_lon, flags)
+      VALUES (?, ?, ?, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL, 0)
+    `).run(seg.track_id, seg.file_id, seg.type)
+    const newId = Number(newRes.lastInsertRowid)
+    writeMergedRows(db, segmentId, first)
+    writeMergedRows(db, newId, second)
+    db.exec('COMMIT')
+    return newId
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+const drawableCount = (rows: RawRow[]): number =>
+  rows.filter((r) => r.flags === 0 && r.lat !== null && r.lon !== null).length
+
+/**
+ * Apply the overlay to a segment's raw rows, preserving flags and elevation:
+ * moves override coordinates in place, deletes drop the row, inserts are
+ * interleaved by their fractional seq with an interpolated timestamp. Result
+ * is sorted by seq (not yet renumbered).
+ */
+function mergeOverlay(raw: RawRow[], overlay: EditRow[]): MergedRow[] {
+  const bySeq = new Map(overlay.map((e) => [e.seq, e]))
+  const out: MergedRow[] = []
   for (const r of raw) {
-    if (r.flags === 0 && r.lat !== null && r.lon !== null) {
-      clean.push({ seq: r.seq, lat: r.lat, lon: r.lon, tsMs: r.tsMs })
+    const e = bySeq.get(r.seq)
+    if (e) {
+      bySeq.delete(r.seq)
+      if (e.kind === KIND_DELETE) continue
+      if (e.kind === KIND_MOVE) {
+        // A user-placed point is clean by definition.
+        out.push({ ...r, lat: e.lat, lon: e.lon, flags: 0, inserted: false })
+        continue
+      }
+    }
+    out.push({ ...r, inserted: false })
+  }
+  for (const e of bySeq.values()) {
+    if (e.kind === KIND_INSERT) {
+      out.push({ seq: e.seq, tsMs: null, lat: e.lat, lon: e.lon, ele: null, flags: 0, inserted: true })
     }
   }
-  const tsBySeq = new Map(applyEdits(clean, overlay).map((p) => [p.seq, p.tsMs]))
-
-  const bySeq = new Map(overlay.map((e) => [e.seq, e]))
-  const merged = raw.map((r) => {
-    const e = bySeq.get(r.seq)
-    if (!e) return r
-    bySeq.delete(r.seq)
-    // A user-placed point is clean by definition.
-    return { ...r, lat: e.lat, lon: e.lon, flags: 0 }
-  })
-  for (const e of bySeq.values()) {
-    merged.push({ seq: e.seq, tsMs: tsBySeq.get(e.seq) ?? null, lat: e.lat, lon: e.lon, ele: null, flags: 0 })
+  out.sort((a, b) => a.seq - b.seq)
+  for (let i = 0; i < out.length; i++) {
+    if (out[i]!.inserted && out[i]!.tsMs === null) out[i]!.tsMs = lerpTime(out, i)
   }
-  merged.sort((a, b) => a.seq - b.seq)
+  return out
+}
 
+/**
+ * Rewrite a segment's points from merged rows: renumber 0..n-1, recompute
+ * counts and the timestamp range, clear the overlay, and rebuild derived
+ * geometry. Used by both permanent baking and splitting.
+ */
+function writeMergedRows(db: DatabaseSync, segmentId: number, rows: MergedRow[]): void {
   db.prepare('DELETE FROM points WHERE segment_id = ?').run(segmentId)
+  db.prepare('DELETE FROM segment_edits WHERE segment_id = ?').run(segmentId)
   const ins = db.prepare(
     'INSERT INTO points (segment_id, seq, ts_ms, lat, lon, ele, flags) VALUES (?, ?, ?, ?, ?, ?, ?)'
   )
-  merged.forEach((r, i) => ins.run(segmentId, i, r.tsMs, r.lat, r.lon, r.ele, r.flags))
-  db.prepare('DELETE FROM segment_edits WHERE segment_id = ?').run(segmentId)
-  const cleanCount = merged.filter((r) => r.flags === 0 && r.lat !== null && r.lon !== null).length
-  db.prepare('UPDATE segments SET point_count = ?, clean_point_count = ? WHERE id = ?')
-    .run(merged.length, cleanCount, segmentId)
+  rows.forEach((r, i) => ins.run(segmentId, i, r.tsMs, r.lat, r.lon, r.ele, r.flags))
+
+  let cleanCount = 0
+  let start: number | null = null
+  let end: number | null = null
+  for (const r of rows) {
+    if (r.flags !== 0 || r.lat === null || r.lon === null) continue
+    cleanCount++
+    if (r.tsMs === null) continue
+    if (start === null || r.tsMs < start) start = r.tsMs
+    if (end === null || r.tsMs > end) end = r.tsMs
+  }
+  db.prepare(
+    'UPDATE segments SET point_count = ?, clean_point_count = ?, start_ts_ms = ?, end_ts_ms = ? WHERE id = ?'
+  ).run(rows.length, cleanCount, start, end, segmentId)
+  rebuildDerivedGeometry(db, segmentId)
+}
+
+/**
+ * Rewrite the segment's points with the overlay applied (renumbered, flagged
+ * points preserved). The one sanctioned raw-point mutation.
+ */
+function bakeEditsIntoPoints(db: DatabaseSync, segmentId: number): void {
+  const overlay = loadOverlay(db, segmentId)
+  if (overlay.length === 0) return
+  writeMergedRows(db, segmentId, mergeOverlay(loadRawRows(db, segmentId), overlay))
 }
 
 /**

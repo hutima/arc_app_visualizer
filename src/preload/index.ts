@@ -35,7 +35,8 @@ const api: ArcApi = {
   getSegmentEditState: (segmentId) => ipcRenderer.invoke('edits:getSegment', segmentId),
   saveSegmentEdits: (segmentId, edits, mode) =>
     ipcRenderer.invoke('edits:save', segmentId, edits, mode),
-  revertSegmentEdits: (segmentId) => ipcRenderer.invoke('edits:revert', segmentId)
+  revertSegmentEdits: (segmentId) => ipcRenderer.invoke('edits:revert', segmentId),
+  splitSegment: (segmentId, seq) => ipcRenderer.invoke('edits:split', segmentId, seq)
 }
 
 contextBridge.exposeInMainWorld('api', api)

@@ -94,15 +94,22 @@ tests/         vitest; *.test.ts mirror the module they cover
   never mutated. The one sanctioned exception is an explicit **permanent**
   track-edit save (`editStore.ts`) — drafts exist precisely so originals
   survive by default.
-- **Track editing** (`db/editStore.ts` + the Track editing panel): user-dragged
-  / inserted vertices live in `segment_edits`, an overlay keyed by seq (moves
-  reuse the raw point's integer seq, inserts take fractional seqs). Draft saves
-  keep raw points untouched and revertible; permanent saves bake the overlay
-  into `points` (renumbered, flagged points preserved). Saving rebuilds the
-  segment's `display_geometries` + bbox and drops its cached
-  `rail_matched_geom`. `prepareEffectivePoints` is the raw-point read path for
-  the match pass and 'all points' queries, so **edits always apply before
-  rail/road snapping** (re-run matching to re-snap an edited ride).
+- **Track editing** (`db/editStore.ts` + the Track editing panel): user edits
+  live in `segment_edits`, an overlay keyed by seq — moves reuse the raw
+  point's integer seq, inserts take a fractional seq between neighbors, deletes
+  flag an integer seq for removal (`kind` 0/1/2). The map gestures: drag a
+  vertex to move, **click the line** to insert a point between two vertices
+  (seq + timestamp interpolated by the click's fraction along that segment, so
+  it's correctly time-ordered), alt-click to delete, shift-click to **split**
+  the segment in two. Draft saves keep raw points untouched and revertible;
+  permanent saves bake the overlay into `points` (renumbered, flagged points
+  preserved). Splitting is a permanent structural op (`splitSegment`): it
+  commits the overlay and divides the effective points into two segments at a
+  shared boundary vertex. Any save rebuilds the segment's `display_geometries`
+  + bbox and drops its cached `rail_matched_geom`. `prepareEffectivePoints` is
+  the raw-point read path for the match pass and 'all points' queries, so
+  **edits always apply before rail/road snapping** (re-run matching to re-snap
+  an edited ride). Edit geometry lives in `MapController`, never React state.
 
 ### Schema migrations
 

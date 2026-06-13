@@ -1,7 +1,8 @@
 /**
  * Track editing: the overlay merge (pure), draft persistence + derived
  * geometry rebuild, the effective-point path the matcher and raw-detail
- * queries consume, revert, and permanent baking into raw points.
+ * queries consume, revert, permanent baking into raw points, point deletion,
+ * and splitting a segment in two.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import type { DatabaseSync } from 'node:sqlite'
@@ -12,6 +13,7 @@ import {
   prepareEffectivePoints,
   revertSegmentEdits,
   saveSegmentEdits,
+  splitSegment,
   type CleanPoint
 } from '../src/main/db/editStore'
 import { queryViewportSegments } from '../src/main/db/queries'
@@ -115,6 +117,11 @@ describe('applyEdits (pure overlay merge)', () => {
       [{ seq: 0.5, kind: 1, lat: 0, lon: 0.005 }]
     )
     expect(fringe[1]!.tsMs).toBeNull()
+  })
+
+  it('deletes drop the point at their seq', () => {
+    const out = applyEdits(base, [{ seq: 1, kind: 2, lat: 0, lon: 0 }])
+    expect(out.map((p) => p.seq)).toEqual([0, 2, 3])
   })
 })
 
@@ -258,5 +265,120 @@ describe('permanent save', () => {
       'SELECT lat FROM points WHERE segment_id = ? AND seq = 1'
     ).get(segId) as { lat: number }
     expect(moved.lat).toBeCloseTo(0.05, 9)
+  })
+})
+
+const DELETE = { seq: 3, lat: 0, lon: 0.03, kind: 'delete' as const }
+
+describe('point deletion', () => {
+  it('drops the point from the effective line and reports it in deletedSeqs', () => {
+    const segId = seedSegment()
+    saveSegmentEdits(db, segId, [DELETE], 'draft')
+
+    const state = getSegmentEditState(db, segId)!
+    expect(state.deletedSeqs).toEqual([3])
+    // Clean seqs were 0,1,3,4; deleting 3 leaves 0,1,4.
+    expect(state.points.map((p) => p.seq)).toEqual([0, 1, 4])
+    // Draft leaves raw points intact.
+    const raw = db.prepare('SELECT COUNT(*) AS n FROM points WHERE segment_id = ?').get(segId) as {
+      n: number
+    }
+    expect(raw.n).toBe(5)
+  })
+
+  it('refuses an edit that would strand the track below two points', () => {
+    const segId = seedSegment()
+    expect(() =>
+      saveSegmentEdits(
+        db,
+        segId,
+        [
+          { seq: 0, lat: 0, lon: 0, kind: 'delete' },
+          { seq: 1, lat: 0, lon: 0, kind: 'delete' },
+          { seq: 3, lat: 0, lon: 0, kind: 'delete' }
+        ],
+        'draft'
+      )
+    ).toThrow(/fewer than 2/)
+  })
+
+  it('bakes deletes permanently, dropping the raw point', () => {
+    const segId = seedSegment()
+    saveSegmentEdits(db, segId, [DELETE], 'permanent')
+    const lons = db.prepare(
+      'SELECT lon FROM points WHERE segment_id = ? AND flags = 0 ORDER BY seq'
+    ).all(segId) as Array<{ lon: number }>
+    // 0, 0.01, (0.02 spike flagged out), 0.03 deleted, 0.04 → 0, 0.01, 0.04.
+    expect(lons.map((r) => r.lon)).toEqual([0, 0.01, 0.04])
+  })
+})
+
+describe('split', () => {
+  it('divides a segment into two at a raw point, sharing the boundary vertex', () => {
+    const segId = seedSegment()
+    const before = db.prepare('SELECT track_id, file_id FROM segments WHERE id = ?').get(segId) as {
+      track_id: number
+      file_id: number
+    }
+    const newId = splitSegment(db, segId, 3)
+
+    const first = db.prepare(
+      'SELECT seq, lon, flags FROM points WHERE segment_id = ? ORDER BY seq'
+    ).all(segId) as Array<{ seq: number; lon: number; flags: number }>
+    const second = db.prepare(
+      'SELECT seq, lon, flags FROM points WHERE segment_id = ? ORDER BY seq'
+    ).all(newId) as Array<{ seq: number; lon: number; flags: number }>
+
+    // First half keeps seqs 0..3 (the flagged spike preserved), renumbered.
+    expect(first.map((r) => r.lon)).toEqual([0, 0.01, 0.02, 0.03])
+    expect(first[2]!.flags).toBe(1)
+    // Second half starts at the shared split point (lon 0.03) then 0.04.
+    expect(second.map((r) => r.lon)).toEqual([0.03, 0.04])
+
+    const newSeg = db.prepare(
+      'SELECT track_id, file_id, type, point_count, clean_point_count FROM segments WHERE id = ?'
+    ).get(newId) as {
+      track_id: number
+      file_id: number
+      type: string
+      point_count: number
+      clean_point_count: number
+    }
+    expect(newSeg).toMatchObject({
+      track_id: before.track_id,
+      file_id: before.file_id,
+      type: 'walking',
+      point_count: 2,
+      clean_point_count: 2
+    })
+    // Both halves drew display geometry.
+    for (const id of [segId, newId]) {
+      const g = db.prepare(
+        'SELECT COUNT(*) AS n FROM display_geometries WHERE segment_id = ?'
+      ).get(id) as { n: number }
+      expect(g.n).toBeGreaterThan(0)
+    }
+  })
+
+  it('commits pending edits into the correct half', () => {
+    const segId = seedSegment()
+    // Move seq 4 well north, then split at seq 1.
+    saveSegmentEdits(db, segId, [{ seq: 4, lat: 0.2, lon: 0.04, kind: 'move' }], 'draft')
+    const newId = splitSegment(db, segId, 1)
+
+    const second = db.prepare(
+      'SELECT lat, lon FROM points WHERE segment_id = ? AND flags = 0 ORDER BY seq'
+    ).all(newId) as Array<{ lat: number; lon: number }>
+    // Second half (seq >= 1): 0.01, (0.02 flagged out), 0.03, moved 0.04@lat0.2.
+    expect(second.at(-1)).toMatchObject({ lat: 0.2, lon: 0.04 })
+    // Overlay consumed by the split.
+    expect(getSegmentEditState(db, segId)!.hasDraft).toBe(false)
+  })
+
+  it('rejects an inserted (non-integer) seq and out-of-range splits', () => {
+    const segId = seedSegment()
+    expect(() => splitSegment(db, segId, 1.5)).toThrow(/original track point/)
+    expect(() => splitSegment(db, segId, 0)).toThrow(/too few points/)
+    expect(() => splitSegment(db, 99999, 1)).toThrow(/unknown segment/)
   })
 })
