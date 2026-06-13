@@ -58,8 +58,16 @@ const EDIT_VERTEX_LAYER = 'arc-edit-vertices-circle'
 const MERGE_CAND_LAYER = 'arc-merge-candidates-line'
 const MERGE_SEL_LAYER = 'arc-merge-selected-line'
 
-/** Click within this many screen px of the edit line inserts a vertex. */
-const LINE_INSERT_TOLERANCE_PX = 10
+/**
+ * Hit radii (screen px) for the point-edit tool. Grabbing an existing vertex
+ * takes priority and gets the larger radius, so a click near a point moves it
+ * rather than inserting a new one on the line; only clicks clearly between
+ * points (within the smaller line radius, outside every vertex's radius)
+ * insert. Endpoints have no insert fallback, so the generous grab radius is
+ * what makes them draggable at all.
+ */
+const VERTEX_GRAB_TOLERANCE_PX = 13
+const LINE_INSERT_TOLERANCE_PX = 8
 
 /** Editing sub-tool: per-point vertex editing vs stitching tracks together. */
 export type EditTool = 'points' | 'merge'
@@ -267,7 +275,8 @@ export class MapController {
           '#f97316',
           '#ffffff'
         ] as unknown as ExpressionSpecification,
-        'circle-radius': 5,
+        // A touch larger than before, so the grab target reads clearly.
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 5, 16, 7] as unknown as ExpressionSpecification,
         'circle-stroke-color': '#000000',
         'circle-stroke-width': 1
       }
@@ -305,15 +314,15 @@ export class MapController {
 
   /**
    * Delegated listeners survive layer re-adds (they resolve by id at event
-   * time), so bind them once — a basemap switch must not duplicate. Inserting
-   * is handled on the map's own mousedown (not a layer event): the edit line
-   * is thin, so we hit-test by pixel distance against a comfortable tolerance.
+   * time), so bind them once — a basemap switch must not duplicate. All
+   * point-edit hit-testing (grab a vertex vs insert on the line) happens on the
+   * map's own mousedown in pixel space, not via layer events: that lets the
+   * vertex grab radius be larger than the rendered circle and win over inserts.
    */
   private bindEditHandlers(): void {
     if (this.editHandlersBound) return
     this.editHandlersBound = true
     this.map.on('click', TRACKS_LAYER, (e) => this.handleTrackClick(e))
-    this.map.on('mousedown', EDIT_VERTEX_LAYER, (e) => this.handleVertexDown(e))
     this.map.on('mousedown', (e) => this.handleMapDown(e))
     this.map.on('mousemove', (e) => this.updateEditCursor(e))
   }
@@ -616,41 +625,49 @@ export class MapController {
   }
 
   /**
-   * Mousedown on a vertex: shift splits the track here, alt deletes the point,
-   * otherwise begin a move-drag. preventDefault keeps the map from panning.
-   */
-  private handleVertexDown(e: MapLayerMouseEvent): void {
-    if (this.editingId === null) return
-    const idx = Number(e.features?.[0]?.properties?.idx)
-    if (!Number.isInteger(idx) || idx < 0 || idx >= this.editPts.length) return
-    if (e.originalEvent.shiftKey) {
-      e.preventDefault()
-      this.requestSplitAt(idx)
-      return
-    }
-    if (e.originalEvent.altKey) {
-      e.preventDefault()
-      this.deleteVertex(idx)
-      return
-    }
-    e.preventDefault()
-    this.beginVertexDrag(idx)
-  }
-
-  /**
-   * Mousedown anywhere on the map while editing: if it lands on the editable
-   * line (and not on a vertex, which has its own handler), insert a point
-   * there between the two bracketing vertices and start dragging it. Clicks
-   * away from the line fall through to normal map panning.
+   * Mousedown while editing, resolved by pixel distance with the vertex grab
+   * winning over a line insert: a click within the (larger) grab radius of an
+   * existing point grabs it — shift splits there, alt deletes, otherwise a
+   * move-drag; only a click clearly on the line between points inserts. Clicks
+   * away from both fall through to normal map panning.
    */
   private handleMapDown(e: MapMouseEvent): void {
     if (!this.editMode || this.editingId === null) return
-    if (this.map.queryRenderedFeatures(e.point, { layers: [EDIT_VERTEX_LAYER] }).length > 0) return
+    const v = this.nearestEditVertex(e.point)
+    if (v && v.distPx <= VERTEX_GRAB_TOLERANCE_PX) {
+      e.preventDefault()
+      this.grabVertex(v.idx, e.originalEvent)
+      return
+    }
     const hit = this.nearestEditSegment(e.point)
     if (!hit || hit.distPx > LINE_INSERT_TOLERANCE_PX) return
     e.preventDefault()
     const idx = this.insertOnSegment(hit)
     if (idx !== null) this.beginVertexDrag(idx)
+  }
+
+  /** Act on a grabbed vertex: shift = split, alt = delete, else move-drag. */
+  private grabVertex(idx: number, oe: MouseEvent): void {
+    if (oe.shiftKey) {
+      this.requestSplitAt(idx)
+      return
+    }
+    if (oe.altKey) {
+      this.deleteVertex(idx)
+      return
+    }
+    this.beginVertexDrag(idx)
+  }
+
+  /** Nearest editable vertex to a screen point, in pixels (for grab/cursor). */
+  private nearestEditVertex(point: { x: number; y: number }): { idx: number; distPx: number } | null {
+    let best: { idx: number; distPx: number } | null = null
+    for (let i = 0; i < this.editPts.length; i++) {
+      const p = this.map.project([this.editPts[i]!.lon, this.editPts[i]!.lat])
+      const distPx = Math.hypot(point.x - p.x, point.y - p.y)
+      if (!best || distPx < best.distPx) best = { idx: i, distPx }
+    }
+    return best
   }
 
   /**
@@ -740,12 +757,16 @@ export class MapController {
     this.map.once('mouseup', onUp)
   }
 
-  /** Cursor feedback in edit mode: move over a vertex, copy near the line. */
+  /**
+   * Cursor feedback in edit mode, matching the same vertex-first hit-test the
+   * click uses: move over a grabbable point, copy where a click would insert.
+   */
   private updateEditCursor(e: MapMouseEvent): void {
     if (!this.editMode) return
     const canvas = this.map.getCanvas()
     if (this.editingId !== null) {
-      if (this.map.queryRenderedFeatures(e.point, { layers: [EDIT_VERTEX_LAYER] }).length > 0) {
+      const v = this.nearestEditVertex(e.point)
+      if (v && v.distPx <= VERTEX_GRAB_TOLERANCE_PX) {
         canvas.style.cursor = 'move'
         return
       }
