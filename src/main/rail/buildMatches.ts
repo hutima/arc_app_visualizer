@@ -23,6 +23,7 @@ import {
   type RailGraph
 } from './snapRail'
 import { coverageBoxes, loadAllRail, clearMatchedGeom } from '../db/railStore'
+import { prepareEffectivePoints } from '../db/editStore'
 
 const CHUNK = 150
 
@@ -99,12 +100,10 @@ export async function rebuildRailMatches(
      ORDER BY id`
   ).all(...typeList, u.minLat, u.maxLat, u.minLon, u.maxLon) as Array<{ id: number; type: string }>
 
-  // Timestamps feed the matcher's time-plausibility gate (wormhole rejection).
-  const pointsStmt = db.prepare(
-    `SELECT lon, lat, ts_ms FROM points
-     WHERE segment_id = ? AND flags = 0 AND lat IS NOT NULL AND lon IS NOT NULL
-     ORDER BY seq`
-  )
+  // Effective points = clean raw + user track edits, so manual fixes apply
+  // before matching; timestamps (interpolated for inserted vertices) feed the
+  // matcher's time-plausibility gate (wormhole rejection).
+  const effectivePoints = prepareEffectivePoints(db)
   const insertStmt = db.prepare(
     'INSERT INTO rail_matched_geom (segment_id, detail, point_count, coords) VALUES (?, ?, ?, ?)'
   )
@@ -115,14 +114,14 @@ export async function rebuildRailMatches(
     db.exec('BEGIN')
     try {
       for (let i = start; i < end; i++) {
-        const pts = pointsStmt.all(segs[i]!.id) as Array<{ lon: number; lat: number; ts_ms: number | null }>
+        const pts = effectivePoints(segs[i]!.id)
         if (pts.length < 2) continue
         const coords = new Float32Array(pts.length * 2)
         const times = new Float64Array(pts.length)
         for (let k = 0; k < pts.length; k++) {
           coords[k * 2] = pts[k]!.lon
           coords[k * 2 + 1] = pts[k]!.lat
-          times[k] = pts[k]!.ts_ms == null ? NaN : Number(pts[k]!.ts_ms)
+          times[k] = pts[k]!.tsMs == null ? NaN : Number(pts[k]!.tsMs)
         }
         // Rail rides are fully map-matched; road trips only get long GPS
         // gaps bridged through mapped tunnels (everything else stays raw).

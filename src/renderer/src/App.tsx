@@ -8,10 +8,16 @@ import type {
   TrackColorMode
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
-import type { OsmLayer, RailCoverage, RailMatchProgress, RailTuning } from '../../shared/types'
+import type {
+  EditSaveMode,
+  OsmLayer,
+  RailCoverage,
+  RailMatchProgress,
+  RailTuning
+} from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { yearRange } from '../../shared/yearColors'
-import { MapController, type RenderStats } from './map/MapController'
+import { MapController, type EditSessionInfo, type RenderStats } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
 import { BasemapControl } from './components/BasemapControl'
 import { CategoryPanel } from './components/CategoryPanel'
@@ -20,6 +26,7 @@ import { ColorModeControl } from './components/ColorModeControl'
 import { DateFilter } from './components/DateFilter'
 import { DetailControl } from './components/DetailControl'
 import { StatsPanel } from './components/StatsPanel'
+import { TrackEditPanel } from './components/TrackEditPanel'
 
 export function App(): React.JSX.Element {
   const [config, setConfig] = useState<AppConfig | null>(null)
@@ -39,6 +46,10 @@ export function App(): React.JSX.Element {
   const [railRebuilding, setRailRebuilding] = useState(false)
   const [railProgress, setRailProgress] = useState<RailMatchProgress | null>(null)
   const [railError, setRailError] = useState<string | null>(null)
+  const [editMode, setEditMode] = useState(false)
+  const [editSession, setEditSession] = useState<EditSessionInfo | null>(null)
+  const [editBusy, setEditBusy] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
@@ -71,6 +82,7 @@ export function App(): React.JSX.Element {
         return
       }
       controllerRef.current = controller
+      controller.setEditListener((s) => setEditSession(s))
       await refreshData()
       void window.api.getRailCoverage().then((cov) => {
         if (!disposed) setRailCoverage(cov)
@@ -293,6 +305,55 @@ export function App(): React.JSX.Element {
     })
   }, [])
 
+  const handleEditMode = useCallback((on: boolean): void => {
+    setEditMode(on)
+    setEditError(null)
+    controllerRef.current?.setEditMode(on)
+  }, [])
+
+  const handleSaveEdits = useCallback(
+    (mode: EditSaveMode): void => {
+      const controller = controllerRef.current
+      if (!controller) return
+      if (
+        mode === 'permanent' &&
+        !window.confirm(
+          "Permanently rewrite this track's original points with the edited line? This cannot be undone."
+        )
+      ) {
+        return
+      }
+      setEditBusy(true)
+      setEditError(null)
+      void controller.saveEdits(mode).then((res) => {
+        setEditBusy(false)
+        if (!res.ok) {
+          setEditError(res.error ?? 'save failed')
+          return
+        }
+        // Permanent saves change point counts; keep the stats panel honest.
+        if (mode === 'permanent') void refreshData()
+      })
+    },
+    [refreshData]
+  )
+
+  const handleRevertEdits = useCallback((): void => {
+    const controller = controllerRef.current
+    if (!controller) return
+    setEditBusy(true)
+    setEditError(null)
+    void controller.revertEdits().then((res) => {
+      setEditBusy(false)
+      if (!res.ok) setEditError(res.error ?? 'revert failed')
+    })
+  }, [])
+
+  const handleCloseEdit = useCallback((): void => {
+    setEditError(null)
+    controllerRef.current?.closeEditSession()
+  }, [])
+
   const handleBasemapTheme = useCallback((theme: 'dark' | 'light'): void => {
     setConfig((prev) => {
       if (!prev) return prev
@@ -319,6 +380,16 @@ export function App(): React.JSX.Element {
         />
         <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
         <DetailControl mode={detailMode} onChange={handleDetailMode} />
+        <TrackEditPanel
+          editMode={editMode}
+          session={editSession}
+          busy={editBusy}
+          error={editError}
+          onToggleMode={handleEditMode}
+          onSave={handleSaveEdits}
+          onRevert={handleRevertEdits}
+          onClose={handleCloseEdit}
+        />
         <CleaningControl
           averageRail={averageRail}
           snapRail={snapRail}

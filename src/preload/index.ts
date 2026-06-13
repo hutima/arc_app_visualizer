@@ -31,7 +31,11 @@ const api: ArcApi = {
   },
   getRailCoverage: () => ipcRenderer.invoke('rail:coverage'),
   exportMapPng: (dataUrl) => ipcRenderer.invoke('export:png', dataUrl),
-  getRecentPerf: (limit) => ipcRenderer.invoke('perf:recent', limit)
+  getRecentPerf: (limit) => ipcRenderer.invoke('perf:recent', limit),
+  getSegmentEditState: (segmentId) => ipcRenderer.invoke('edits:getSegment', segmentId),
+  saveSegmentEdits: (segmentId, edits, mode) =>
+    ipcRenderer.invoke('edits:save', segmentId, edits, mode),
+  revertSegmentEdits: (segmentId) => ipcRenderer.invoke('edits:revert', segmentId)
 }
 
 contextBridge.exposeInMainWorld('api', api)

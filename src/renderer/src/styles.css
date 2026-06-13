@@ -288,6 +288,17 @@ button:disabled {
   flex: 0 0 auto;
 }
 
+/* Track editing action rows */
+.edit-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.edit-actions button {
+  flex: 1;
+}
+
 .color-mode-row {
   display: flex;
   gap: 14px;

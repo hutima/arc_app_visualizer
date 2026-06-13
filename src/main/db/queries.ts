@@ -9,6 +9,7 @@ import type {
 import { colorForCategory } from '../../shared/categories'
 import { resolveDetail, type ResolvedDetail } from '../../shared/displayDetail'
 import { RAIL_SNAP_TYPES, ROAD_TUNNEL_TYPES } from '../rail/snapRail'
+import { prepareEffectivePoints } from './editStore'
 
 export interface ViewportSegmentRow {
   id: number
@@ -165,9 +166,9 @@ function displayRows(
 }
 
 /**
- * 'All points' mode: rebuild each polyline from its clean raw points instead
- * of the precomputed simplifications. Heavier by design — only runs when the
- * user explicitly asks for raw detail.
+ * 'All points' mode: rebuild each polyline from its clean raw points (with
+ * any user track edits applied) instead of the precomputed simplifications.
+ * Heavier by design — only runs when the user explicitly asks for raw detail.
  */
 function rawRows(
   db: DatabaseSync,
@@ -188,14 +189,10 @@ function rawRows(
   const truncated = segs.length > segmentLimit
   if (truncated) segs.length = segmentLimit
 
-  const pointsStmt = db.prepare(`
-    SELECT lon, lat FROM points
-    WHERE segment_id = ? AND flags = 0 AND lat IS NOT NULL AND lon IS NOT NULL
-    ORDER BY seq
-  `)
+  const effectivePoints = prepareEffectivePoints(db)
   const rows: ViewportSegmentRow[] = []
   for (const seg of segs) {
-    const pts = pointsStmt.all(seg.id) as unknown as Array<{ lon: number; lat: number }>
+    const pts = effectivePoints(seg.id)
     if (pts.length < 2) continue // not drawable; same rule as import-time geometry
     const coords = new Float32Array(pts.length * 2)
     for (let i = 0; i < pts.length; i++) {
