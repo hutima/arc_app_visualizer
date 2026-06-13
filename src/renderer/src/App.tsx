@@ -10,6 +10,7 @@ import type {
 import type { DetailMode } from '../../shared/displayDetail'
 import type {
   EditSaveMode,
+  MergeCandidate,
   OsmLayer,
   RailCoverage,
   RailMatchProgress,
@@ -17,7 +18,12 @@ import type {
 } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { yearRange } from '../../shared/yearColors'
-import { MapController, type EditSessionInfo, type RenderStats } from './map/MapController'
+import {
+  MapController,
+  type EditSessionInfo,
+  type EditTool,
+  type RenderStats
+} from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
 import { BasemapControl } from './components/BasemapControl'
 import { CategoryPanel } from './components/CategoryPanel'
@@ -27,6 +33,19 @@ import { DateFilter } from './components/DateFilter'
 import { DetailControl } from './components/DetailControl'
 import { StatsPanel } from './components/StatsPanel'
 import { TrackEditPanel } from './components/TrackEditPanel'
+import { MergePanel } from './components/MergePanel'
+
+type AppMode = 'display' | 'edit'
+
+/** The merged track defaults to the type of its longest (most-points) leg. */
+function defaultMergeType(selectedIds: number[], candidates: MergeCandidate[]): string {
+  let best: MergeCandidate | null = null
+  for (const c of candidates) {
+    if (!selectedIds.includes(c.segmentId)) continue
+    if (!best || c.pointCount > best.pointCount) best = c
+  }
+  return best?.type ?? ''
+}
 
 export function App(): React.JSX.Element {
   const [config, setConfig] = useState<AppConfig | null>(null)
@@ -46,10 +65,16 @@ export function App(): React.JSX.Element {
   const [railRebuilding, setRailRebuilding] = useState(false)
   const [railProgress, setRailProgress] = useState<RailMatchProgress | null>(null)
   const [railError, setRailError] = useState<string | null>(null)
-  const [editMode, setEditMode] = useState(false)
+  const [appMode, setAppMode] = useState<AppMode>('display')
+  const [editTool, setEditTool] = useState<EditTool>('points')
   const [editSession, setEditSession] = useState<EditSessionInfo | null>(null)
   const [editBusy, setEditBusy] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
+  const [mergeCandidates, setMergeCandidates] = useState<MergeCandidate[]>([])
+  const [mergeSelected, setMergeSelected] = useState<number[]>([])
+  const [mergeType, setMergeType] = useState('')
+  const [mergeBusy, setMergeBusy] = useState(false)
+  const [mergeError, setMergeError] = useState<string | null>(null)
 
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
@@ -99,6 +124,16 @@ export function App(): React.JSX.Element {
           setEditBusy(false)
           if (res.ok) void refreshData()
           else setEditError(res.error ?? 'split failed')
+        })
+      })
+      // Merge tool: clicking a track anchors the 24h candidate window on it
+      // and preselects it; the rest of the selection happens in the panel.
+      controller.setMergeAnchorListener((segmentId) => {
+        void window.api.listMergeCandidates({ segmentId }).then((cands) => {
+          if (disposed) return
+          setMergeError(null)
+          setMergeCandidates(cands)
+          setMergeSelected(cands.some((c) => c.segmentId === segmentId) ? [segmentId] : [])
         })
       })
       await refreshData()
@@ -323,11 +358,96 @@ export function App(): React.JSX.Element {
     })
   }, [])
 
-  const handleEditMode = useCallback((on: boolean): void => {
-    setEditMode(on)
-    setEditError(null)
-    controllerRef.current?.setEditMode(on)
+  const clearMerge = useCallback((): void => {
+    setMergeCandidates([])
+    setMergeSelected([])
+    setMergeType('')
+    setMergeError(null)
+    controllerRef.current?.setMergeHighlight([], [])
   }, [])
+
+  // Switch between the Display view and the Edit view. Edit view focuses the
+  // map on the active editing tool; Display restores the normal panels.
+  const handleAppMode = useCallback(
+    (mode: AppMode): void => {
+      setAppMode(mode)
+      setEditError(null)
+      clearMerge()
+      const controller = controllerRef.current
+      if (!controller) return
+      controller.setEditMode(mode === 'edit')
+      if (mode === 'edit') controller.setEditTool(editTool)
+    },
+    [clearMerge, editTool]
+  )
+
+  const handleEditTool = useCallback(
+    (tool: EditTool): void => {
+      setEditTool(tool)
+      setEditError(null)
+      clearMerge()
+      controllerRef.current?.setEditTool(tool)
+    },
+    [clearMerge]
+  )
+
+  // Keep the merge map highlight in sync with the candidate/selection state.
+  useEffect(() => {
+    controllerRef.current?.setMergeHighlight(
+      mergeCandidates.map((c) => c.segmentId),
+      mergeSelected
+    )
+  }, [mergeCandidates, mergeSelected])
+
+  // Default the merged type to the longest selected leg, unless the user has
+  // picked a type that's still among the selection.
+  useEffect(() => {
+    setMergeType((cur) => {
+      const selectedTypes = new Set(
+        mergeCandidates.filter((c) => mergeSelected.includes(c.segmentId)).map((c) => c.type)
+      )
+      return selectedTypes.has(cur) ? cur : defaultMergeType(mergeSelected, mergeCandidates)
+    })
+  }, [mergeSelected, mergeCandidates])
+
+  const handleMergeByDate = useCallback((dateStr: string): void => {
+    const ts = Date.parse(`${dateStr}T12:00:00Z`)
+    if (!Number.isFinite(ts)) return
+    void window.api.listMergeCandidates({ tsMs: ts }).then((cands) => {
+      setMergeError(null)
+      setMergeCandidates(cands)
+      setMergeSelected([])
+    })
+  }, [])
+
+  const handleToggleMergeSelect = useCallback((segmentId: number): void => {
+    setMergeSelected((prev) =>
+      prev.includes(segmentId) ? prev.filter((id) => id !== segmentId) : [...prev, segmentId]
+    )
+  }, [])
+
+  const handleMerge = useCallback((): void => {
+    if (mergeSelected.length < 2 || !mergeType) return
+    if (
+      !window.confirm(
+        `Merge ${mergeSelected.length} tracks into one ${mergeType} track? The separate tracks are replaced and this cannot be undone.`
+      )
+    ) {
+      return
+    }
+    setMergeBusy(true)
+    setMergeError(null)
+    void window.api.mergeSegments(mergeSelected, mergeType).then((res) => {
+      setMergeBusy(false)
+      if (res.ok) {
+        clearMerge()
+        controllerRef.current?.scheduleRefresh(0)
+        void refreshData()
+      } else {
+        setMergeError(res.error ?? 'merge failed')
+      }
+    })
+  }, [mergeSelected, mergeType, clearMerge, refreshData])
 
   const handleSaveEdits = useCallback(
     (mode: EditSaveMode): void => {
@@ -385,47 +505,105 @@ export function App(): React.JSX.Element {
     <div className="app">
       <aside className="sidebar">
         <h1>Arc Visualizer</h1>
-        <ImportPanel progress={importProgress} />
-        <DateFilter summary={summary} onChange={handleDateRange} />
-        <CategoryPanel
-          categories={categories}
-          showWaypoints={showWaypoints}
-          onToggle={handleToggleCategory}
-          onToggleWaypoints={handleToggleWaypoints}
-          onColorChange={handleColorChange}
-          onReorder={handleReorderCategories}
-          onToggleAll={handleToggleAllCategories}
-        />
-        <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
-        <DetailControl mode={detailMode} onChange={handleDetailMode} />
-        <TrackEditPanel
-          editMode={editMode}
-          session={editSession}
-          busy={editBusy}
-          error={editError}
-          onToggleMode={handleEditMode}
-          onSave={handleSaveEdits}
-          onRevert={handleRevertEdits}
-          onClose={handleCloseEdit}
-        />
-        <CleaningControl
-          averageRail={averageRail}
-          snapRail={snapRail}
-          snapRoad={snapRoad}
-          railCoverage={railCoverage}
-          railFetching={railFetching}
-          railRebuilding={railRebuilding}
-          railProgress={railProgress}
-          railError={railError}
-          railTuning={config?.railTuning ?? null}
-          onChangeAverage={handleAverageRail}
-          onChangeSnap={handleSnapRail}
-          onChangeSnapRoad={handleSnapRoad}
-          onFetchRail={handleFetchRail}
-          onClearRail={handleClearRail}
-          onApplyTuning={handleApplyTuning}
-        />
-        {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
+        <div className="mode-tabs" role="tablist">
+          <button
+            role="tab"
+            aria-selected={appMode === 'display'}
+            className={appMode === 'display' ? 'active' : ''}
+            onClick={() => handleAppMode('display')}
+          >
+            Display
+          </button>
+          <button
+            role="tab"
+            aria-selected={appMode === 'edit'}
+            className={appMode === 'edit' ? 'active' : ''}
+            onClick={() => handleAppMode('edit')}
+          >
+            Edit
+          </button>
+        </div>
+
+        {appMode === 'display' ? (
+          <>
+            <ImportPanel progress={importProgress} />
+            <DateFilter summary={summary} onChange={handleDateRange} />
+            <CategoryPanel
+              categories={categories}
+              showWaypoints={showWaypoints}
+              onToggle={handleToggleCategory}
+              onToggleWaypoints={handleToggleWaypoints}
+              onColorChange={handleColorChange}
+              onReorder={handleReorderCategories}
+              onToggleAll={handleToggleAllCategories}
+            />
+            <ColorModeControl mode={colorMode} summary={summary} onChange={handleColorMode} />
+            <DetailControl mode={detailMode} onChange={handleDetailMode} />
+            <CleaningControl
+              averageRail={averageRail}
+              snapRail={snapRail}
+              snapRoad={snapRoad}
+              railCoverage={railCoverage}
+              railFetching={railFetching}
+              railRebuilding={railRebuilding}
+              railProgress={railProgress}
+              railError={railError}
+              railTuning={config?.railTuning ?? null}
+              onChangeAverage={handleAverageRail}
+              onChangeSnap={handleSnapRail}
+              onChangeSnapRoad={handleSnapRoad}
+              onFetchRail={handleFetchRail}
+              onClearRail={handleClearRail}
+              onApplyTuning={handleApplyTuning}
+            />
+            {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
+          </>
+        ) : (
+          <>
+            <div className="mode-tabs sub" role="tablist">
+              <button
+                role="tab"
+                aria-selected={editTool === 'points'}
+                className={editTool === 'points' ? 'active' : ''}
+                onClick={() => handleEditTool('points')}
+              >
+                Edit points
+              </button>
+              <button
+                role="tab"
+                aria-selected={editTool === 'merge'}
+                className={editTool === 'merge' ? 'active' : ''}
+                onClick={() => handleEditTool('merge')}
+              >
+                Merge tracks
+              </button>
+            </div>
+            {editTool === 'points' ? (
+              <TrackEditPanel
+                session={editSession}
+                busy={editBusy}
+                error={editError}
+                onSave={handleSaveEdits}
+                onRevert={handleRevertEdits}
+                onClose={handleCloseEdit}
+              />
+            ) : (
+              <MergePanel
+                candidates={mergeCandidates}
+                selected={mergeSelected}
+                mergeType={mergeType}
+                busy={mergeBusy}
+                error={mergeError}
+                onPickDate={handleMergeByDate}
+                onToggleSelect={handleToggleMergeSelect}
+                onTypeChange={setMergeType}
+                onMerge={handleMerge}
+                onClear={clearMerge}
+              />
+            )}
+          </>
+        )}
+
         <StatsPanel
           summary={summary}
           lastImport={lastImport}

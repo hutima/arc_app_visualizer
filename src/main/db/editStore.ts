@@ -24,12 +24,14 @@ import type { DatabaseSync } from 'node:sqlite'
 import { simplifyIndices } from '../importer/simplify'
 import { DETAIL_LEVELS } from '../../shared/displayDetail'
 import { emptyBounds, extendBounds, boundsValid } from '../../shared/geo'
-import type {
-  EditablePoint,
-  EditKind,
-  EditSaveMode,
-  SegmentEditInput,
-  SegmentEditState
+import {
+  MERGE_WINDOW_MS,
+  type EditablePoint,
+  type EditKind,
+  type EditSaveMode,
+  type MergeCandidate,
+  type SegmentEditInput,
+  type SegmentEditState
 } from '../../shared/types'
 
 const KIND_MOVE = 0
@@ -305,6 +307,88 @@ export function splitSegment(db: DatabaseSync, segmentId: number, atSeq: number)
 
 const drawableCount = (rows: RawRow[]): number =>
   rows.filter((r) => r.flags === 0 && r.lat !== null && r.lon !== null).length
+
+/** A segment's start time, the reference point when it anchors a merge window. */
+export function segmentStartTs(db: DatabaseSync, segmentId: number): number | null {
+  const row = db.prepare('SELECT start_ts_ms AS ts FROM segments WHERE id = ?').get(segmentId) as
+    | { ts: number | null }
+    | undefined
+  return row?.ts ?? null
+}
+
+/**
+ * Tracks within `windowMs` of `anchorTsMs`, chronologically — the candidate
+ * sequence for a merge. Undated segments can't be sequenced (excluded), and
+ * ignored categories (bogus/unknown) are left out so the list stays useful.
+ */
+export function listMergeCandidates(
+  db: DatabaseSync,
+  anchorTsMs: number,
+  windowMs: number = MERGE_WINDOW_MS
+): MergeCandidate[] {
+  return db.prepare(`
+    SELECT id AS segmentId, type, start_ts_ms AS startTsMs, end_ts_ms AS endTsMs,
+           clean_point_count AS pointCount
+    FROM segments
+    WHERE start_ts_ms IS NOT NULL AND start_ts_ms BETWEEN ? AND ?
+      AND type NOT IN (SELECT name FROM categories WHERE ignored = 1)
+    ORDER BY start_ts_ms, id
+  `).all(anchorTsMs - windowMs, anchorTsMs + windowMs) as unknown as MergeCandidate[]
+}
+
+/**
+ * Stitch several segments into one: concatenate their effective points (raw +
+ * any edits, flagged points and elevation preserved) in time order, write them
+ * to the earliest segment, and delete the rest. The merged track takes `type`
+ * (the renderer offers the constituents' own types). Permanent and structural,
+ * like split. Returns the surviving segment's id.
+ */
+export function mergeSegments(db: DatabaseSync, segmentIds: number[], type: string): number {
+  const ids = [...new Set(segmentIds)]
+  if (ids.length < 2) throw new Error('merge needs at least two tracks')
+  if (typeof type !== 'string' || type.length === 0) throw new Error('invalid merged type')
+
+  const segs = ids.map((id) => {
+    const s = db.prepare('SELECT id, type, start_ts_ms AS startTsMs FROM segments WHERE id = ?').get(id) as
+      | { id: number; type: string; startTsMs: number | null }
+      | undefined
+    if (!s) throw new Error(`unknown segment ${id}`)
+    return s
+  })
+  if (!segs.some((s) => s.type === type)) {
+    throw new Error('merged type must be one of the selected tracks')
+  }
+  // Chronological order = the order points are stitched; undated sink last.
+  segs.sort((a, b) => (a.startTsMs ?? Infinity) - (b.startTsMs ?? Infinity) || a.id - b.id)
+  const target = segs[0]!
+
+  db.exec('BEGIN')
+  try {
+    const all: MergedRow[] = []
+    for (const s of segs) {
+      all.push(...mergeOverlay(loadRawRows(db, s.id), loadOverlay(db, s.id)))
+    }
+    for (const s of segs.slice(1)) deleteSegmentData(db, s.id)
+    db.prepare('UPDATE segments SET type = ? WHERE id = ?').run(type, target.id)
+    // Per-segment seqs collide across the concatenation; writeMergedRows
+    // renumbers 0..n-1 by array order, which is already time-sorted here.
+    writeMergedRows(db, target.id, all)
+    db.exec('COMMIT')
+    return target.id
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+/** Remove every row belonging to a segment (points has no cascade FK). */
+function deleteSegmentData(db: DatabaseSync, segmentId: number): void {
+  db.prepare('DELETE FROM points WHERE segment_id = ?').run(segmentId)
+  db.prepare('DELETE FROM display_geometries WHERE segment_id = ?').run(segmentId)
+  db.prepare('DELETE FROM rail_matched_geom WHERE segment_id = ?').run(segmentId)
+  db.prepare('DELETE FROM segment_edits WHERE segment_id = ?').run(segmentId)
+  db.prepare('DELETE FROM segments WHERE id = ?').run(segmentId)
+}
 
 /**
  * Apply the overlay to a segment's raw rows, preserving flags and elevation:

@@ -2,28 +2,24 @@ import type { EditSaveMode } from '../../../shared/types'
 import type { EditSessionInfo } from '../map/MapController'
 
 interface Props {
-  editMode: boolean
   session: EditSessionInfo | null
   busy: boolean
   error: string | null
-  onToggleMode: (on: boolean) => void
   onSave: (mode: EditSaveMode) => void
   onRevert: () => void
   onClose: () => void
 }
 
 /**
- * Manual track editing. Geometry manipulation happens in MapController;
- * this panel only renders the small session summary and the save/revert
- * actions. Draft saves keep the original points (revertible forever);
- * permanent saves rewrite them.
+ * Per-point track editing (the 'points' edit tool). Geometry manipulation
+ * happens in MapController; this panel only renders the small session summary
+ * and the save/revert actions. Draft saves keep the original points
+ * (revertible forever); permanent saves rewrite them.
  */
 export function TrackEditPanel({
-  editMode,
   session,
   busy,
   error,
-  onToggleMode,
   onSave,
   onRevert,
   onClose
@@ -32,16 +28,8 @@ export function TrackEditPanel({
   const canCommit = session !== null && (session.dirty || session.hasDraft)
   return (
     <section className="panel">
-      <h2>Track editing</h2>
-      <label className="color-mode-option">
-        <input
-          type="checkbox"
-          checked={editMode}
-          onChange={(e) => onToggleMode(e.target.checked)}
-        />
-        <span>Edit tracks</span>
-      </label>
-      {editMode && !session && (
+      <h2>Edit points</h2>
+      {!session && (
         <p className="hint">
           Click a track on the map to select it for editing.
         </p>
