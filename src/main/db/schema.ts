@@ -18,8 +18,9 @@
 // v9: rail_edges.kind (OSM railway kind — type-constrained matching);
 // v10: rail_coverage.category ('rail' | 'road' — fetched & gated separately);
 // v11: segment_edits (user track edits as an overlay on raw points);
-// v12: places + waypoints.place_id (user-merged stationary places)
-export const SCHEMA_VERSION = 12
+// v12: places + waypoints.place_id (user-merged stationary places);
+// v13: idx_waypoints_name (full-cluster place pins resolve same-name visits)
+export const SCHEMA_VERSION = 13
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (

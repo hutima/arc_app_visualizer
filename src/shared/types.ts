@@ -234,6 +234,24 @@ export interface TopPlace {
   ref: PlaceRef
 }
 
+/**
+ * One visit of a place for the place-detail editor, tagged with its distance
+ * from the place centroid and whether that makes it a visit-level outlier (an
+ * exclusion candidate). Outliers are judged per visit, not per GPS point.
+ */
+export interface PlaceMember {
+  /** Visit (waypoint) id. */
+  id: number
+  name: string | null
+  tsMs: number | null
+  lat: number
+  lon: number
+  /** Distance from the place centroid, in metres. */
+  distM: number
+  /** Far enough from the centroid to suggest separating it from the place. */
+  outlier: boolean
+}
+
 /** Dataset-wide statistics for the Stats tab's global summary. */
 export interface DatasetStats {
   fileCount: number
@@ -435,6 +453,15 @@ export interface ArcApi {
   ): Promise<{ ok: boolean; error?: string }>
   /** Drop a segment's draft edits and restore its original geometry. */
   revertSegmentEdits(segmentId: number): Promise<{ ok: boolean; error?: string }>
+  /** How many tracks currently carry draft (unsaved) edits. */
+  countDraftSegments(): Promise<number>
+  /**
+   * Bake every track's draft edits into its points permanently (bulk "save
+   * all"). Returns how many tracks were committed.
+   */
+  commitAllDrafts(): Promise<{ ok: boolean; count?: number; error?: string }>
+  /** Drop every track's draft edits, restoring originals. Returns the count. */
+  revertAllDrafts(): Promise<{ ok: boolean; count?: number; error?: string }>
   /** Change a segment's activity type (re-snaps it if it was snapped). */
   setSegmentType(segmentId: number, type: string): Promise<{ ok: boolean; error?: string }>
   /** Delete a whole track (segment) and everything derived from it. */
@@ -491,6 +518,22 @@ export interface ArcApi {
   ): Promise<{ ok: boolean; error?: string }>
   /** Visit stats for one place (counts + time-of-day / day-of-week histograms). */
   getPlaceStats(ref: PlaceRef): Promise<PlaceStats | null>
+  /**
+   * A place's individual visits for the detail editor — each with its distance
+   * from the centroid and an outlier flag (exclusion candidates), farthest first.
+   */
+  getPlaceMembers(ref: PlaceRef): Promise<PlaceMember[] | null>
+  /**
+   * Rename a place. An implicit name+proximity cluster is materialized into an
+   * explicit place so the chosen name sticks. Returns the place id.
+   */
+  renamePlace(ref: PlaceRef, name: string): Promise<{ ok: boolean; placeId?: number; error?: string }>
+  /**
+   * Separate visits out of their place into standalone unnamed sites (clears
+   * place_id + name so they stop dragging the centroid and won't re-cluster).
+   * The location is kept — re-merge a visit into the right place to re-home it.
+   */
+  separateVisits(visitIds: number[]): Promise<{ ok: boolean; error?: string }>
   /** Dataset-wide stats for the Stats tab's global summary. */
   getDatasetStats(): Promise<DatasetStats>
 }

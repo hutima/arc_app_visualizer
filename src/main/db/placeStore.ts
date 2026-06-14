@@ -20,9 +20,19 @@
  *   histograms, for the Stats tab.
  */
 import type { DatabaseSync } from 'node:sqlite'
-import type { PlaceRef, PlaceStats, YearCount } from '../../shared/types'
+import type { PlaceMember, PlaceRef, PlaceStats, YearCount } from '../../shared/types'
 import { clusterByProximity } from './placeCluster'
 import { deleteSegmentData, prepareEffectivePoints } from './editStore'
+
+/**
+ * Visit-level outlier flagging for the place-detail editor. A visit is far
+ * enough to suggest excluding it when its distance from the place centroid
+ * clears an absolute floor AND a robust multiple of the members' median
+ * distance. Judged per *visit* (one dot each), never per GPS point, so ordinary
+ * indoor location scatter inside a stay never trips it.
+ */
+const PLACE_OUTLIER_FACTOR = 3
+const PLACE_OUTLIER_FLOOR_M = 150
 
 /** One visit of a place, with what the stats and centroid need. */
 interface MemberRow {
@@ -142,6 +152,107 @@ function pruneOrphanPlaces(db: DatabaseSync): void {
   db.exec(
     'DELETE FROM places WHERE id NOT IN (SELECT place_id FROM waypoints WHERE place_id IS NOT NULL)'
   )
+}
+
+/**
+ * Rename a place. An explicit place just updates its `places` row; an implicit
+ * name+proximity cluster is materialized into an explicit place first (its
+ * members take the new place_id, like a one-place merge) so the chosen name
+ * sticks regardless of the per-visit names. Returns the place id.
+ */
+export function renamePlace(db: DatabaseSync, ref: PlaceRef, name: string): number {
+  const trimmed = typeof name === 'string' ? name.trim() : ''
+  if (trimmed.length === 0) throw new Error('a place needs a name')
+  const place = resolvePlace(db, ref)
+  if (!place) throw new Error('unknown place')
+
+  db.exec('BEGIN')
+  try {
+    let placeId = place.placeId
+    if (placeId == null) {
+      placeId = Number(db.prepare('INSERT INTO places (name) VALUES (?)').run(trimmed).lastInsertRowid)
+      const setPlace = db.prepare('UPDATE waypoints SET place_id = ? WHERE id = ?')
+      for (const m of place.members) setPlace.run(placeId, m.id)
+    } else {
+      db.prepare('UPDATE places SET name = ? WHERE id = ?').run(trimmed, placeId)
+    }
+    db.exec('COMMIT')
+    return placeId
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+/**
+ * Separate visits out of their place into standalone **unnamed** sites: clear
+ * both their `place_id` and `name` so each becomes its own pin that won't
+ * re-cluster (unnamed visits never group, and clearing the name also detaches
+ * it from a same-name proximity cluster). Used to drop a centroid-dragging
+ * outlier — the visit's location is likely real but was joined to the wrong
+ * site. The location is preserved (no visit deleted) and orphaned `places` rows
+ * are pruned; re-merge a separated visit into the right place to re-home it.
+ */
+export function separateVisits(db: DatabaseSync, visitIds: number[]): void {
+  const ids = [...new Set(visitIds)].filter((id) => Number.isInteger(id))
+  if (ids.length === 0) throw new Error('no visits to separate')
+  db.exec('BEGIN')
+  try {
+    const detach = db.prepare('UPDATE waypoints SET place_id = NULL, name = NULL WHERE id = ?')
+    for (const id of ids) detach.run(id)
+    pruneOrphanPlaces(db)
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+/**
+ * A place's visits for the detail editor, each tagged with its distance from
+ * the place's center and whether that makes it a visit-level outlier (an
+ * exclusion candidate). Sorted farthest-first so the candidates lead.
+ *
+ * The center and threshold are deliberately **robust** (component-wise median
+ * location, distance vs. a multiple of the median distance): the whole point is
+ * to find the few visits dragging the *mean* centroid off, so the reference
+ * must not itself be dragged by them. Judged per visit, not per GPS point.
+ */
+export function getPlaceMembers(db: DatabaseSync, ref: PlaceRef): PlaceMember[] | null {
+  const place = resolvePlace(db, ref)
+  if (!place) return null
+  const { members } = place
+  if (members.length === 0) return []
+
+  const median = (vals: number[]): number => {
+    const s = [...vals].sort((a, b) => a - b)
+    const mid = s.length >> 1
+    return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2
+  }
+  const cLat = median(members.map((m) => m.lat))
+  const cLon = median(members.map((m) => m.lon))
+  const cosLat = Math.cos((cLat * Math.PI) / 180)
+  // Equirectangular metres — fine at a single place's scale.
+  const metresFrom = (lat: number, lon: number): number =>
+    Math.hypot((lon - cLon) * cosLat * 111320, (lat - cLat) * 110540)
+
+  const withDist = members.map((m) => ({ m, distM: metresFrom(m.lat, m.lon) }))
+  const threshold = Math.max(
+    PLACE_OUTLIER_FLOOR_M,
+    PLACE_OUTLIER_FACTOR * median(withDist.map((d) => d.distM))
+  )
+
+  return withDist
+    .map(({ m, distM }) => ({
+      id: m.id,
+      name: m.name,
+      tsMs: m.tsMs,
+      lat: m.lat,
+      lon: m.lon,
+      distM,
+      outlier: distM > threshold
+    }))
+    .sort((a, b) => b.distM - a.distM)
 }
 
 /**

@@ -37,6 +37,9 @@ const api: ArcApi = {
   saveSegmentEdits: (segmentId, edits, mode) =>
     ipcRenderer.invoke('edits:save', segmentId, edits, mode),
   revertSegmentEdits: (segmentId) => ipcRenderer.invoke('edits:revert', segmentId),
+  countDraftSegments: () => ipcRenderer.invoke('edits:countDrafts'),
+  commitAllDrafts: () => ipcRenderer.invoke('edits:commitAllDrafts'),
+  revertAllDrafts: () => ipcRenderer.invoke('edits:revertAllDrafts'),
   setSegmentType: (segmentId, type) => ipcRenderer.invoke('edits:setType', segmentId, type),
   deleteSegment: (segmentId) => ipcRenderer.invoke('edits:deleteSegment', segmentId),
   splitSegment: (segmentId, seq) => ipcRenderer.invoke('edits:split', segmentId, seq),
@@ -49,6 +52,9 @@ const api: ArcApi = {
   assignTrackToPlace: (segmentId, ref) =>
     ipcRenderer.invoke('places:assignTrack', segmentId, ref),
   getPlaceStats: (ref) => ipcRenderer.invoke('places:stats', ref),
+  getPlaceMembers: (ref) => ipcRenderer.invoke('places:members', ref),
+  renamePlace: (ref, name) => ipcRenderer.invoke('places:rename', ref, name),
+  separateVisits: (visitIds) => ipcRenderer.invoke('places:separate', visitIds),
   getDatasetStats: () => ipcRenderer.invoke('stats:dataset')
 }
 

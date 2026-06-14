@@ -9,10 +9,14 @@ import type { DatabaseSync } from 'node:sqlite'
 import { openDb } from '../src/main/db/db'
 import {
   applyEdits,
+  commitAllDrafts,
+  countDraftSegments,
   getSegmentEditState,
+  listDraftSegmentIds,
   listMergeCandidates,
   mergeSegments,
   prepareEffectivePoints,
+  revertAllDrafts,
   revertSegmentEdits,
   saveSegmentEdits,
   splitSegment,
@@ -270,6 +274,60 @@ describe('permanent save', () => {
       'SELECT lat FROM points WHERE segment_id = ? AND seq = 1'
     ).get(segId) as { lat: number }
     expect(moved.lat).toBeCloseTo(0.05, 9)
+  })
+})
+
+describe('bulk drafts (commit / revert all)', () => {
+  it('lists and counts only segments with a draft overlay', () => {
+    const a = seedSegment()
+    const b = seedSegment()
+    seedSegment() // no draft
+    saveSegmentEdits(db, a, [MOVE], 'draft')
+    saveSegmentEdits(db, b, [INSERT], 'draft')
+    expect(listDraftSegmentIds(db)).toEqual([a, b])
+    expect(countDraftSegments(db)).toBe(2)
+  })
+
+  it('commitAllDrafts bakes every overlay into points and clears them', () => {
+    const a = seedSegment()
+    const b = seedSegment()
+    saveSegmentEdits(db, a, [MOVE], 'draft') // seq 1 → lat 0.05
+    saveSegmentEdits(db, b, [INSERT], 'draft') // adds one point
+
+    expect(commitAllDrafts(db)).toEqual([a, b])
+    expect(countDraftSegments(db)).toBe(0)
+    const movedLat = db.prepare('SELECT lat FROM points WHERE segment_id = ? AND seq = 1').get(a) as {
+      lat: number
+    }
+    expect(movedLat.lat).toBeCloseTo(0.05, 9) // baked into raw points
+    const bPts = db.prepare('SELECT COUNT(*) AS n FROM points WHERE segment_id = ?').get(b) as {
+      n: number
+    }
+    expect(bPts.n).toBe(6) // 5 originals + baked insert
+    expect(getSegmentEditState(db, a)!.hasDraft).toBe(false)
+  })
+
+  it('revertAllDrafts drops every overlay and restores originals', () => {
+    const a = seedSegment()
+    const b = seedSegment()
+    saveSegmentEdits(db, a, [MOVE], 'draft')
+    saveSegmentEdits(db, b, [MOVE], 'draft')
+
+    expect(revertAllDrafts(db)).toEqual([a, b])
+    expect(countDraftSegments(db)).toBe(0)
+    // Raw points untouched and display geometry rebuilt to the original line.
+    const lat = db.prepare('SELECT lat FROM points WHERE segment_id = ? AND seq = 1').get(a) as {
+      lat: number
+    }
+    expect(lat.lat).toBe(0)
+    expect(Math.max(...lats(displayCoords(a, 2)))).toBe(0)
+  })
+
+  it('are no-ops with no drafts present', () => {
+    seedSegment()
+    expect(commitAllDrafts(db)).toEqual([])
+    expect(revertAllDrafts(db)).toEqual([])
+    expect(countDraftSegments(db)).toBe(0)
   })
 })
 

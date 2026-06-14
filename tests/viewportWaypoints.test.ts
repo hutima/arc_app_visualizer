@@ -176,3 +176,73 @@ describe('same-name place merging', () => {
     expect(home.tsMs).toBe(T0 + 6 * DAY_MS) // newest visit in range, not overall
   })
 })
+
+/**
+ * A place pin must sit at its full cluster's centroid regardless of which
+ * members are on screen — otherwise it drifts toward the in-view subset as the
+ * user zooms in, landing in the wrong spot. Regression for that zoom-dependent
+ * drift (the displayed pin now matches what getPlaceStats / a click resolve).
+ */
+describe('zoom-stable place pins', () => {
+  let db: DatabaseSync
+
+  beforeAll(() => {
+    db = openDb(':memory:')
+    db.prepare(`
+      INSERT INTO imported_files (filename, source_path, file_hash, file_size, imported_at_ms)
+      VALUES ('synthetic', '/dev/null', 'hash-stable-pins', 0, ?)
+    `).run(Date.now())
+    const insert = db.prepare(
+      'INSERT INTO waypoints (file_id, name, ts_ms, lat, lon, place_id) VALUES (1, ?, ?, ?, ?, ?)'
+    )
+    // A user-merged place with members at the four corners of a square: full
+    // centroid is (0.01, 0.01), well away from any single corner.
+    db.prepare("INSERT INTO places (id, name) VALUES (1, 'Campus')").run()
+    insert.run('a', T0, 0, 0, 1)
+    insert.run('b', T0 + 1, 0, 0.02, 1)
+    insert.run('c', T0 + 2, 0.02, 0, 1)
+    insert.run('d', T0 + 3, 0.02, 0.02, 1)
+    // A same-name proximity cluster (place_id NULL) spread over ~220 m along lon;
+    // full centroid lon is 0.001, but a tiny viewport sees only the first two.
+    for (let i = 0; i < 5; i++) insert.run('Cafe', T0 + i, 5, 5 + i * 0.0005, null)
+  })
+
+  afterAll(() => {
+    db.close()
+  })
+
+  it('positions a merged place at the full centroid when only one member is in view', () => {
+    // Viewport covers only corner (0, 0); the in-view-only mean would be (0, 0).
+    const tiny: ViewportQuery = {
+      minLat: -0.005, maxLat: 0.005, minLon: -0.005, maxLon: 0.005,
+      zoom: 16, startTsMs: null, endTsMs: null
+    }
+    const { waypoints } = queryViewportWaypoints(db, tiny, 1000)
+    const campus = waypoints.find((w) => w.placeId === 1)!
+    expect(campus).toBeDefined()
+    expect(campus.lat).toBeCloseTo(0.01, 9)
+    expect(campus.lon).toBeCloseTo(0.01, 9)
+  })
+
+  it('does not move the merged pin as the viewport shrinks', () => {
+    const wide = queryViewportWaypoints(db, VIEWPORT, 1000).waypoints.find((w) => w.placeId === 1)!
+    const narrow = queryViewportWaypoints(
+      db,
+      { minLat: -0.005, maxLat: 0.025, minLon: -0.005, maxLon: 0.005, zoom: 15, startTsMs: null, endTsMs: null },
+      1000
+    ).waypoints.find((w) => w.placeId === 1)!
+    expect(narrow.lat).toBeCloseTo(wide.lat, 9)
+    expect(narrow.lon).toBeCloseTo(wide.lon, 9)
+  })
+
+  it('positions a name cluster at the full centroid even when partly off-screen', () => {
+    // Only the first two Cafe visits (lon 5, 5.0005) are in view; full lon mean
+    // is 5.001 across all five.
+    const tiny: ViewportQuery = {
+      minLat: 4.9, maxLat: 5.1, minLon: 4.9, maxLon: 5.0007, zoom: 16, startTsMs: null, endTsMs: null
+    }
+    const cafe = queryViewportWaypoints(db, tiny, 1000).waypoints.find((w) => w.name === 'Cafe')!
+    expect(cafe).toBeDefined()
+    expect(cafe.lon).toBeCloseTo(5.001, 9)
+  })
+})

@@ -12,8 +12,10 @@ import type {
   ExpressionSpecification,
   GeoJSONSource,
   LayerSpecification,
+  MapGeoJSONFeature,
   MapLayerMouseEvent,
   MapMouseEvent,
+  PointLike,
   StyleSpecification
 } from 'maplibre-gl'
 import type { Feature, FeatureCollection } from 'geojson'
@@ -75,6 +77,9 @@ const PLACE_HL_LAYER = 'arc-place-highlight-circle'
  */
 const VERTEX_GRAB_TOLERANCE_PX = 13
 const LINE_INSERT_TOLERANCE_PX = 8
+// Place dots render only a few px wide; pick within this forgiving box so they
+// are actually clickable (the pixel-perfect dot is easy to miss).
+const PLACE_PICK_PAD_PX = 8
 
 /**
  * Editing sub-tool: per-point vertex editing, stitching tracks together, or
@@ -388,7 +393,9 @@ export class MapController {
     if (this.editHandlersBound) return
     this.editHandlersBound = true
     this.map.on('click', TRACKS_LAYER, (e) => this.handleTrackClick(e))
-    this.map.on('click', PLACES_LAYER, (e) => this.handlePlaceClick(e))
+    // Place picks use the map's own click (not a layer event) so the padded
+    // hit area in placeFeatureAt makes the tiny dots reliably clickable.
+    this.map.on('click', (e) => this.handlePlaceClick(e))
     this.map.on('mousedown', (e) => this.handleMapDown(e))
     this.map.on('mousemove', (e) => this.updateEditCursor(e))
     // Clicking off the edited track (empty map) commits and deselects it.
@@ -614,13 +621,46 @@ export class MapController {
   }
 
   /**
+   * The nearest place dot within a forgiving box of a screen point, or null.
+   * The rendered dots are only a few px wide, so a pixel-perfect layer click is
+   * easy to miss — query a padded box and take the closest so places are
+   * reliably clickable. Closest by the dot's own stored centroid.
+   */
+  private placeFeatureAt(point: { x: number; y: number }): MapGeoJSONFeature | null {
+    if (!this.map.getLayer(PLACES_LAYER)) return null
+    const pad = PLACE_PICK_PAD_PX
+    const box: [PointLike, PointLike] = [
+      [point.x - pad, point.y - pad],
+      [point.x + pad, point.y + pad]
+    ]
+    let best: MapGeoJSONFeature | null = null
+    let bestD = Infinity
+    for (const f of this.map.queryRenderedFeatures(box, { layers: [PLACES_LAYER] })) {
+      const props = f.properties ?? {}
+      if (typeof props.lon !== 'number' || typeof props.lat !== 'number') {
+        if (!best) best = f
+        continue
+      }
+      const p = this.map.project([props.lon, props.lat])
+      const d = Math.hypot(point.x - p.x, point.y - p.y)
+      if (d < bestD) {
+        bestD = d
+        best = f
+      }
+    }
+    return best
+  }
+
+  /**
    * A place dot clicked: report it (with a backend ref and its centroid) for
    * stats inspection or merge-places selection. A merged pin carries a
    * `placeId`; an un-merged one is referenced by its representative visit id.
+   * Bound on the map's own click (not a layer event) so the forgiving hit area
+   * in `placeFeatureAt` applies.
    */
-  private handlePlaceClick(e: MapLayerMouseEvent): void {
+  private handlePlaceClick(e: MapMouseEvent): void {
     if (!this.placePickActive()) return
-    const f = e.features?.[0]
+    const f = this.placeFeatureAt(e.point)
     if (!f) return
     const rawId = f.id
     const dotId = typeof rawId === 'number' ? rawId : Number(rawId)
@@ -777,6 +817,23 @@ export class MapController {
   }
 
   /**
+   * Settle the open point-edit session before a bulk drafts action: when
+   * committing, first persist any unsaved in-session changes as a draft (so the
+   * bulk commit includes the track being edited), then close the session either
+   * way. A no-op outside an active point session. Returns the draft-save result
+   * so the caller can abort a commit whose flush failed (session kept open).
+   */
+  async settleEditSessionForBulk(commit: boolean): Promise<{ ok: boolean; error?: string }> {
+    if (this.editingId !== null && commit && this.editDirty) {
+      const res = await window.api.saveSegmentEdits(this.editingId, this.buildOverlay(), 'draft')
+      if (this.destroyed) return { ok: false }
+      if (!res.ok) return res
+    }
+    this.closeEditSession()
+    return { ok: true }
+  }
+
+  /**
    * Commit the working overlay, then split the segment at `seq` into two. The
    * caller (App) confirms first and refreshes dataset stats after — splitting
    * changes point counts. Returns the result so the host can surface errors.
@@ -819,12 +876,18 @@ export class MapController {
       return
     }
     if (this.editTool === 'mergePlaces') {
-      // A place dot over the track wins (it's a place selection, not assign).
-      if (this.map.queryRenderedFeatures(e.point, { layers: [PLACES_LAYER] }).length > 0) return
+      // A place dot over the track wins (it's a place selection, not assign);
+      // use the same forgiving hit area place clicks do, so a near-miss on a
+      // dot doesn't get treated as a track assignment.
+      if (this.placeFeatureAt(e.point)) return
       this.trackToPlaceListener?.(id)
       return
     }
     // Point tool: switching tracks auto-saves the current one (click-off save).
+    // But if the map-down handler already consumed this gesture as an edit on
+    // the current track (vertex grab / line insert), stay put — an overlapping
+    // foreign track must not steal the click away from the track being edited.
+    if (this.suppressClickOff) return
     if (id === this.editingId) return
     void this.commitAndLeave(id)
   }

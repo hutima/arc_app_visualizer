@@ -13,6 +13,7 @@ import type {
   EditSaveMode,
   MergeCandidate,
   OsmLayer,
+  PlaceMember,
   PlaceRef,
   PlaceStats,
   RailCoverage,
@@ -38,8 +39,10 @@ import { DetailControl } from './components/DetailControl'
 import { StatsPanel } from './components/StatsPanel'
 import { StatsView } from './components/StatsView'
 import { TrackEditPanel } from './components/TrackEditPanel'
+import { DraftsPanel } from './components/DraftsPanel'
 import { MergePanel } from './components/MergePanel'
 import { MergePlacesPanel } from './components/MergePlacesPanel'
+import { PlaceDetailPanel } from './components/PlaceDetailPanel'
 
 type AppMode = 'display' | 'edit' | 'stats'
 
@@ -81,6 +84,8 @@ export function App(): React.JSX.Element {
   const [editSession, setEditSession] = useState<EditSessionInfo | null>(null)
   const [editBusy, setEditBusy] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
+  // Tracks carrying a draft edit (for the bulk confirm-all / discard-all panel).
+  const [draftCount, setDraftCount] = useState(0)
   // Skip confirmations; also makes a click-off auto-save permanently (vs draft).
   const [skipConfirm, setSkipConfirm] = useState(false)
   const skipConfirmRef = useRef(false)
@@ -92,8 +97,17 @@ export function App(): React.JSX.Element {
   // Merge-places tool: a selection of place pins, the name to keep, status.
   const [placeSelection, setPlaceSelection] = useState<SelectedPlace[]>([])
   const [mergePlaceName, setMergePlaceName] = useState('')
+  // True once the user types a name, so re-deriving the most-frequent default
+  // never clobbers their choice (and lets selection order stop deciding it).
+  const [mergeNameTouched, setMergeNameTouched] = useState(false)
   const [placeBusy, setPlaceBusy] = useState(false)
   const [placeError, setPlaceError] = useState<string | null>(null)
+  // Place-detail editor (one place selected): its visits, rename field, and the
+  // visits ticked for separation.
+  const [placeMembers, setPlaceMembers] = useState<PlaceMember[] | null>(null)
+  const [placeMembersLoading, setPlaceMembersLoading] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [separateSelection, setSeparateSelection] = useState<number[]>([])
   // Stats tab: dataset-wide summary + the place currently inspected.
   const [datasetStats, setDatasetStats] = useState<DatasetStats | null>(null)
   const [statsPlace, setStatsPlace] = useState<PlaceStats | null>(null)
@@ -102,6 +116,12 @@ export function App(): React.JSX.Element {
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const controllerRef = useRef<MapController | null>(null)
   const hadDataOnLoadRef = useRef(false)
+  // Last edit session "key" seen, so the draft count only refetches when a
+  // session opens/closes/switches (covers click-off draft saves), not per drag.
+  const prevEditKeyRef = useRef('')
+  // Monotonic token so overlapping draft-count refetches resolve latest-wins
+  // (the session-change effect and a bulk op can both fire one).
+  const draftCountReqRef = useRef(0)
   // Latest selection, read synchronously by map-click listeners (toggle / assign).
   const placeSelectionRef = useRef<SelectedPlace[]>([])
   // Map-click callbacks behind refs so the once-bound listeners always call the
@@ -115,6 +135,13 @@ export function App(): React.JSX.Element {
     setCategories(cats)
     setSummary(sum)
     controllerRef.current?.setCategories(cats)
+  }, [])
+
+  const refreshDraftCount = useCallback((): void => {
+    const req = ++draftCountReqRef.current
+    void window.api.countDraftSegments().then((n) => {
+      if (req === draftCountReqRef.current) setDraftCount(n)
+    })
   }, [])
 
   // Bootstrap: config → map → initial data. The controller outlives renders;
@@ -198,6 +225,17 @@ export function App(): React.JSX.Element {
     skipConfirmRef.current = skipConfirm
     controllerRef.current?.setLeaveSaveMode(skipConfirm ? 'permanent' : 'draft')
   }, [skipConfirm])
+
+  // Refetch the draft count whenever a point-edit session opens, closes, or
+  // switches segments — that's when a draft may have been added/removed
+  // (including a click-off auto-save), but not on every drag (key is unchanged).
+  useEffect(() => {
+    if (appMode !== 'edit') return
+    const key = editSession ? `${editSession.segmentId}:${editSession.hasDraft}` : 'none'
+    if (key === prevEditKeyRef.current) return
+    prevEditKeyRef.current = key
+    refreshDraftCount()
+  }, [editSession, appMode, refreshDraftCount])
 
   // Feed the dataset's year span to the gradient whenever the summary changes.
   useEffect(() => {
@@ -417,6 +455,10 @@ export function App(): React.JSX.Element {
   const clearPlaceSelection = useCallback((): void => {
     setPlaceSelection([])
     setMergePlaceName('')
+    setMergeNameTouched(false)
+    setSeparateSelection([])
+    setPlaceMembers(null)
+    setRenameValue('')
     setPlaceError(null)
     controllerRef.current?.setPlaceHighlight([])
   }, [])
@@ -442,6 +484,74 @@ export function App(): React.JSX.Element {
   const handleRemovePlace = useCallback((dotId: number): void => {
     setPlaceSelection((prev) => prev.filter((p) => p.dotId !== dotId))
   }, [])
+
+  // User typing the kept name marks it touched so the frequency default stops.
+  const handleMergeNameChange = useCallback((name: string): void => {
+    setMergeNameTouched(true)
+    setMergePlaceName(name)
+  }, [])
+
+  const handleToggleVisit = useCallback((id: number): void => {
+    setSeparateSelection((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    )
+  }, [])
+
+  const handleSelectOutliers = useCallback((): void => {
+    setSeparateSelection((placeMembers ?? []).filter((m) => m.outlier).map((m) => m.id))
+  }, [placeMembers])
+
+  // Rename the one selected place; reflect the new name in the selection so the
+  // detail editor reloads (and the merged-name default stays sensible).
+  const handleRenamePlace = useCallback((): void => {
+    const sel = placeSelectionRef.current
+    const name = renameValue.trim()
+    if (sel.length !== 1 || name.length === 0) return
+    const target = sel[0]!
+    setPlaceBusy(true)
+    setPlaceError(null)
+    void window.api.renamePlace(target.ref, name).then((res) => {
+      setPlaceBusy(false)
+      if (res.ok) {
+        setPlaceSelection((prev) =>
+          prev.map((p) => (p.dotId === target.dotId ? { ...p, name } : p))
+        )
+        controllerRef.current?.scheduleRefresh(0)
+        void refreshData()
+      } else {
+        setPlaceError(res.error ?? 'rename failed')
+      }
+    })
+  }, [renameValue, refreshData])
+
+  // Separate the ticked visits into their own unnamed sites, then deselect (the
+  // place's membership changed) and redraw.
+  const handleSeparateVisits = useCallback((): void => {
+    const ids = separateSelection
+    if (ids.length === 0) return
+    if (
+      !skipConfirmRef.current &&
+      !window.confirm(
+        `Separate ${ids.length} visit${ids.length === 1 ? '' : 's'} into ${
+          ids.length === 1 ? 'its' : 'their'
+        } own unnamed site${ids.length === 1 ? '' : 's'}? The location is kept — you can re-merge later.`
+      )
+    ) {
+      return
+    }
+    setPlaceBusy(true)
+    setPlaceError(null)
+    void window.api.separateVisits(ids).then((res) => {
+      setPlaceBusy(false)
+      if (res.ok) {
+        clearPlaceSelection()
+        controllerRef.current?.scheduleRefresh(0)
+        void refreshData()
+      } else {
+        setPlaceError(res.error ?? 'separate failed')
+      }
+    })
+  }, [separateSelection, clearPlaceSelection, refreshData])
 
   // Non-destructive (only regroups visits under one identity) — no confirm.
   const handleMergePlaces = useCallback((): void => {
@@ -485,11 +595,12 @@ export function App(): React.JSX.Element {
         clearPlaceSelection()
         controllerRef.current?.scheduleRefresh(0)
         void refreshData()
+        refreshDraftCount() // the folded-in track may have carried a draft
       } else {
         setPlaceError(res.error ?? 'assign failed')
       }
     })
-  }, [clearPlaceSelection, refreshData])
+  }, [clearPlaceSelection, refreshData, refreshDraftCount])
 
   const refreshDatasetStats = useCallback((): void => {
     void window.api.getDatasetStats().then((s) => setDatasetStats(s))
@@ -525,21 +636,29 @@ export function App(): React.JSX.Element {
     inspectPlaceCbRef.current = inspectPlace
   }, [inspectPlace])
 
-  // Default the kept name to the most-visited selected place; never clobber a
-  // name the user has already typed.
+  // Default the kept name to the most *frequent* name across the selection (sum
+  // of visits per name), re-derived as the selection changes — so selection
+  // order never decides it. A name the user has typed is never clobbered.
   useEffect(() => {
-    setMergePlaceName((cur) => {
-      if (cur.trim().length > 0) return cur
-      let best: SelectedPlace | null = null
-      for (const p of placeSelection) {
-        if (p.name && (!best || p.visitCount > best.visitCount)) best = p
+    if (mergeNameTouched) return
+    const totals = new Map<string, number>()
+    for (const p of placeSelection) {
+      if (p.name) totals.set(p.name, (totals.get(p.name) ?? 0) + p.visitCount)
+    }
+    let bestName = ''
+    let bestTotal = -1
+    for (const [name, total] of totals) {
+      if (total > bestTotal) {
+        bestTotal = total
+        bestName = name
       }
-      return best?.name ?? cur
-    })
-  }, [placeSelection])
+    }
+    setMergePlaceName(bestName)
+  }, [placeSelection, mergeNameTouched])
 
-  // Drive the place ring(s): the inspected place in Stats, the selection in the
-  // merge-places tool, nothing elsewhere.
+  // Drive the place ring(s): the inspected place in Stats; in the merge-places
+  // tool, the selected places — but when exactly one is selected for detailed
+  // editing, ring its outlier *visits* instead so they stand out for exclusion.
   useEffect(() => {
     const controller = controllerRef.current
     if (!controller) return
@@ -548,9 +667,40 @@ export function App(): React.JSX.Element {
         statsPlace ? [[statsPlace.lon, statsPlace.lat] as [number, number]] : []
       )
     } else if (appMode === 'edit' && editTool === 'mergePlaces') {
-      controller.setPlaceHighlight(placeSelection.map((p) => [p.lon, p.lat] as [number, number]))
+      if (placeSelection.length === 1 && placeMembers) {
+        controller.setPlaceHighlight(
+          placeMembers.filter((m) => m.outlier).map((m) => [m.lon, m.lat] as [number, number])
+        )
+      } else {
+        controller.setPlaceHighlight(placeSelection.map((p) => [p.lon, p.lat] as [number, number]))
+      }
     }
-  }, [appMode, editTool, statsPlace, placeSelection])
+  }, [appMode, editTool, statsPlace, placeSelection, placeMembers])
+
+  // Load the selected single place's visits (for the detail editor + outlier
+  // rings); clear when the selection isn't exactly one place.
+  useEffect(() => {
+    if (appMode !== 'edit' || editTool !== 'mergePlaces' || placeSelection.length !== 1) {
+      setPlaceMembers(null)
+      setPlaceMembersLoading(false)
+      setSeparateSelection([])
+      return
+    }
+    const place = placeSelection[0]!
+    setRenameValue(place.name ?? '')
+    setPlaceMembersLoading(true)
+    let cancelled = false
+    void window.api.getPlaceMembers(place.ref).then((members) => {
+      if (cancelled) return
+      setPlaceMembers(members)
+      setPlaceMembersLoading(false)
+      // Drop any ticked visits that are no longer present.
+      setSeparateSelection((prev) => prev.filter((id) => (members ?? []).some((m) => m.id === id)))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [appMode, editTool, placeSelection])
 
   // Switch between Display, Edit, and Stats. Edit focuses the map on the active
   // editing tool; Stats makes places clickable for inspection; Display restores
@@ -566,10 +716,13 @@ export function App(): React.JSX.Element {
       if (!controller) return
       controller.setEditMode(mode === 'edit')
       controller.setStatsMode(mode === 'stats')
-      if (mode === 'edit') controller.setEditTool(editTool)
+      if (mode === 'edit') {
+        controller.setEditTool(editTool)
+        refreshDraftCount()
+      }
       if (mode === 'stats') refreshDatasetStats()
     },
-    [clearMerge, clearPlaceSelection, editTool, refreshDatasetStats]
+    [clearMerge, clearPlaceSelection, editTool, refreshDatasetStats, refreshDraftCount]
   )
 
   const handleEditTool = useCallback(
@@ -633,11 +786,12 @@ export function App(): React.JSX.Element {
         clearMerge()
         controllerRef.current?.scheduleRefresh(0)
         void refreshData()
+        refreshDraftCount() // a merged-away segment may have carried a draft
       } else {
         setMergeError(res.error ?? 'merge failed')
       }
     })
-  }, [mergeSelected, mergeType, clearMerge, refreshData])
+  }, [mergeSelected, mergeType, clearMerge, refreshData, refreshDraftCount])
 
   const handleSaveEdits = useCallback(
     (mode: EditSaveMode): void => {
@@ -677,6 +831,62 @@ export function App(): React.JSX.Element {
       if (!res.ok) setEditError(res.error ?? 'revert failed')
     })
   }, [])
+
+  // Bulk "save all": flush the open session to a draft so it's included, then
+  // bake every draft into its track for good.
+  const handleCommitAllDrafts = useCallback((): void => {
+    if (
+      !skipConfirmRef.current &&
+      !window.confirm(
+        'Permanently bake all draft edits into their tracks? This rewrites those tracks’ points and cannot be undone.'
+      )
+    ) {
+      return
+    }
+    setEditBusy(true)
+    setEditError(null)
+    void (async () => {
+      const settled = await controllerRef.current?.settleEditSessionForBulk(true)
+      if (settled && !settled.ok) {
+        setEditBusy(false)
+        setEditError(settled.error ?? 'save failed')
+        return
+      }
+      const res = await window.api.commitAllDrafts()
+      setEditBusy(false)
+      if (res.ok) {
+        controllerRef.current?.scheduleRefresh(0)
+        refreshDraftCount()
+        void refreshData()
+      } else {
+        setEditError(res.error ?? 'commit failed')
+      }
+    })()
+  }, [refreshData, refreshDraftCount])
+
+  // Bulk "discard all": drop the open session and every saved draft, restoring
+  // the original tracks.
+  const handleRevertAllDrafts = useCallback((): void => {
+    if (
+      !skipConfirmRef.current &&
+      !window.confirm('Discard all draft edits and restore the original tracks? This cannot be undone.')
+    ) {
+      return
+    }
+    setEditBusy(true)
+    setEditError(null)
+    void (async () => {
+      await controllerRef.current?.settleEditSessionForBulk(false)
+      const res = await window.api.revertAllDrafts()
+      setEditBusy(false)
+      if (res.ok) {
+        controllerRef.current?.scheduleRefresh(0)
+        refreshDraftCount()
+      } else {
+        setEditError(res.error ?? 'discard failed')
+      }
+    })()
+  }, [refreshDraftCount])
 
   const handleCloseEdit = useCallback((): void => {
     setEditError(null)
@@ -851,6 +1061,13 @@ export function App(): React.JSX.Element {
               />
               <span>Skip confirmations (click-off saves permanently)</span>
             </label>
+            <DraftsPanel
+              count={draftCount}
+              busy={editBusy}
+              error={editTool === 'points' ? null : editError}
+              onCommitAll={handleCommitAllDrafts}
+              onRevertAll={handleRevertAllDrafts}
+            />
             {editTool === 'points' ? (
               <TrackEditPanel
                 session={editSession}
@@ -880,16 +1097,32 @@ export function App(): React.JSX.Element {
                 onClear={clearMerge}
               />
             ) : (
-              <MergePlacesPanel
-                selected={placeSelection}
-                mergeName={mergePlaceName}
-                busy={placeBusy}
-                error={placeError}
-                onNameChange={setMergePlaceName}
-                onMerge={handleMergePlaces}
-                onClear={clearPlaceSelection}
-                onRemove={handleRemovePlace}
-              />
+              <>
+                <MergePlacesPanel
+                  selected={placeSelection}
+                  mergeName={mergePlaceName}
+                  busy={placeBusy}
+                  error={placeError}
+                  onNameChange={handleMergeNameChange}
+                  onMerge={handleMergePlaces}
+                  onClear={clearPlaceSelection}
+                  onRemove={handleRemovePlace}
+                />
+                {placeSelection.length === 1 && (
+                  <PlaceDetailPanel
+                    members={placeMembers}
+                    loading={placeMembersLoading}
+                    busy={placeBusy}
+                    renameValue={renameValue}
+                    selectedVisitIds={separateSelection}
+                    onRenameChange={setRenameValue}
+                    onRename={handleRenamePlace}
+                    onToggleVisit={handleToggleVisit}
+                    onSelectOutliers={handleSelectOutliers}
+                    onSeparate={handleSeparateVisits}
+                  />
+                )}
+              </>
             )}
           </>
         ) : (

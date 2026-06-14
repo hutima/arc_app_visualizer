@@ -11,7 +11,10 @@ import {
   resolvePlace,
   mergePlaces,
   assignTrackToPlace,
-  getPlaceStats
+  getPlaceStats,
+  getPlaceMembers,
+  renamePlace,
+  separateVisits
 } from '../src/main/db/placeStore'
 import { queryViewportWaypoints, getDatasetStats } from '../src/main/db/queries'
 import type { ViewportQuery } from '../src/shared/types'
@@ -196,6 +199,108 @@ describe('getPlaceStats', () => {
 
   it('returns null for an unknown place', () => {
     expect(getPlaceStats(db, { placeId: 4242 })).toBeNull()
+  })
+})
+
+describe('renamePlace', () => {
+  it('updates an existing merged place name', () => {
+    const a = addWaypoint('A', T0, 0, 0)
+    const b = addWaypoint('B', T0, 0, 0.0005)
+    const placeId = mergePlaces(db, [{ waypointId: a }, { waypointId: b }], 'Old')
+    expect(renamePlace(db, { placeId }, 'New')).toBe(placeId)
+    expect((db.prepare('SELECT name FROM places WHERE id = ?').get(placeId) as { name: string }).name).toBe(
+      'New'
+    )
+  })
+
+  it('materializes an implicit name cluster into an explicit place', () => {
+    const a = addWaypoint('Cafe', T0, 10, 10)
+    const b = addWaypoint('Cafe', T0 + DAY, 10.0005, 10)
+    expect(placeIdOf(a)).toBeNull()
+    const placeId = renamePlace(db, { waypointId: a }, 'My Cafe')
+    expect(placeIdOf(a)).toBe(placeId)
+    expect(placeIdOf(b)).toBe(placeId) // both cluster members carry the new id
+    const pin = queryViewportWaypoints(db, WORLD, 1000).waypoints.find((w) => w.placeId === placeId)!
+    expect(pin.name).toBe('My Cafe')
+  })
+
+  it('rejects an empty name', () => {
+    const a = addWaypoint('A', T0, 0, 0)
+    expect(() => renamePlace(db, { waypointId: a }, '  ')).toThrow(/name/)
+  })
+})
+
+describe('separateVisits', () => {
+  it('turns excluded visits into standalone unnamed sites (location kept)', () => {
+    const home = addWaypoint('Home', T0, 0, 0)
+    const casa = addWaypoint('Casa', T0 + DAY, 40, 40)
+    const placeId = mergePlaces(db, [{ waypointId: home }, { waypointId: casa }], 'Home')
+    const before = waypointCount()
+
+    separateVisits(db, [casa])
+
+    expect(waypointCount()).toBe(before) // non-destructive: the visit survives
+    expect(placeIdOf(casa)).toBeNull()
+    expect(placeIdOf(home)).toBe(placeId) // the rest of the place is untouched
+    const casaRow = db.prepare('SELECT name, lat, lon FROM waypoints WHERE id = ?').get(casa) as {
+      name: string | null
+      lat: number
+      lon: number
+    }
+    expect(casaRow.name).toBeNull() // a new unnamed site
+    expect(casaRow.lat).toBe(40) // location preserved
+  })
+
+  it('prunes the place row when all its visits are separated', () => {
+    const a = addWaypoint('A', T0, 0, 0)
+    const b = addWaypoint('B', T0, 5, 5)
+    mergePlaces(db, [{ waypointId: a }, { waypointId: b }], 'AB')
+    expect(placesCount()).toBe(1)
+    separateVisits(db, [a, b])
+    expect(placesCount()).toBe(0) // orphaned place pruned
+    expect(placeIdOf(a)).toBeNull()
+  })
+
+  it('rejects an empty visit list', () => {
+    expect(() => separateVisits(db, [])).toThrow(/no visits/)
+  })
+})
+
+describe('getPlaceMembers', () => {
+  it('flags far visits as outliers from the robust center, farthest first', () => {
+    // Three tight visits near (0,0) plus one ~1.5 km away, all one place.
+    const near = [
+      addWaypoint('P', T0, 0, 0),
+      addWaypoint('P', T0 + DAY, 0, 0.0001),
+      addWaypoint('P', T0 + 2 * DAY, 0.0001, 0)
+    ]
+    const far = addWaypoint('P', T0 + 3 * DAY, 0.01, 0.01)
+    const placeId = mergePlaces(db, [{ waypointId: near[0]! }, { waypointId: far }], 'P')
+
+    const members = getPlaceMembers(db, { placeId })!
+    expect(members).toHaveLength(4)
+    // Sorted farthest-first: the lone far visit leads and is the only outlier.
+    expect(members[0]!.id).toBe(far)
+    expect(members[0]!.outlier).toBe(true)
+    expect(members[0]!.distM).toBeGreaterThan(1000)
+    expect(members.filter((m) => m.outlier)).toHaveLength(1)
+    for (const m of members.slice(1)) expect(m.outlier).toBe(false)
+  })
+
+  it('flags nothing when every visit sits in a tight cluster', () => {
+    // One same-name proximity cluster (no merge needed); all within ~30 m.
+    const ids = [
+      addWaypoint('Tight', T0, 0, 0),
+      addWaypoint('Tight', T0 + DAY, 0, 0.0002),
+      addWaypoint('Tight', T0 + 2 * DAY, 0.0002, 0)
+    ]
+    const members = getPlaceMembers(db, { waypointId: ids[0]! })!
+    expect(members).toHaveLength(3)
+    expect(members.every((m) => !m.outlier)).toBe(true)
+  })
+
+  it('returns null for an unknown place', () => {
+    expect(getPlaceMembers(db, { placeId: 4242 })).toBeNull()
   })
 })
 
