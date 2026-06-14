@@ -264,6 +264,65 @@ export function revertSegmentEdits(db: DatabaseSync, segmentId: number): void {
   }
 }
 
+/** Segment ids carrying a draft overlay right now (distinct, ascending). */
+export function listDraftSegmentIds(db: DatabaseSync): number[] {
+  const rows = db
+    .prepare('SELECT DISTINCT segment_id AS id FROM segment_edits ORDER BY segment_id')
+    .all() as unknown as Array<{ id: number }>
+  return rows.map((r) => r.id)
+}
+
+/** How many tracks currently have a draft overlay (for the bulk-edit panel). */
+export function countDraftSegments(db: DatabaseSync): number {
+  const row = db
+    .prepare('SELECT COUNT(DISTINCT segment_id) AS n FROM segment_edits')
+    .get() as unknown as { n: number }
+  return row.n
+}
+
+/**
+ * Bake every track's draft overlay into its raw points permanently — the bulk
+ * form of a per-track permanent save — in one transaction. Returns the segment
+ * ids committed. Each rebuilds its display geometry and drops its stale matched
+ * geometry, so the caller re-snaps the ones that were snapped.
+ */
+export function commitAllDrafts(db: DatabaseSync): number[] {
+  const ids = listDraftSegmentIds(db)
+  if (ids.length === 0) return []
+  db.exec('BEGIN')
+  try {
+    for (const id of ids) bakeEditsIntoPoints(db, id)
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+  return ids
+}
+
+/**
+ * Drop every track's draft overlay, restoring originals — the bulk form of a
+ * revert — in one transaction. Returns the segment ids reverted. Raw points
+ * were never touched, so this only clears overlays and rebuilds geometry.
+ */
+export function revertAllDrafts(db: DatabaseSync): number[] {
+  const ids = listDraftSegmentIds(db)
+  if (ids.length === 0) return []
+  db.exec('BEGIN')
+  try {
+    const del = db.prepare('DELETE FROM segment_edits WHERE segment_id = ?')
+    for (const id of ids) {
+      del.run(id)
+      rebuildDerivedGeometry(db, id)
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+  return ids
+}
+
 /**
  * Split a segment into two at one of its effective points by seq. The seq must
  * be an original raw point (integer) — the quick shift-click gesture only ever

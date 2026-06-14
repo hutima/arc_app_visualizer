@@ -289,7 +289,7 @@ export function queryViewportWaypoints(
     q.startTsMs, q.startTsMs,
     q.endTsMs, q.endTsMs
   ) as unknown as ViewportWaypoint[]
-  const merged = collapseVisitsToPlaces(db, all)
+  const merged = collapseVisitsToPlaces(db, q, all)
   if (limit <= 0) return { waypoints: [], totalCount: merged.length }
   if (merged.length <= limit) return { waypoints: merged, totalCount: merged.length }
   return { waypoints: thinWaypoints(merged, q, limit), totalCount: merged.length }
@@ -301,47 +301,110 @@ function loadPlaceNames(db: DatabaseSync): Map<number, string> {
   return new Map(rows.map((r) => [r.id, r.name]))
 }
 
+/** Time-range clause for the place loaders (undated visits pass through). */
+const WAYPOINT_TIME_CLAUSE =
+  '(? IS NULL OR ts_ms IS NULL OR ts_ms >= ?) AND (? IS NULL OR ts_ms IS NULL OR ts_ms <= ?)'
+
+const waypointTimeParams = (q: ViewportQuery): Array<number | null> => [
+  q.startTsMs, q.startTsMs, q.endTsMs, q.endTsMs
+]
+
+/** All in-date-range visits for the given merged places, grouped by place_id. */
+function fullMembersByPlaceId(
+  db: DatabaseSync,
+  q: ViewportQuery,
+  placeIds: number[]
+): Map<number, ViewportWaypoint[]> {
+  const out = new Map<number, ViewportWaypoint[]>()
+  if (placeIds.length === 0) return out
+  const rows = db.prepare(`
+    SELECT id, lat, lon, ts_ms AS tsMs, name, place_id AS placeId
+    FROM waypoints
+    WHERE place_id IN (${placeIds.map(() => '?').join(',')}) AND ${WAYPOINT_TIME_CLAUSE}
+  `).all(...placeIds, ...waypointTimeParams(q)) as unknown as ViewportWaypoint[]
+  for (const w of rows) {
+    const g = out.get(w.placeId!)
+    if (g) g.push(w)
+    else out.set(w.placeId!, [w])
+  }
+  return out
+}
+
+/** All in-date-range un-merged visits of the given names, grouped by name. */
+function fullMembersByName(
+  db: DatabaseSync,
+  q: ViewportQuery,
+  names: string[]
+): Map<string, ViewportWaypoint[]> {
+  const out = new Map<string, ViewportWaypoint[]>()
+  if (names.length === 0) return out
+  const rows = db.prepare(`
+    SELECT id, lat, lon, ts_ms AS tsMs, name, place_id AS placeId
+    FROM waypoints
+    WHERE place_id IS NULL AND name IN (${names.map(() => '?').join(',')}) AND ${WAYPOINT_TIME_CLAUSE}
+  `).all(...names, ...waypointTimeParams(q)) as unknown as ViewportWaypoint[]
+  for (const w of rows) {
+    const g = out.get(w.name!)
+    if (g) g.push(w)
+    else out.set(w.name!, [w])
+  }
+  return out
+}
+
 /**
  * Collapse raw visits into the pins the map draws. Two passes:
  *
  * 1. Visits with an explicit `place_id` group by it — a user-merged place,
- *    shown as one pin at the mean of its in-view visits with the chosen name,
- *    regardless of distance or per-visit names.
+ *    shown as one pin with the chosen name regardless of distance or per-visit
+ *    names.
  * 2. The rest cluster the way Arc data demands: a well-visited place is
  *    hundreds of GPS-jittered same-name dots, so same-name visits within a
  *    radius merge to their mean. Per spatial cluster, not global per name, so
  *    a chain ("Starbucks" in two cities) keeps separate pins. Unnamed visits
  *    pass through as-is.
  *
- * Each merged pin keeps the most recent member's id/timestamp as its identity.
- * (The persistent counterpart that *creates* place_id groups is
- * placeStore.mergePlaces; this only renders whatever grouping exists.)
+ * A pin is positioned from its place's **full** membership (every in-date-range
+ * visit, not just those in the current viewport), so it stays put as the user
+ * zooms/pans instead of drifting toward whichever subset is on screen — the
+ * same clustering `resolvePlace` recovers on a click, so display == clicks ==
+ * stats. Only the *in-view* set decides which pins to show: a place appears
+ * once at least one of its visits is on screen. Each pin keeps the most recent
+ * member's id/timestamp as its identity. (The persistent counterpart that
+ * *creates* place_id groups is placeStore.mergePlaces; this only renders it.)
  */
-function collapseVisitsToPlaces(db: DatabaseSync, all: ViewportWaypoint[]): ViewportWaypoint[] {
+function collapseVisitsToPlaces(
+  db: DatabaseSync,
+  q: ViewportQuery,
+  all: ViewportWaypoint[]
+): ViewportWaypoint[] {
   const merged: ViewportWaypoint[] = []
-  const byPlaceId = new Map<number, ViewportWaypoint[]>()
-  const byName = new Map<string, ViewportWaypoint[]>()
+  const inViewPlaceIds = new Set<number>()
+  const inViewNames = new Set<string>()
+  const inViewNamedIds = new Set<number>()
   for (const w of all) {
-    if (w.placeId != null) {
-      const g = byPlaceId.get(w.placeId)
-      if (g) g.push(w)
-      else byPlaceId.set(w.placeId, [w])
-    } else if (w.name) {
-      const g = byName.get(w.name)
-      if (g) g.push(w)
-      else byName.set(w.name, [w])
-    } else {
-      merged.push(w) // unnamed, un-merged: its own pin
-    }
+    if (w.placeId != null) inViewPlaceIds.add(w.placeId)
+    else if (w.name) {
+      inViewNames.add(w.name)
+      inViewNamedIds.add(w.id)
+    } else merged.push(w) // unnamed, un-merged: its own pin
   }
 
-  const placeNames = byPlaceId.size > 0 ? loadPlaceNames(db) : null
-  for (const [placeId, members] of byPlaceId) {
-    merged.push(reduceCluster(members, { placeId, name: placeNames?.get(placeId) ?? null }))
+  if (inViewPlaceIds.size > 0) {
+    const placeNames = loadPlaceNames(db)
+    for (const [placeId, members] of fullMembersByPlaceId(db, q, [...inViewPlaceIds])) {
+      if (members.length > 0) {
+        merged.push(reduceCluster(members, { placeId, name: placeNames.get(placeId) ?? null }))
+      }
+    }
   }
-  for (const members of byName.values()) {
-    for (const cluster of clusterByProximity(members)) {
-      merged.push(reduceCluster(cluster, { placeId: null, name: null }))
+  if (inViewNames.size > 0) {
+    for (const members of fullMembersByName(db, q, [...inViewNames]).values()) {
+      for (const cluster of clusterByProximity(members)) {
+        // Show the cluster only if one of its visits is actually on screen.
+        if (cluster.some((m) => inViewNamedIds.has(m.id))) {
+          merged.push(reduceCluster(cluster, { placeId: null, name: null }))
+        }
+      }
     }
   }
   return merged

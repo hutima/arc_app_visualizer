@@ -64,6 +64,9 @@ function migrate(db: DatabaseSync): void {
     // column on pre-existing waypoints tables), then index it here.
     ensureColumn(db, 'waypoints', 'place_id', 'place_id INTEGER')
     db.exec('CREATE INDEX IF NOT EXISTS idx_waypoints_place ON waypoints(place_id)')
+    // v13: place pins resolve their full same-name cluster every viewport query
+    // (so they don't drift with zoom); index name to keep that lookup cheap.
+    db.exec('CREATE INDEX IF NOT EXISTS idx_waypoints_name ON waypoints(name)')
     seedCategories(db)
     // v5: 'unknown' joins 'bogus' as excluded-by-default (existing databases
     // seeded it visible before this rule existed).

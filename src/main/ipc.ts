@@ -16,7 +16,14 @@ import {
   getRecentPerf,
   insertPerf
 } from './db/queries'
-import { mergePlaces, assignTrackToPlace, getPlaceStats } from './db/placeStore'
+import {
+  mergePlaces,
+  assignTrackToPlace,
+  getPlaceStats,
+  getPlaceMembers,
+  renamePlace,
+  separateVisits
+} from './db/placeStore'
 import { averageRailTracks } from './db/railAverage'
 import { collectGpxFiles } from './importer/importFiles'
 import { analyzeImportOverlap } from './importer/importOverlap'
@@ -35,7 +42,11 @@ import {
   segmentStartTs,
   listMergeCandidates,
   mergeSegments,
-  hasMatchedGeom
+  hasMatchedGeom,
+  listDraftSegmentIds,
+  countDraftSegments,
+  commitAllDrafts,
+  revertAllDrafts
 } from './db/editStore'
 import { encodeGeometry, type EncodedSegment } from '../shared/geomCodec'
 import { saveSettings, type AppSettings } from './settings'
@@ -253,6 +264,29 @@ export function registerIpc(ctx: IpcContext): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
+  ipcMain.handle('edits:countDrafts', () => countDraftSegments(ctx.db))
+  // Bake every draft into its track's points permanently (bulk "save all").
+  // Re-snap the segments that were snapped, mirroring per-segment permanent saves.
+  ipcMain.handle('edits:commitAllDrafts', () => {
+    try {
+      const snapped = listDraftSegmentIds(ctx.db).filter((id) => hasMatchedGeom(ctx.db, id))
+      const committed = commitAllDrafts(ctx.db)
+      reSnap(snapped.length > 0, ...snapped)
+      return { ok: true, count: committed.length }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  // Drop every draft, restoring originals (bulk "revert"). Like the per-segment
+  // revert, snapped geometry is dropped and left for a fresh match pass.
+  ipcMain.handle('edits:revertAllDrafts', () => {
+    try {
+      const reverted = revertAllDrafts(ctx.db)
+      return { ok: true, count: reverted.length }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   ipcMain.handle('edits:setType', (_e, segmentId: number, type: string) => {
     try {
       if (!Number.isInteger(segmentId) || typeof type !== 'string') {
@@ -358,6 +392,31 @@ export function registerIpc(ctx: IpcContext): void {
   ipcMain.handle('places:stats', (_e, ref: PlaceRef) =>
     validPlaceRef(ref) ? getPlaceStats(ctx.db, ref) : null
   )
+  ipcMain.handle('places:members', (_e, ref: PlaceRef) =>
+    validPlaceRef(ref) ? getPlaceMembers(ctx.db, ref) : null
+  )
+  ipcMain.handle('places:rename', (_e, ref: PlaceRef, name: string) => {
+    try {
+      if (!validPlaceRef(ref) || typeof name !== 'string') {
+        return { ok: false, error: 'invalid rename request' }
+      }
+      const placeId = renamePlace(ctx.db, ref, name)
+      return { ok: true, placeId }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('places:separate', (_e, visitIds: number[]) => {
+    try {
+      if (!Array.isArray(visitIds) || !visitIds.every((id) => Number.isInteger(id))) {
+        return { ok: false, error: 'invalid separate request' }
+      }
+      separateVisits(ctx.db, visitIds)
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   ipcMain.handle('stats:dataset', () => getDatasetStats(ctx.db))
   ipcMain.handle('summary:get', () => getSummary(ctx.db))
   ipcMain.handle('bounds:get', () => getDataBounds(ctx.db))
