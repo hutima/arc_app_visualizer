@@ -28,7 +28,12 @@ import { averageRailTracks } from './db/railAverage'
 import { collectGpxFiles } from './importer/importFiles'
 import { analyzeImportOverlap } from './importer/importOverlap'
 import { RAIL_SNAP_TYPES, routeWaypoints, type RailGraph } from './rail/snapRail'
-import { buildDriveGraph, buildGuidedDriveGraph, guideLengthDeg } from './rail/roadRoute'
+import {
+  buildDriveGraph,
+  buildGuidedDriveGraph,
+  guideLengthDeg,
+  emphasisForDistanceDeg
+} from './rail/roadRoute'
 import { rebuildRailMatches, rematchSegment } from './rail/buildMatches'
 import { fetchRailNetwork, fetchDriveNetwork } from './rail/overpass'
 import { addRailNetwork, getRailCoverage, clearRailNetwork, clearRailNetworkData } from './db/railStore'
@@ -124,11 +129,14 @@ const bboxContains = (outer: LatLonBBox, inner: LatLonBBox): boolean =>
 function routeGraphFor(
   db: DatabaseSync,
   waypoints: ReadonlyArray<RoutePoint>,
-  guide: ReadonlyArray<RoutePoint>
+  guide: ReadonlyArray<RoutePoint>,
+  emphasis: number
 ): RailGraph {
   const wb = bboxOfPoints([...waypoints, ...guide])
-  const guideKey = guideSignature(guide)
-  if (routeGraphCache && routeGraphCache.guideKey === guideKey && bboxContains(routeGraphCache.bbox, wb)) {
+  // The graph weighting depends on the corridor *and* the highway emphasis, so
+  // both are in the key (emphasis quantized so via-drags still hit the cache).
+  const key = `${guideSignature(guide)}|e${Math.round(emphasis * 10)}`
+  if (routeGraphCache && routeGraphCache.guideKey === key && bboxContains(routeGraphCache.bbox, wb)) {
     return routeGraphCache.graph
   }
   // Pad generously so (a) nearby pin drags keep reusing this graph and (b) the
@@ -141,8 +149,10 @@ function routeGraphFor(
   }
   const { nodes, edges } = loadRouteForBbox(db, load)
   const graph =
-    guide.length >= 2 ? buildGuidedDriveGraph(nodes, edges, guide) : buildDriveGraph(nodes, edges)
-  routeGraphCache = { bbox: load, guideKey, graph }
+    guide.length >= 2
+      ? buildGuidedDriveGraph(nodes, edges, guide, emphasis)
+      : buildDriveGraph(nodes, edges, emphasis)
+  routeGraphCache = { bbox: load, guideKey: key, graph }
   return graph
 }
 
@@ -608,32 +618,44 @@ export function registerIpc(ctx: IpcContext): void {
     routeGraphCache = null
     return { ok: true }
   })
-  ipcMain.handle('route:preview', (_e, waypoints: RoutePoint[], guide?: RoutePoint[]) => {
-    try {
-      const validPt = (w: RoutePoint): boolean => !!w && Number.isFinite(w.lat) && Number.isFinite(w.lon)
-      if (!Array.isArray(waypoints) || waypoints.length < 2 || !waypoints.every(validPt)) {
-        return { ok: false, error: 'need at least two valid points to route' }
+  ipcMain.handle(
+    'route:preview',
+    (_e, waypoints: RoutePoint[], guide?: RoutePoint[], useGuideCorridor?: boolean) => {
+      try {
+        const validPt = (w: RoutePoint): boolean => !!w && Number.isFinite(w.lat) && Number.isFinite(w.lon)
+        if (!Array.isArray(waypoints) || waypoints.length < 2 || !waypoints.every(validPt)) {
+          return { ok: false, error: 'need at least two valid points to route' }
+        }
+        const span = Array.isArray(guide) ? guide.filter(validPt) : []
+        const boxes = routeCoverageBoxes(ctx.db)
+        if (boxes.length === 0) {
+          return { ok: false, error: 'no roads fetched — fetch roads in view first' }
+        }
+        if (!routeBoxesCover(boxes, waypoints)) {
+          return { ok: false, error: 'a point is outside fetched road coverage — fetch roads there first' }
+        }
+        // Highway emphasis scales with the trip's length (always — even when the
+        // corridor is off, long legs through the vias still funnel onto highways).
+        const emphasis = emphasisForDistanceDeg(
+          Math.max(guideLengthDeg(span), guideLengthDeg(waypoints))
+        )
+        // The GPS span is a *loose corridor* only for the first estimate; once
+        // the user starts dragging vias it's dropped so the drags take over.
+        const corridor = useGuideCorridor === false ? [] : span
+        const t0 = performance.now()
+        const graph = routeGraphFor(ctx.db, waypoints, corridor, emphasis)
+        const res = routeWaypoints(graph, waypoints, guideLengthDeg(corridor))
+        insertPerf(
+          ctx.db, 'route.preview', performance.now() - t0,
+          `points=${waypoints.length} emphasis=${emphasis.toFixed(1)} corridor=${corridor.length > 0}`
+        )
+        if ('error' in res) return { ok: false, error: res.error }
+        return { ok: true, coords: simplifyRoutePolyline(res.coords) }
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) }
       }
-      // The guide (original track span) is a loose corridor bias, not a
-      // constraint — drop any invalid points rather than failing the route.
-      const corridor = Array.isArray(guide) ? guide.filter(validPt) : []
-      const boxes = routeCoverageBoxes(ctx.db)
-      if (boxes.length === 0) {
-        return { ok: false, error: 'no roads fetched — fetch roads in view first' }
-      }
-      if (!routeBoxesCover(boxes, waypoints)) {
-        return { ok: false, error: 'a point is outside fetched road coverage — fetch roads there first' }
-      }
-      const t0 = performance.now()
-      const graph = routeGraphFor(ctx.db, waypoints, corridor)
-      const res = routeWaypoints(graph, waypoints, guideLengthDeg(corridor))
-      insertPerf(ctx.db, 'route.preview', performance.now() - t0, `points=${waypoints.length}`)
-      if ('error' in res) return { ok: false, error: res.error }
-      return { ok: true, coords: simplifyRoutePolyline(res.coords) }
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
-  })
+  )
 
   ipcMain.handle('perf:recent', (_e, limit: number) => getRecentPerf(ctx.db, Math.min(limit, 200)))
   ipcMain.handle('app:getConfig', () => ({

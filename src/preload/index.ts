@@ -28,7 +28,8 @@ const api: ArcApi = {
   fetchRouteNetwork: (bbox) => ipcRenderer.invoke('route:fetch', bbox),
   getRouteCoverage: () => ipcRenderer.invoke('route:coverage'),
   clearRouteNetwork: () => ipcRenderer.invoke('route:clear'),
-  previewRoadRoute: (waypoints, guide) => ipcRenderer.invoke('route:preview', waypoints, guide),
+  previewRoadRoute: (waypoints, guide, useGuideCorridor) =>
+    ipcRenderer.invoke('route:preview', waypoints, guide, useGuideCorridor),
   onRailProgress: (cb) => {
     const handler = (_event: unknown, p: RailMatchProgress): void => cb(p)
     ipcRenderer.on('rail:progress', handler)

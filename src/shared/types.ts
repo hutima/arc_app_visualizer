@@ -483,13 +483,18 @@ export interface ArcApi {
   clearRouteNetwork(): Promise<{ ok: boolean }>
   /**
    * Compute the best road route through the given waypoints in order, for the
-   * reroute preview. The route is biased *loosely* toward `guide` (the original
-   * track span) — used directionally to follow where the user actually went,
-   * tolerant of GPS uncertainty — while preferring arterials within that
-   * corridor. Needs road coverage over the waypoints; returns the snapped
-   * polyline or an error to surface.
+   * reroute preview. `guide` (the original track span) gives the trip length —
+   * which sharpens the highway preference for long routes — and, while
+   * `useGuideCorridor` is true (the initial estimate), also a loose corridor
+   * bias so the route follows where the user actually went. Once the user
+   * starts dragging vias, pass `useGuideCorridor = false` so the GPS is ignored
+   * and the drags take priority. Needs road coverage over the waypoints.
    */
-  previewRoadRoute(waypoints: RoutePoint[], guide: RoutePoint[]): Promise<RoutePreviewResult>
+  previewRoadRoute(
+    waypoints: RoutePoint[],
+    guide: RoutePoint[],
+    useGuideCorridor: boolean
+  ): Promise<RoutePreviewResult>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
   /** Effective points of one segment (raw + draft edits) for the editor. */
   getSegmentEditState(segmentId: number): Promise<SegmentEditState | null>

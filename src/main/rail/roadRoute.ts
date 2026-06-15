@@ -64,6 +64,28 @@ export function roadClassKind(highwayTag: string | undefined): number {
 const penaltyForKind = (kind: number | undefined): number =>
   (kind != null ? CLASS_PENALTY[kind] : undefined) ?? 1
 
+const M_PER_DEG = 111320
+
+/**
+ * The arterial preference, sharpened for long trips. Raising each class penalty
+ * to `emphasis` widens the spread around 1: at emphasis 1 a motorway is ~2×
+ * preferred over a residential street, at 3 it's ~8×. Long drives really do
+ * funnel onto highways, so a 10 km+ reroute should bias far harder than a
+ * cross-town hop. Unknown/neutral roads (penalty 1) are unaffected by any power.
+ */
+const classCost = (kind: number | undefined, emphasis: number): number =>
+  penaltyForKind(kind) ** emphasis
+
+/**
+ * Distance → highway emphasis. Flat (1) for short hops, then climbs once a trip
+ * is long enough to be worth detouring onto highways: ~1.25 at 10 km, ~2 (≈4×
+ * preference) at 16 km, capped at 4 (≈16×) by ~32 km.
+ */
+export function emphasisForDistanceDeg(distDeg: number): number {
+  const km = (distDeg * M_PER_DEG) / 1000
+  return Math.min(4, Math.max(1, km / 8))
+}
+
 /** Anchoring is forgiving so deliberately-placed pins reach a nearby road. */
 export const DRIVE_TUNING: RailTuning = { snapRadiusM: 200, transferRadiusM: 0 }
 
@@ -153,9 +175,10 @@ export function guideLengthDeg(guide: ReadonlyArray<GuidePoint>): number {
 export function buildDriveGraph(
   nodes: RailNodeInput[],
   edges: ReadonlyArray<RailEdgeInput & { kind?: number }>,
+  emphasis = 1,
   tuning: RailTuning = DRIVE_TUNING
 ): RailGraph {
-  return buildRailGraph(nodes, edges as RailEdgeInput[], tuning, (e, dist) => dist * penaltyForKind(e.kind))
+  return buildRailGraph(nodes, edges as RailEdgeInput[], tuning, (e, dist) => dist * classCost(e.kind, emphasis))
 }
 
 /**
@@ -171,9 +194,10 @@ export function buildGuidedDriveGraph(
   nodes: RailNodeInput[],
   edges: ReadonlyArray<RailEdgeInput & { kind?: number }>,
   guide: ReadonlyArray<GuidePoint>,
+  emphasis = 1,
   tuning: RailTuning = DRIVE_TUNING
 ): RailGraph {
-  if (guide.length < 2) return buildDriveGraph(nodes, edges, tuning)
+  if (guide.length < 2) return buildDriveGraph(nodes, edges, emphasis, tuning)
   const refCos = refCosOf(guide)
   const { xs, ys } = projectGuide(guide, refCos)
   const coordById = new Map(nodes.map((n) => [n.id, n]))
@@ -193,21 +217,26 @@ export function buildGuidedDriveGraph(
     nodes,
     edges as RailEdgeInput[],
     tuning,
-    (e, dist) => dist * penaltyForKind(e.kind) * (factor.get(e) ?? 1)
+    (e, dist) => dist * classCost(e.kind, emphasis) * (factor.get(e) ?? 1)
   )
 }
 
 /**
  * Compute the road route through `waypoints` in order, biased toward the
- * (optional) original-track `guide`. Returns the snapped polyline (interleaved
- * lon,lat) or an error to surface.
+ * (optional) original-track `guide`, with a road-class `emphasis` (≥1, higher
+ * = prefer highways harder). Returns the snapped polyline (interleaved lon,lat)
+ * or an error to surface.
  */
 export function computeRoadRoute(
   nodes: RailNodeInput[],
   edges: ReadonlyArray<RailEdgeInput & { kind?: number }>,
   waypoints: ReadonlyArray<{ lon: number; lat: number }>,
-  guide: ReadonlyArray<GuidePoint> = []
+  guide: ReadonlyArray<GuidePoint> = [],
+  emphasis = 1
 ): { coords: Float32Array } | { error: string } {
-  const graph = guide.length >= 2 ? buildGuidedDriveGraph(nodes, edges, guide) : buildDriveGraph(nodes, edges)
+  const graph =
+    guide.length >= 2
+      ? buildGuidedDriveGraph(nodes, edges, guide, emphasis)
+      : buildDriveGraph(nodes, edges, emphasis)
   return routeWaypoints(graph, waypoints, guideLengthDeg(guide))
 }
