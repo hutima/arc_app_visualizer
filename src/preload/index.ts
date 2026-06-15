@@ -24,7 +24,11 @@ const api: ArcApi = {
   fetchRailNetwork: (bbox, layer) => ipcRenderer.invoke('rail:fetch', bbox, layer),
   rebuildRailMatches: () => ipcRenderer.invoke('rail:rebuildMatches'),
   setRailTuning: (t) => ipcRenderer.invoke('rail:setTuning', t),
-  clearRailNetwork: () => ipcRenderer.invoke('rail:clear'),
+  clearRailNetwork: (keepMatched) => ipcRenderer.invoke('rail:clear', keepMatched),
+  fetchRouteNetwork: (bbox) => ipcRenderer.invoke('route:fetch', bbox),
+  getRouteCoverage: () => ipcRenderer.invoke('route:coverage'),
+  clearRouteNetwork: () => ipcRenderer.invoke('route:clear'),
+  previewRoadRoute: (waypoints) => ipcRenderer.invoke('route:preview', waypoints),
   onRailProgress: (cb) => {
     const handler = (_event: unknown, p: RailMatchProgress): void => cb(p)
     ipcRenderer.on('rail:progress', handler)

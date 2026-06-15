@@ -7,6 +7,7 @@
  * snap runs offline. The JSON parser is pure so it's tested without network.
  */
 import { railKindCode, RAIL_KIND, type RailNodeInput, type RailEdgeInput } from './snapRail'
+import { roadClassKind, DRIVE_HIGHWAY_TYPES } from './roadRoute'
 import type { OsmLayer } from '../../shared/types'
 
 export interface BBox {
@@ -70,6 +71,30 @@ export function buildOverpassQuery(bbox: BBox, layer: OsmLayer): string {
   return ['[out:json][timeout:180];', '(', selector, ');', '(._;>;);', 'out qt;'].join('\n')
 }
 
+/**
+ * The drivable road network for routing (the manual reroute tool). The full
+ * road network, not just tunnels — so it's fetched separately and only on
+ * demand. service ways are excluded (see roadRoute) to keep the graph routable.
+ */
+export function buildDriveQuery(bbox: BBox): string {
+  const b = `${bbox.minLat},${bbox.minLon},${bbox.maxLat},${bbox.maxLon}`
+  const selector = `  way["highway"~"^(${DRIVE_HIGHWAY_TYPES.join('|')})$"](${b});`
+  return ['[out:json][timeout:180];', '(', selector, ');', '(._;>;);', 'out qt;'].join('\n')
+}
+
+/**
+ * Resolve a way's stored kind from its tags. Rail ways carry their railway
+ * kind; the rail/road layers tag highway ways (tunnels, by query construction)
+ * as road_tunnel so they can never enter a rail graph.
+ */
+export type WayKind = (tags: Record<string, string>) => number
+
+const railWayKind: WayKind = (tags) =>
+  tags.railway ? railKindCode(tags.railway) : tags.highway ? RAIL_KIND.road_tunnel : RAIL_KIND.unknown
+
+/** Drive layer: highway ways carry their road-class code (for arterial routing). */
+const driveWayKind: WayKind = (tags) => roadClassKind(tags.highway)
+
 interface OverpassElement {
   type: 'node' | 'way' | 'relation'
   id: number
@@ -84,7 +109,7 @@ interface OverpassElement {
  * becomes k-1 edges so routing follows the real polyline; only nodes
  * referenced by a kept way are emitted.
  */
-export function parseOverpassJson(json: unknown): ParsedRail {
+export function parseOverpassJson(json: unknown, wayKind: WayKind = railWayKind): ParsedRail {
   const elements = (json as { elements?: OverpassElement[] })?.elements
   if (!Array.isArray(elements)) return { nodes: [], edges: [] }
 
@@ -99,13 +124,7 @@ export function parseOverpassJson(json: unknown): ParsedRail {
   const usedNodes = new Set<number>()
   for (const el of elements) {
     if (el.type !== 'way' || !Array.isArray(el.nodes)) continue
-    // Rail ways carry their railway kind; highway ways (tunnels by query
-    // construction) are road_tunnel so they can never enter a rail graph.
-    const kind = el.tags?.railway
-      ? railKindCode(el.tags.railway)
-      : el.tags?.highway
-        ? RAIL_KIND.road_tunnel
-        : RAIL_KIND.unknown
+    const kind = wayKind(el.tags ?? {})
     for (let i = 1; i < el.nodes.length; i++) {
       const a = el.nodes[i - 1]!
       const b = el.nodes[i]!
@@ -135,7 +154,28 @@ export async function fetchRailNetwork(
   layer: OsmLayer,
   endpoints: readonly string[] = DEFAULT_ENDPOINTS
 ): Promise<ParsedRail> {
-  const body = 'data=' + encodeURIComponent(buildOverpassQuery(bbox, layer))
+  return fetchOverpass(buildOverpassQuery(bbox, layer), railWayKind, endpoints)
+}
+
+/**
+ * Fetch + parse the drivable road network for the bbox (the reroute tool).
+ * Same mirror-fallback behavior as the rail fetch; highway ways are tagged with
+ * their road class so routing can prefer arterials.
+ */
+export async function fetchDriveNetwork(
+  bbox: BBox,
+  endpoints: readonly string[] = DEFAULT_ENDPOINTS
+): Promise<ParsedRail> {
+  return fetchOverpass(buildDriveQuery(bbox), driveWayKind, endpoints)
+}
+
+/** Shared fetch core: POST the query, fall back across mirrors, parse on success. */
+async function fetchOverpass(
+  query: string,
+  wayKind: WayKind,
+  endpoints: readonly string[]
+): Promise<ParsedRail> {
+  const body = 'data=' + encodeURIComponent(query)
   let lastError: Error | null = null
   for (const endpoint of endpoints) {
     const host = new URL(endpoint).host
@@ -154,7 +194,7 @@ export async function fetchRailNetwork(
       lastError = new Error(`${host}: ${err instanceof Error ? err.message : String(err)}`)
       continue
     }
-    if (res.ok) return parseOverpassJson(await res.json())
+    if (res.ok) return parseOverpassJson(await res.json(), wayKind)
     const detail = (await res.text().catch(() => '')).replace(/<[^>]+>/g, ' ').trim()
     const error = new Error(
       `Overpass HTTP ${res.status} (${host})${detail ? `: ${detail.slice(0, 200)}` : ''}`

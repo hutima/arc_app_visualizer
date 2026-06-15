@@ -345,9 +345,30 @@ button:disabled {
   gap: 6px;
 }
 
+/* Two-tone split slider: the track shows each half's type color, split at the
+   thumb (the gradient is computed in React and passed as --split-gradient). */
 .split-slider {
   width: 100%;
-  accent-color: #e879f9;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+.split-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--split-gradient, #555);
+}
+.split-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 2px solid #000000;
 }
 
 .split-types {
@@ -356,6 +377,27 @@ button:disabled {
 }
 
 .split-types .merge-type-pick {
+  flex: 1;
+}
+
+/* Reroute (snap to road route) tool — reuses .split-tool framing */
+.reroute-range {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0;
+}
+.reroute-range-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.reroute-range-row > span {
+  width: 36px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.reroute-range-row input[type='range'] {
   flex: 1;
 }
 

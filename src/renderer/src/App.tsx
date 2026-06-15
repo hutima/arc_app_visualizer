@@ -18,7 +18,8 @@ import type {
   PlaceStats,
   RailCoverage,
   RailMatchProgress,
-  RailTuning
+  RailTuning,
+  RouteCoverage
 } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { yearRange } from '../../shared/yearColors'
@@ -27,7 +28,8 @@ import {
   type EditSessionInfo,
   type EditTool,
   type PlacePick,
-  type RenderStats
+  type RenderStats,
+  type RerouteInfo
 } from './map/MapController'
 import { ImportPanel } from './components/ImportPanel'
 import { BasemapControl } from './components/BasemapControl'
@@ -79,6 +81,11 @@ export function App(): React.JSX.Element {
   const [railRebuilding, setRailRebuilding] = useState(false)
   const [railProgress, setRailProgress] = useState<RailMatchProgress | null>(null)
   const [railError, setRailError] = useState<string | null>(null)
+  // Drivable road network + reroute tool (Edit → Edit points → road route).
+  const [routeCoverage, setRouteCoverage] = useState<RouteCoverage | null>(null)
+  const [routeFetching, setRouteFetching] = useState(false)
+  const [routeError, setRouteError] = useState<string | null>(null)
+  const [rerouteInfo, setRerouteInfo] = useState<RerouteInfo | null>(null)
   const [appMode, setAppMode] = useState<AppMode>('display')
   const [editTool, setEditTool] = useState<EditTool>('points')
   const [editSession, setEditSession] = useState<EditSessionInfo | null>(null)
@@ -165,6 +172,7 @@ export function App(): React.JSX.Element {
       }
       controllerRef.current = controller
       controller.setEditListener((s) => setEditSession(s))
+      controller.setRerouteListener((info) => setRerouteInfo(info))
       // Permanent/structural changes (incl. a permanent click-off save) change
       // counts/types, so refresh the dataset stats afterward.
       controller.setDatasetChangeListener(() => void refreshData())
@@ -205,6 +213,9 @@ export function App(): React.JSX.Element {
       await refreshData()
       void window.api.getRailCoverage().then((cov) => {
         if (!disposed) setRailCoverage(cov)
+      })
+      void window.api.getRouteCoverage().then((cov) => {
+        if (!disposed) setRouteCoverage(cov)
       })
       const sum = await window.api.getSummary()
       if (!disposed && sum.pointCount > 0) {
@@ -429,16 +440,65 @@ export function App(): React.JSX.Element {
     })
   }, [])
 
-  // Wipe all fetched OSM data and cached geometry.
-  const handleClearRail = useCallback((): void => {
-    void window.api.clearRailNetwork().then(() => {
-      setRailCoverage(null)
+  // Clear fetched OSM data. keepMatched drops the bulky network but keeps the
+  // cached snapped geometry, so snapped rides keep rendering from cache.
+  const handleClearRail = useCallback((keepMatched?: boolean): void => {
+    void window.api.clearRailNetwork(keepMatched).then(() => {
+      void window.api.getRailCoverage().then((cov) => setRailCoverage(cov))
       setRailError(null)
-      setSnapRail(false)
-      controllerRef.current?.setSnapRail(false)
-      setSnapRoad(false)
-      controllerRef.current?.setSnapRoad(false)
+      if (!keepMatched) {
+        setSnapRail(false)
+        controllerRef.current?.setSnapRail(false)
+        setSnapRoad(false)
+        controllerRef.current?.setSnapRoad(false)
+      }
       controllerRef.current?.scheduleRefresh(0)
+    })
+  }, [])
+
+  // Fetch the drivable road network for the current view (manual reroute tool).
+  const handleFetchRoute = useCallback((): void => {
+    const view = controllerRef.current?.getViewBounds()
+    if (!view) return
+    setRouteFetching(true)
+    setRouteError(null)
+    void window.api.fetchRouteNetwork(view).then((res) => {
+      setRouteFetching(false)
+      if (res.ok && res.coverage) setRouteCoverage(res.coverage)
+      else setRouteError(res.error ?? 'fetch failed')
+    })
+  }, [])
+
+  const handleClearRoute = useCallback((): void => {
+    void window.api.clearRouteNetwork().then(() => {
+      setRouteCoverage(null)
+      setRouteError(null)
+    })
+  }, [])
+
+  // Reroute tool wiring: the map owns the geometry (range markers, via pins,
+  // preview); these just forward intent to the controller.
+  const handleRerouteRange = useCallback(
+    (range: { startIdx: number; endIdx: number } | null): void => {
+      controllerRef.current?.setRerouteRange(range)
+    },
+    []
+  )
+
+  const handleClearVias = useCallback((): void => {
+    controllerRef.current?.clearRerouteVias()
+  }, [])
+
+  // Applying a previewed route writes a revertible draft (raw points survive),
+  // so no confirm — the user already reviewed the preview on the map.
+  const handleApplyReroute = useCallback((): void => {
+    const controller = controllerRef.current
+    if (!controller) return
+    setEditBusy(true)
+    setEditError(null)
+    void controller.applyReroute().then((res) => {
+      setEditBusy(false)
+      if (!res.ok) setEditError(res.error ?? 'apply failed')
     })
   }, [])
 
@@ -893,9 +953,12 @@ export function App(): React.JSX.Element {
     controllerRef.current?.closeEditSession()
   }, [])
 
-  const handleSplitPreview = useCallback((index: number | null): void => {
-    controllerRef.current?.setSplitPreview(index)
-  }, [])
+  const handleSplitPreview = useCallback(
+    (index: number | null, firstType?: string, secondType?: string): void => {
+      controllerRef.current?.setSplitPreview(index, firstType, secondType)
+    },
+    []
+  )
 
   // Precise slider split with per-half types — structural, so confirm first.
   const handleSplit = useCallback(
@@ -1016,12 +1079,17 @@ export function App(): React.JSX.Element {
               railProgress={railProgress}
               railError={railError}
               railTuning={config?.railTuning ?? null}
+              routeCoverage={routeCoverage}
+              routeFetching={routeFetching}
+              routeError={routeError}
               onChangeAverage={handleAverageRail}
               onChangeSnap={handleSnapRail}
               onChangeSnapRoad={handleSnapRoad}
               onFetchRail={handleFetchRail}
               onClearRail={handleClearRail}
               onApplyTuning={handleApplyTuning}
+              onFetchRoute={handleFetchRoute}
+              onClearRoute={handleClearRoute}
             />
             {config && <BasemapControl theme={config.basemapTheme} onChange={handleBasemapTheme} />}
           </>
@@ -1074,6 +1142,11 @@ export function App(): React.JSX.Element {
                 busy={editBusy}
                 error={editError}
                 categoryNames={categories.map((c) => c.name)}
+                categoryColors={Object.fromEntries(categories.map((c) => [c.name, c.color]))}
+                reroute={rerouteInfo}
+                hasRouteCoverage={routeCoverage !== null}
+                routeFetching={routeFetching}
+                routeError={routeError}
                 onSave={handleSaveEdits}
                 onRevert={handleRevertEdits}
                 onClose={handleCloseEdit}
@@ -1081,6 +1154,10 @@ export function App(): React.JSX.Element {
                 onSplit={handleSplit}
                 onChangeType={handleChangeType}
                 onDeleteTrack={handleDeleteTrack}
+                onRerouteRange={handleRerouteRange}
+                onClearVias={handleClearVias}
+                onApplyReroute={handleApplyReroute}
+                onFetchRoads={handleFetchRoute}
               />
             ) : editTool === 'merge' ? (
               <MergePanel
