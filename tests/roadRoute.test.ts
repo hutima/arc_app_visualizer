@@ -8,6 +8,8 @@ import {
   computeRoadRoute,
   roadClassKind,
   emphasisForDistanceDeg,
+  filterDriveEdges,
+  BUS_KIND,
   DRIVE_HIGHWAY_TYPES,
   ROAD_CLASS
 } from '../src/main/rail/roadRoute'
@@ -124,6 +126,29 @@ describe('highway emphasis (long routes)', () => {
   })
 })
 
+describe('bus-only ways', () => {
+  it('keeps bus-only edges only when the trip is a bus', () => {
+    const edges = [
+      { a: 1, b: 2, kind: ROAD_CLASS.residential },
+      { a: 2, b: 3, kind: BUS_KIND }
+    ]
+    expect(filterDriveEdges(edges, false).map((e) => e.kind)).toEqual([ROAD_CLASS.residential])
+    expect(filterDriveEdges(edges, true)).toHaveLength(2)
+  })
+
+  it('routes a bus through a bus-only link a car cannot use', () => {
+    // The only A–B connection is a bus-only way.
+    const busNodes: RailNodeInput[] = [
+      { id: 1, lat: 0, lon: 0 },
+      { id: 2, lat: 0.01, lon: 0 }
+    ]
+    const busEdges = [{ a: 1, b: 2, kind: BUS_KIND }]
+    const ends = [{ lon: 0, lat: 0 }, { lon: 0, lat: 0.01 }]
+    expect('error' in computeRoadRoute(busNodes, busEdges, ends, [], 1, false)).toBe(true)
+    expect('coords' in computeRoadRoute(busNodes, busEdges, ends, [], 1, true)).toBe(true)
+  })
+})
+
 describe('road class + drive query', () => {
   it('maps highway tags to class codes (0 = unknown)', () => {
     expect(roadClassKind('motorway')).toBeGreaterThan(0)
@@ -133,11 +158,27 @@ describe('road class + drive query', () => {
     expect(roadClassKind(undefined)).toBe(0)
   })
 
-  it('fetches the drivable highway classes for a bbox', () => {
+  it('fetches the drivable highway classes plus bus-only ways for a bbox', () => {
     const q = buildDriveQuery({ minLat: 1, minLon: 2, maxLat: 3, maxLon: 4 })
     expect(q).toContain('highway')
     expect(q).toContain('1,2,3,4')
     for (const cls of DRIVE_HIGHWAY_TYPES) expect(q).toContain(cls)
+    expect(q).toContain('busway')
+    expect(q).toContain('psv')
+  })
+
+  it('tags a non-drivable bus way as the bus kind', () => {
+    const json = {
+      elements: [
+        { type: 'node', id: 1, lat: 0, lon: 0 },
+        { type: 'node', id: 2, lat: 0, lon: 0.01 },
+        { type: 'way', id: 10, nodes: [1, 2], tags: { highway: 'busway' } }
+      ]
+    }
+    const parsed = parseOverpassJson(json, (tags) =>
+      roadClassKind(tags.highway) !== 0 ? roadClassKind(tags.highway) : BUS_KIND
+    )
+    expect(parsed.edges[0]!.kind).toBe(BUS_KIND)
   })
 
   it('parses highway ways into road-class edges with a drive kind resolver', () => {

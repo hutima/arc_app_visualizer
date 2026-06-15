@@ -31,9 +31,13 @@ import { RAIL_SNAP_TYPES, routeWaypoints, type RailGraph } from './rail/snapRail
 import {
   buildDriveGraph,
   buildGuidedDriveGraph,
+  filterDriveEdges,
   guideLengthDeg,
-  emphasisForDistanceDeg
+  emphasisForDistanceDeg,
+  simplifyRoutePolyline
 } from './rail/roadRoute'
+import { findSimilarSegments, type SimilarMode } from './db/similarSegments'
+import { bulkRerouteSegments } from './rail/bulkRoute'
 import { rebuildRailMatches, rematchSegment } from './rail/buildMatches'
 import { fetchRailNetwork, fetchDriveNetwork } from './rail/overpass'
 import { addRailNetwork, getRailCoverage, clearRailNetwork, clearRailNetworkData } from './db/railStore'
@@ -45,7 +49,6 @@ import {
   routeBoxesCover,
   loadRouteForBbox
 } from './db/routeStore'
-import { simplifyIndices } from './importer/simplify'
 import {
   getSegmentEditState,
   saveSegmentEdits,
@@ -54,6 +57,7 @@ import {
   splitSegmentTyped,
   setSegmentType,
   deleteSegment,
+  bulkDeleteSegments,
   segmentStartTs,
   listMergeCandidates,
   mergeSegments,
@@ -130,12 +134,14 @@ function routeGraphFor(
   db: DatabaseSync,
   waypoints: ReadonlyArray<RoutePoint>,
   guide: ReadonlyArray<RoutePoint>,
-  emphasis: number
+  emphasis: number,
+  includeBus: boolean
 ): RailGraph {
   const wb = bboxOfPoints([...waypoints, ...guide])
-  // The graph weighting depends on the corridor *and* the highway emphasis, so
-  // both are in the key (emphasis quantized so via-drags still hit the cache).
-  const key = `${guideSignature(guide)}|e${Math.round(emphasis * 10)}`
+  // The graph weighting depends on the corridor, the highway emphasis, and
+  // whether bus-only ways are in play, so all three are in the key (emphasis
+  // quantized so via-drags still hit the cache).
+  const key = `${guideSignature(guide)}|e${Math.round(emphasis * 10)}|b${includeBus ? 1 : 0}`
   if (routeGraphCache && routeGraphCache.guideKey === key && bboxContains(routeGraphCache.bbox, wb)) {
     return routeGraphCache.graph
   }
@@ -147,29 +153,14 @@ function routeGraphFor(
     minLat: wb.minLat - pad, minLon: wb.minLon - pad,
     maxLat: wb.maxLat + pad, maxLon: wb.maxLon + pad
   }
-  const { nodes, edges } = loadRouteForBbox(db, load)
+  const loaded = loadRouteForBbox(db, load)
+  const edges = filterDriveEdges(loaded.edges, includeBus)
   const graph =
     guide.length >= 2
-      ? buildGuidedDriveGraph(nodes, edges, guide, emphasis)
-      : buildDriveGraph(nodes, edges, emphasis)
+      ? buildGuidedDriveGraph(loaded.nodes, edges, guide, emphasis)
+      : buildDriveGraph(loaded.nodes, edges, emphasis)
   routeGraphCache = { bbox: load, guideKey: key, graph }
   return graph
-}
-
-/** Simplify a routed polyline (interleaved lon,lat) so the draft stays light. */
-function simplifyRoutePolyline(coords: Float32Array): number[] {
-  const n = coords.length / 2
-  if (n < 2) return Array.from(coords)
-  const lons = new Float64Array(n)
-  const lats = new Float64Array(n)
-  for (let i = 0; i < n; i++) {
-    lons[i] = coords[i * 2]!
-    lats[i] = coords[i * 2 + 1]!
-  }
-  const kept = simplifyIndices(lons, lats, 1e-5) // ~1 m: drops collinear road vertices
-  const out: number[] = []
-  for (const k of kept) out.push(lons[k]!, lats[k]!)
-  return out
 }
 
 /** A place reference from the renderer: a merged place id, or a visit's id. */
@@ -410,6 +401,38 @@ export function registerIpc(ctx: IpcContext): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
+  // Bulk cleaning: select similar tracks, then reroute or delete them en masse.
+  ipcMain.handle('edits:findSimilar', (_e, segmentId: number, radiusM: number, mode: SimilarMode) => {
+    if (!Number.isInteger(segmentId) || !Number.isFinite(radiusM) || radiusM <= 0) return []
+    const m: SimilarMode = mode === 'passthrough' ? 'passthrough' : 'endpoints'
+    return findSimilarSegments(ctx.db, segmentId, Math.min(radiusM, 5000), m)
+  })
+  ipcMain.handle('edits:bulkReroute', async (_e, segmentIds: number[]) => {
+    try {
+      if (!Array.isArray(segmentIds) || !segmentIds.every((id) => Number.isInteger(id))) {
+        return { ok: false, error: 'invalid bulk reroute request' }
+      }
+      const t0 = performance.now()
+      const result = await bulkRerouteSegments(ctx.db, segmentIds)
+      insertPerf(
+        ctx.db, 'route.bulk', performance.now() - t0,
+        `rerouted=${result.rerouted} skipped=${result.skipped} failed=${result.failed}`
+      )
+      return { ok: true, result }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('edits:bulkDelete', (_e, segmentIds: number[]) => {
+    try {
+      if (!Array.isArray(segmentIds) || !segmentIds.every((id) => Number.isInteger(id))) {
+        return { ok: false, error: 'invalid bulk delete request' }
+      }
+      return { ok: true, count: bulkDeleteSegments(ctx.db, segmentIds) }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
   ipcMain.handle('edits:split', (_e, segmentId: number, seq: number) => {
     try {
       if (!Number.isInteger(segmentId) || !Number.isFinite(seq)) {
@@ -620,7 +643,7 @@ export function registerIpc(ctx: IpcContext): void {
   })
   ipcMain.handle(
     'route:preview',
-    (_e, waypoints: RoutePoint[], guide?: RoutePoint[], useGuideCorridor?: boolean) => {
+    (_e, waypoints: RoutePoint[], guide?: RoutePoint[], useGuideCorridor?: boolean, type?: string) => {
       try {
         const validPt = (w: RoutePoint): boolean => !!w && Number.isFinite(w.lat) && Number.isFinite(w.lon)
         if (!Array.isArray(waypoints) || waypoints.length < 2 || !waypoints.every(validPt)) {
@@ -642,12 +665,13 @@ export function registerIpc(ctx: IpcContext): void {
         // The GPS span is a *loose corridor* only for the first estimate; once
         // the user starts dragging vias it's dropped so the drags take over.
         const corridor = useGuideCorridor === false ? [] : span
+        const includeBus = type === 'bus'
         const t0 = performance.now()
-        const graph = routeGraphFor(ctx.db, waypoints, corridor, emphasis)
+        const graph = routeGraphFor(ctx.db, waypoints, corridor, emphasis, includeBus)
         const res = routeWaypoints(graph, waypoints, guideLengthDeg(corridor))
         insertPerf(
           ctx.db, 'route.preview', performance.now() - t0,
-          `points=${waypoints.length} emphasis=${emphasis.toFixed(1)} corridor=${corridor.length > 0}`
+          `points=${waypoints.length} emphasis=${emphasis.toFixed(1)} corridor=${corridor.length > 0} bus=${includeBus}`
         )
         if ('error' in res) return { ok: false, error: res.error }
         return { ok: true, coords: simplifyRoutePolyline(res.coords) }

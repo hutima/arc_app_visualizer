@@ -38,6 +38,13 @@ export const ROAD_CLASS: Readonly<Record<string, number>> = {
 export const DRIVE_HIGHWAY_TYPES: readonly string[] = Object.keys(ROAD_CLASS)
 
 /**
+ * Bus-only ways (dedicated busways/guideways and roads buses may use but cars
+ * may not). Stored with this kind and excluded from routing unless the track
+ * being rerouted is a bus, so a car never gets snapped onto a bus-only road.
+ */
+export const BUS_KIND = 20
+
+/**
  * Cost multiplier per road class — the arterial preference. Below 1 makes a
  * road "cheaper" than its length, so the shortest-cost path favors big roads:
  * a slightly longer motorway run beats a shorter residential one, matching how
@@ -52,13 +59,26 @@ const CLASS_PENALTY: Readonly<Record<number, number>> = {
   5: 0.9, // tertiary
   6: 1.05, // unclassified
   7: 1.1, // residential
-  8: 1.6 // living_street
+  8: 1.6, // living_street
+  [BUS_KIND]: 0.85 // bus-only way (mildly preferred for buses)
 }
 
 /** Map an OSM highway tag to its road-class code (0 = unknown/any drivable). */
 export function roadClassKind(highwayTag: string | undefined): number {
   if (!highwayTag) return 0
   return ROAD_CLASS[highwayTag] ?? 0
+}
+
+/**
+ * The edges a trip of this type may route on: cars/taxis/etc. exclude bus-only
+ * ways; buses keep everything (they drive normal roads too). The graph builder
+ * then drops any node left edge-less, so a car can never touch a bus corridor.
+ */
+export function filterDriveEdges<E extends { kind?: number }>(
+  edges: ReadonlyArray<E>,
+  includeBus: boolean
+): E[] {
+  return includeBus ? [...edges] : edges.filter((e) => e.kind !== BUS_KIND)
 }
 
 const penaltyForKind = (kind: number | undefined): number =>
@@ -157,6 +177,22 @@ function distToPolyline(px: number, py: number, xs: Float64Array, ys: Float64Arr
   return best
 }
 
+/** Simplify a routed polyline (interleaved lon,lat) so a draft stays light (~1 m). */
+export function simplifyRoutePolyline(coords: Float32Array): number[] {
+  const n = coords.length / 2
+  if (n < 2) return Array.from(coords)
+  const lons = new Float64Array(n)
+  const lats = new Float64Array(n)
+  for (let i = 0; i < n; i++) {
+    lons[i] = coords[i * 2]!
+    lats[i] = coords[i * 2 + 1]!
+  }
+  const kept = simplifyIndices(lons, lats, 1e-5)
+  const out: number[] = []
+  for (const k of kept) out.push(lons[k]!, lats[k]!)
+  return out
+}
+
 /** Total length (deg) of a guide polyline, for the routing budget. */
 export function guideLengthDeg(guide: ReadonlyArray<GuidePoint>): number {
   if (guide.length < 2) return 0
@@ -224,19 +260,21 @@ export function buildGuidedDriveGraph(
 /**
  * Compute the road route through `waypoints` in order, biased toward the
  * (optional) original-track `guide`, with a road-class `emphasis` (≥1, higher
- * = prefer highways harder). Returns the snapped polyline (interleaved lon,lat)
- * or an error to surface.
+ * = prefer highways harder). `includeBus` keeps bus-only ways in play (set it
+ * for bus trips). Returns the snapped polyline (interleaved lon,lat) or an error.
  */
 export function computeRoadRoute(
   nodes: RailNodeInput[],
   edges: ReadonlyArray<RailEdgeInput & { kind?: number }>,
   waypoints: ReadonlyArray<{ lon: number; lat: number }>,
   guide: ReadonlyArray<GuidePoint> = [],
-  emphasis = 1
+  emphasis = 1,
+  includeBus = false
 ): { coords: Float32Array } | { error: string } {
+  const usable = filterDriveEdges(edges, includeBus)
   const graph =
     guide.length >= 2
-      ? buildGuidedDriveGraph(nodes, edges, guide, emphasis)
-      : buildDriveGraph(nodes, edges, emphasis)
+      ? buildGuidedDriveGraph(nodes, usable, guide, emphasis)
+      : buildDriveGraph(nodes, usable, emphasis)
   return routeWaypoints(graph, waypoints, guideLengthDeg(guide))
 }

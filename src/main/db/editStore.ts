@@ -518,6 +518,26 @@ export function deleteSegment(db: DatabaseSync, segmentId: number): void {
   }
 }
 
+/** Delete many tracks in one transaction (bulk cleanup). Returns the count removed. */
+export function bulkDeleteSegments(db: DatabaseSync, segmentIds: number[]): number {
+  const ids = [...new Set(segmentIds)].filter((id) => Number.isInteger(id))
+  db.exec('BEGIN')
+  try {
+    let removed = 0
+    for (const id of ids) {
+      if (db.prepare('SELECT 1 FROM segments WHERE id = ?').get(id)) {
+        deleteSegmentData(db, id)
+        removed++
+      }
+    }
+    db.exec('COMMIT')
+    return removed
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
 /**
  * Apply the overlay to a segment's raw rows, preserving flags and elevation:
  * moves override coordinates in place, deletes drop the row, inserts are

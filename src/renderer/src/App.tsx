@@ -9,6 +9,7 @@ import type {
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
 import type {
+  BulkRerouteResult,
   DatasetStats,
   EditSaveMode,
   MergeCandidate,
@@ -19,7 +20,8 @@ import type {
   RailCoverage,
   RailMatchProgress,
   RailTuning,
-  RouteCoverage
+  RouteCoverage,
+  SimilarMode
 } from '../../shared/types'
 import { colorForCategory } from '../../shared/categories'
 import { yearRange } from '../../shared/yearColors'
@@ -45,6 +47,7 @@ import { DraftsPanel } from './components/DraftsPanel'
 import { MergePanel } from './components/MergePanel'
 import { MergePlacesPanel } from './components/MergePlacesPanel'
 import { PlaceDetailPanel } from './components/PlaceDetailPanel'
+import { BulkPanel } from './components/BulkPanel'
 
 type AppMode = 'display' | 'edit' | 'stats'
 
@@ -86,6 +89,14 @@ export function App(): React.JSX.Element {
   const [routeFetching, setRouteFetching] = useState(false)
   const [routeError, setRouteError] = useState<string | null>(null)
   const [rerouteInfo, setRerouteInfo] = useState<RerouteInfo | null>(null)
+  // Bulk-clean tool: an anchor track → its similar set, plus a road-route/delete op.
+  const [bulkAnchorId, setBulkAnchorId] = useState<number | null>(null)
+  const [bulkRadiusM, setBulkRadiusM] = useState(100)
+  const [bulkMode, setBulkMode] = useState<SimilarMode>('endpoints')
+  const [bulkSelection, setBulkSelection] = useState<number[]>([])
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkError, setBulkError] = useState<string | null>(null)
+  const [bulkResult, setBulkResult] = useState<BulkRerouteResult | null>(null)
   const [appMode, setAppMode] = useState<AppMode>('display')
   const [editTool, setEditTool] = useState<EditTool>('points')
   const [editSession, setEditSession] = useState<EditSessionInfo | null>(null)
@@ -173,6 +184,11 @@ export function App(): React.JSX.Element {
       controllerRef.current = controller
       controller.setEditListener((s) => setEditSession(s))
       controller.setRerouteListener((info) => setRerouteInfo(info))
+      controller.setBulkAnchorListener((segmentId) => {
+        setBulkResult(null)
+        setBulkError(null)
+        setBulkAnchorId(segmentId)
+      })
       // Permanent/structural changes (incl. a permanent click-off save) change
       // counts/types, so refresh the dataset stats afterward.
       controller.setDatasetChangeListener(() => void refreshData())
@@ -510,6 +526,78 @@ export function App(): React.JSX.Element {
     controllerRef.current?.setMergeHighlight([], [])
   }, [])
 
+  const clearBulk = useCallback((): void => {
+    setBulkAnchorId(null)
+    setBulkSelection([])
+    setBulkError(null)
+    setBulkResult(null)
+    controllerRef.current?.setBulkHighlight([])
+  }, [])
+
+  // Find the anchor's similar tracks (debounced for radius typing) and highlight
+  // them. Re-runs when the anchor, radius, or match mode changes.
+  useEffect(() => {
+    if (appMode !== 'edit' || editTool !== 'bulk' || bulkAnchorId === null) return
+    const handle = setTimeout(() => {
+      void window.api.findSimilarSegments(bulkAnchorId, bulkRadiusM, bulkMode).then((ids) => {
+        setBulkSelection(ids)
+        controllerRef.current?.setBulkHighlight(ids)
+      })
+    }, 200)
+    return () => clearTimeout(handle)
+  }, [appMode, editTool, bulkAnchorId, bulkRadiusM, bulkMode])
+
+  // Reroute every selected track to its own clean road route (revertible drafts).
+  const handleBulkRerouteAll = useCallback((): void => {
+    if (bulkSelection.length === 0) return
+    if (
+      !skipConfirmRef.current &&
+      !window.confirm(
+        `Reroute ${bulkSelection.length} track${bulkSelection.length === 1 ? '' : 's'} to clean road routes? They're saved as drafts you can review or discard.`
+      )
+    ) {
+      return
+    }
+    setBulkBusy(true)
+    setBulkError(null)
+    setBulkResult(null)
+    void window.api.bulkRerouteSegments(bulkSelection).then((res) => {
+      setBulkBusy(false)
+      if (res.ok && res.result) {
+        setBulkResult(res.result)
+        controllerRef.current?.scheduleRefresh(0)
+        refreshDraftCount()
+      } else {
+        setBulkError(res.error ?? 'bulk reroute failed')
+      }
+    })
+  }, [bulkSelection, refreshDraftCount])
+
+  // Delete every selected track (destructive) after a confirm.
+  const handleBulkDeleteAll = useCallback((): void => {
+    if (bulkSelection.length === 0) return
+    if (
+      !skipConfirmRef.current &&
+      !window.confirm(
+        `Delete ${bulkSelection.length} track${bulkSelection.length === 1 ? '' : 's'} for good? This cannot be undone.`
+      )
+    ) {
+      return
+    }
+    setBulkBusy(true)
+    setBulkError(null)
+    void window.api.bulkDeleteSegments(bulkSelection).then((res) => {
+      setBulkBusy(false)
+      if (res.ok) {
+        clearBulk()
+        controllerRef.current?.scheduleRefresh(0)
+        void refreshData()
+      } else {
+        setBulkError(res.error ?? 'bulk delete failed')
+      }
+    })
+  }, [bulkSelection, clearBulk, refreshData])
+
   // --- Places: merge & stats -------------------------------------------------
 
   const clearPlaceSelection = useCallback((): void => {
@@ -771,6 +859,7 @@ export function App(): React.JSX.Element {
       setEditError(null)
       clearMerge()
       clearPlaceSelection()
+      clearBulk()
       setStatsPlace(null)
       const controller = controllerRef.current
       if (!controller) return
@@ -782,7 +871,7 @@ export function App(): React.JSX.Element {
       }
       if (mode === 'stats') refreshDatasetStats()
     },
-    [clearMerge, clearPlaceSelection, editTool, refreshDatasetStats, refreshDraftCount]
+    [clearMerge, clearPlaceSelection, clearBulk, editTool, refreshDatasetStats, refreshDraftCount]
   )
 
   const handleEditTool = useCallback(
@@ -791,9 +880,10 @@ export function App(): React.JSX.Element {
       setEditError(null)
       clearMerge()
       clearPlaceSelection()
+      clearBulk()
       controllerRef.current?.setEditTool(tool)
     },
-    [clearMerge, clearPlaceSelection]
+    [clearMerge, clearPlaceSelection, clearBulk]
   )
 
   // Keep the merge map highlight in sync with the candidate/selection state.
@@ -1120,6 +1210,14 @@ export function App(): React.JSX.Element {
               >
                 Merge places
               </button>
+              <button
+                role="tab"
+                aria-selected={editTool === 'bulk'}
+                className={editTool === 'bulk' ? 'active' : ''}
+                onClick={() => handleEditTool('bulk')}
+              >
+                Bulk clean
+              </button>
             </div>
             <label className="color-mode-option" title="Also bakes a click-off save permanently">
               <input
@@ -1173,7 +1271,7 @@ export function App(): React.JSX.Element {
                 onMerge={handleMerge}
                 onClear={clearMerge}
               />
-            ) : (
+            ) : editTool === 'mergePlaces' ? (
               <>
                 <MergePlacesPanel
                   selected={placeSelection}
@@ -1200,6 +1298,24 @@ export function App(): React.JSX.Element {
                   />
                 )}
               </>
+            ) : (
+              <BulkPanel
+                anchorId={bulkAnchorId}
+                count={bulkSelection.length}
+                radiusM={bulkRadiusM}
+                mode={bulkMode}
+                busy={bulkBusy}
+                error={bulkError}
+                result={bulkResult}
+                hasRouteCoverage={routeCoverage !== null}
+                routeFetching={routeFetching}
+                onRadiusChange={setBulkRadiusM}
+                onModeChange={setBulkMode}
+                onRerouteAll={handleBulkRerouteAll}
+                onDeleteAll={handleBulkDeleteAll}
+                onFetchRoads={handleFetchRoute}
+                onClear={clearBulk}
+              />
             )}
           </>
         ) : (

@@ -28,8 +28,8 @@ const api: ArcApi = {
   fetchRouteNetwork: (bbox) => ipcRenderer.invoke('route:fetch', bbox),
   getRouteCoverage: () => ipcRenderer.invoke('route:coverage'),
   clearRouteNetwork: () => ipcRenderer.invoke('route:clear'),
-  previewRoadRoute: (waypoints, guide, useGuideCorridor) =>
-    ipcRenderer.invoke('route:preview', waypoints, guide, useGuideCorridor),
+  previewRoadRoute: (waypoints, guide, useGuideCorridor, type) =>
+    ipcRenderer.invoke('route:preview', waypoints, guide, useGuideCorridor, type),
   onRailProgress: (cb) => {
     const handler = (_event: unknown, p: RailMatchProgress): void => cb(p)
     ipcRenderer.on('rail:progress', handler)
@@ -47,6 +47,10 @@ const api: ArcApi = {
   revertAllDrafts: () => ipcRenderer.invoke('edits:revertAllDrafts'),
   setSegmentType: (segmentId, type) => ipcRenderer.invoke('edits:setType', segmentId, type),
   deleteSegment: (segmentId) => ipcRenderer.invoke('edits:deleteSegment', segmentId),
+  findSimilarSegments: (segmentId, radiusM, mode) =>
+    ipcRenderer.invoke('edits:findSimilar', segmentId, radiusM, mode),
+  bulkRerouteSegments: (segmentIds) => ipcRenderer.invoke('edits:bulkReroute', segmentIds),
+  bulkDeleteSegments: (segmentIds) => ipcRenderer.invoke('edits:bulkDelete', segmentIds),
   splitSegment: (segmentId, seq) => ipcRenderer.invoke('edits:split', segmentId, seq),
   splitSegmentTyped: (segmentId, seq, firstType, secondType) =>
     ipcRenderer.invoke('edits:splitTyped', segmentId, seq, firstType, secondType),
