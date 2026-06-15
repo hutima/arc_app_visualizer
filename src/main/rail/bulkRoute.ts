@@ -67,8 +67,11 @@ function rerouteOne(
 
   const spliced = spliceRoute(pts, 0, pts.length - 1, coords)
   const overlay: SegmentEditInput[] = []
+  // Serialize every non-null edit (route inserts + any prior 'move' kept on a
+  // boundary vertex), mirroring MapController.buildOverlay — otherwise a moved
+  // start/end point would revert when this draft replaces the old overlay.
   for (const p of spliced.points) {
-    if (p.edit === 'insert') overlay.push({ seq: p.seq, lat: p.lat, lon: p.lon, kind: 'insert' })
+    if (p.edit !== null) overlay.push({ seq: p.seq, lat: p.lat, lon: p.lon, kind: p.edit })
   }
   for (const d of spliced.deleted) overlay.push({ seq: d.seq, lat: d.lat, lon: d.lon, kind: 'delete' })
   saveSegmentEdits(db, segId, overlay, 'draft')

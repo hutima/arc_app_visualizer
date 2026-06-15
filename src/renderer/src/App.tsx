@@ -538,13 +538,20 @@ export function App(): React.JSX.Element {
   // them. Re-runs when the anchor, radius, or match mode changes.
   useEffect(() => {
     if (appMode !== 'edit' || editTool !== 'bulk' || bulkAnchorId === null) return
+    let cancelled = false
     const handle = setTimeout(() => {
       void window.api.findSimilarSegments(bulkAnchorId, bulkRadiusM, bulkMode).then((ids) => {
+        // Guard the in-flight query too: a slower earlier anchor must not
+        // overwrite a newer one's selection (latest-wins).
+        if (cancelled) return
         setBulkSelection(ids)
         controllerRef.current?.setBulkHighlight(ids)
       })
     }, 200)
-    return () => clearTimeout(handle)
+    return () => {
+      cancelled = true
+      clearTimeout(handle)
+    }
   }, [appMode, editTool, bulkAnchorId, bulkRadiusM, bulkMode])
 
   // Reroute every selected track to its own clean road route (revertible drafts).

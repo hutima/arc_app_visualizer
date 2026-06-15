@@ -84,4 +84,13 @@ describe('findSimilarSegments', () => {
   it('a tighter radius drops the offset match', () => {
     expect(findSimilarSegments(db, anchor, 20, 'endpoints')).toEqual([anchor])
   })
+
+  it('finds an east-offset match at high latitude (lon prefilter scaled by cos lat)', () => {
+    // At lat 60 a degree of longitude is ~55.7 km, so ~84 m east is 0.0015°,
+    // wider than the 0.0009° latitude radius. A naive lat-degree prefilter box
+    // would exclude a track shifted entirely east; the cos-scaled one keeps it.
+    const hi = addSegment(db, 'car', [[0, 60], [0, 60.0025], [0, 60.005]])
+    const eastShift = addSegment(db, 'car', [[0.0015, 60], [0.0015, 60.0025], [0.0015, 60.005]])
+    expect(findSimilarSegments(db, hi, 100, 'endpoints')).toContain(eastShift)
+  })
 })

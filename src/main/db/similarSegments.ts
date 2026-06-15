@@ -66,10 +66,14 @@ export function findSimilarSegments(
   if (!anchor) return []
   const { start: S, end: E } = anchor
   const rDeg = radiusM / M_PER_DEG
+  // A degree of longitude shrinks with latitude, so the radius spans more
+  // longitude-degrees away from the equator; widen the lon half-width by
+  // 1/cos(lat) or the prefilter box is too narrow and drops valid candidates.
+  const lonPad = (lat: number): number => rDeg / Math.max(0.05, Math.cos((lat * Math.PI) / 180))
 
   // Coarse, indexed prefilter: same type, bbox reaching within the radius of
-  // BOTH endpoints — a necessary condition for either mode. The precise
-  // haversine checks below winnow the candidates.
+  // BOTH endpoints — a necessary (superset) condition for either mode. The
+  // precise haversine checks below winnow the candidates.
   const cands = db.prepare(`
     SELECT id FROM segments
     WHERE type = ?
@@ -77,8 +81,8 @@ export function findSimilarSegments(
       AND max_lat >= ? AND min_lat <= ? AND max_lon >= ? AND min_lon <= ?
   `).all(
     seg.type,
-    S.lat - rDeg, S.lat + rDeg, S.lon - rDeg, S.lon + rDeg,
-    E.lat - rDeg, E.lat + rDeg, E.lon - rDeg, E.lon + rDeg
+    S.lat - rDeg, S.lat + rDeg, S.lon - lonPad(S.lat), S.lon + lonPad(S.lat),
+    E.lat - rDeg, E.lat + rDeg, E.lon - lonPad(E.lat), E.lon + lonPad(E.lat)
   ) as Array<{ id: number }>
 
   const near = (p: Pt, q: Pt): boolean => haversineMeters(p.lat, p.lon, q.lat, q.lon) <= radiusM
