@@ -193,6 +193,12 @@ export class MapController {
   private splitColors: { first: string; second: string } | null = null
   /** Reroute tool: the active [startIdx, endIdx] range, or null when closed. */
   private rerouteRange: { startIdx: number; endIdx: number } | null = null
+  /**
+   * The GPS corridor is used only for the first estimate of a span; once the
+   * user starts dragging/adding vias it's "consumed" so the drags take over and
+   * the route stops being pulled back toward the noisy original track.
+   */
+  private rerouteGuideConsumed = false
   /** Reroute tool: must-pass via pins, in order placed. */
   private rerouteVias: RoutePoint[] = []
   /** Reroute tool: last previewed route (interleaved lon,lat), or null. */
@@ -860,6 +866,8 @@ export class MapController {
     this.rerouteRange = { startIdx, endIdx }
     this.reroutePreview = null
     this.rerouteError = null
+    // A new span gets a fresh GPS-guided initial estimate.
+    this.rerouteGuideConsumed = false
     this.updateRerouteLayers()
     this.notifyReroute()
     this.schedulePreview(0)
@@ -873,19 +881,31 @@ export class MapController {
     }
     this.reroutePreviewToken++ // invalidate any in-flight preview
     this.rerouteRange = null
+    this.rerouteGuideConsumed = false
     this.rerouteVias = []
     this.reroutePreview = null
     this.rerouteBusy = false
     this.rerouteError = null
   }
 
-  /** Drop the via pins but keep the tool open; re-previews the direct route. */
+  /** Drop the via pins and re-estimate from the GPS corridor (a fresh start). */
   clearRerouteVias(): void {
     if (!this.rerouteActive) return
     this.rerouteVias = []
+    this.rerouteGuideConsumed = false
     this.updateRerouteLayers()
     this.notifyReroute()
     this.schedulePreview(0)
+  }
+
+  /** Mark the GPS corridor consumed (the user is now steering with vias). */
+  private consumeGuide(): void {
+    this.rerouteGuideConsumed = true
+  }
+
+  /** Corridor to send: the span for the initial estimate, empty once consumed. */
+  private currentCorridor(): { guide: RoutePoint[]; use: boolean } {
+    return { guide: this.rerouteGuide(), use: !this.rerouteGuideConsumed }
   }
 
   private notifyReroute(): void {
@@ -934,11 +954,11 @@ export class MapController {
   private async runPreview(): Promise<void> {
     const waypoints = this.rerouteWaypoints()
     if (!waypoints) return
-    const guide = this.rerouteGuide()
+    const { guide, use } = this.currentCorridor()
     const token = ++this.reroutePreviewToken
     this.rerouteBusy = true
     this.notifyReroute()
-    const res = await window.api.previewRoadRoute(waypoints, guide)
+    const res = await window.api.previewRoadRoute(waypoints, guide, use)
     if (token !== this.reroutePreviewToken || this.destroyed) return
     this.rerouteBusy = false
     if (res.ok && res.coords && res.coords.length >= 4) {
@@ -961,15 +981,16 @@ export class MapController {
     if (this.editingId === null || !this.rerouteRange) return { ok: false, error: 'reroute not open' }
     const waypoints = this.rerouteWaypoints()
     if (!waypoints) return { ok: false, error: 'reroute not open' }
-    const guide = this.rerouteGuide()
+    const { guide, use } = this.currentCorridor()
     const { startIdx, endIdx } = this.rerouteRange
 
-    // Recompute for the *current* via positions rather than trusting the
-    // debounced preview — a drop that lands between debounce ticks would
-    // otherwise apply the route through where the pin used to be.
+    // Recompute for the *current* via positions (and corridor state) rather than
+    // trusting the debounced preview — a drop that lands between debounce ticks
+    // would otherwise apply the route through where the pin used to be. Using the
+    // same corridor state keeps this identical to what's shown.
     this.rerouteBusy = true
     this.notifyReroute()
-    const res = await window.api.previewRoadRoute(waypoints, guide)
+    const res = await window.api.previewRoadRoute(waypoints, guide, use)
     if (this.destroyed) return { ok: false }
     this.rerouteBusy = false
     if (!res.ok || !res.coords || res.coords.length < 4) {
@@ -1138,6 +1159,7 @@ export class MapController {
       }
     }
     this.rerouteVias.splice(bestLeg, 0, { lat, lon: lng })
+    this.consumeGuide() // the user is steering now — drop the GPS corridor
     this.updateRerouteLayers()
     this.notifyReroute()
     this.schedulePreview(0)
@@ -1150,6 +1172,7 @@ export class MapController {
       if (!v) return
       v.lon = ev.lngLat.lng
       v.lat = ev.lngLat.lat
+      this.consumeGuide() // dragging takes priority over the GPS corridor
       this.updateRerouteLayers()
       this.schedulePreview() // live re-route while dragging
     }
@@ -1163,6 +1186,7 @@ export class MapController {
 
   private removeVia(idx: number): void {
     this.rerouteVias.splice(idx, 1)
+    this.consumeGuide()
     this.updateRerouteLayers()
     this.notifyReroute()
     this.schedulePreview(0)

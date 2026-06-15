@@ -4,7 +4,13 @@
  * equivalent residential path.
  */
 import { describe, it, expect } from 'vitest'
-import { computeRoadRoute, roadClassKind, DRIVE_HIGHWAY_TYPES, ROAD_CLASS } from '../src/main/rail/roadRoute'
+import {
+  computeRoadRoute,
+  roadClassKind,
+  emphasisForDistanceDeg,
+  DRIVE_HIGHWAY_TYPES,
+  ROAD_CLASS
+} from '../src/main/rail/roadRoute'
 import { buildDriveQuery, parseOverpassJson } from '../src/main/rail/overpass'
 import type { RailNodeInput } from '../src/main/rail/snapRail'
 
@@ -76,6 +82,45 @@ describe('computeRoadRoute', () => {
 
   it('errors on an empty network', () => {
     expect('error' in computeRoadRoute([], [], [A, B])).toBe(true)
+  })
+})
+
+describe('highway emphasis (long routes)', () => {
+  // A–B with a short residential straight (lon 0) and a longer motorway detour
+  // (lon 0.025). At base emphasis the shorter residential wins; at the high
+  // emphasis of a long trip the motorway is preferred despite being longer.
+  const n2: RailNodeInput[] = [
+    { id: 1, lat: 0, lon: 0 },
+    { id: 2, lat: 0.01, lon: 0 },
+    { id: 3, lat: 0.02, lon: 0 },
+    { id: 4, lat: 0.005, lon: 0.025 },
+    { id: 5, lat: 0.015, lon: 0.025 }
+  ]
+  const e2 = [
+    { a: 1, b: 2, kind: ROAD_CLASS.residential },
+    { a: 2, b: 3, kind: ROAD_CLASS.residential },
+    { a: 1, b: 4, kind: ROAD_CLASS.motorway },
+    { a: 4, b: 5, kind: ROAD_CLASS.motorway },
+    { a: 5, b: 3, kind: ROAD_CLASS.motorway }
+  ]
+
+  it('takes the residential straight at base emphasis', () => {
+    const res = computeRoadRoute(n2, e2, [A, B], [], 1)
+    expect('coords' in res).toBe(true)
+    if ('coords' in res) expect(lonsOf(res.coords).every((l) => Math.abs(l) < 1e-4)).toBe(true)
+  })
+
+  it('funnels onto the motorway detour at high emphasis', () => {
+    const res = computeRoadRoute(n2, e2, [A, B], [], 3)
+    expect('coords' in res).toBe(true)
+    if ('coords' in res) expect(lonsOf(res.coords).some((l) => Math.abs(l - 0.025) < 1e-4)).toBe(true)
+  })
+
+  it('ramps emphasis up with distance, capped', () => {
+    expect(emphasisForDistanceDeg(0)).toBe(1)
+    expect(emphasisForDistanceDeg(0.05)).toBe(1) // ~5.5 km → still base
+    expect(emphasisForDistanceDeg(0.18)).toBeGreaterThan(1.5) // ~20 km
+    expect(emphasisForDistanceDeg(0.45)).toBe(4) // ~50 km → capped
   })
 })
 
