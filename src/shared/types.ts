@@ -482,11 +482,14 @@ export interface ArcApi {
   /** Drop the fetched road network. Applied reroutes (edit overlays) are unaffected. */
   clearRouteNetwork(): Promise<{ ok: boolean }>
   /**
-   * Compute the best (arterial-preferring) road route through the given
-   * waypoints in order, for the reroute preview. Needs road coverage over the
-   * waypoints; returns the snapped polyline or an error to surface.
+   * Compute the best road route through the given waypoints in order, for the
+   * reroute preview. The route is biased *loosely* toward `guide` (the original
+   * track span) — used directionally to follow where the user actually went,
+   * tolerant of GPS uncertainty — while preferring arterials within that
+   * corridor. Needs road coverage over the waypoints; returns the snapped
+   * polyline or an error to surface.
    */
-  previewRoadRoute(waypoints: RoutePoint[]): Promise<RoutePreviewResult>
+  previewRoadRoute(waypoints: RoutePoint[], guide: RoutePoint[]): Promise<RoutePreviewResult>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
   /** Effective points of one segment (raw + draft edits) for the editor. */
   getSegmentEditState(segmentId: number): Promise<SegmentEditState | null>

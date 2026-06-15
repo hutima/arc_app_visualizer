@@ -9,6 +9,7 @@
  * streets. We reuse the rail graph + Dijkstra; only the edge weighting differs.
  */
 import { buildRailGraph, routeWaypoints, type RailGraph, type RailNodeInput, type RailEdgeInput } from './snapRail'
+import { simplifyIndices } from '../importer/simplify'
 import type { RailTuning } from '../../shared/types'
 
 /**
@@ -66,6 +67,88 @@ const penaltyForKind = (kind: number | undefined): number =>
 /** Anchoring is forgiving so deliberately-placed pins reach a nearby road. */
 export const DRIVE_TUNING: RailTuning = { snapRadiusM: 200, transferRadiusM: 0 }
 
+export interface GuidePoint {
+  lon: number
+  lat: number
+}
+
+/**
+ * Loose corridor around the original track. GPS is uncertain, so the route is
+ * *biased* toward the track, not pinned to it: a road within ~CORRIDOR_WIDTH of
+ * the track pays little, and the penalty grows quadratically beyond — but it's
+ * capped (not infinite), so a genuine detour (bridge, one-way pair, a stretch
+ * where the nearest road is just far) can still be taken. The width is generous
+ * because the intermediate points are used only directionally.
+ */
+const CORRIDOR_WIDTH_DEG = 0.002 // ~220 m half-width
+const CORRIDOR_STRENGTH = 4 // quadratic steepness past the width
+const CORRIDOR_MAX = 50 // cost cap, so the corridor guides without forbidding
+
+/** refCos for a small area, from the mean latitude of the points. */
+function refCosOf(pts: ReadonlyArray<GuidePoint>): number {
+  if (pts.length === 0) return 1
+  let s = 0
+  for (const p of pts) s += p.lat
+  return Math.max(0.1, Math.cos(((s / pts.length) * Math.PI) / 180))
+}
+
+/** Simplify + project a guide polyline to (x = lon·refCos, y = lat) arrays. */
+function projectGuide(
+  guide: ReadonlyArray<GuidePoint>,
+  refCos: number
+): { xs: Float64Array; ys: Float64Array } {
+  const lons = new Float64Array(guide.length)
+  const lats = new Float64Array(guide.length)
+  for (let i = 0; i < guide.length; i++) {
+    lons[i] = guide[i]!.lon
+    lats[i] = guide[i]!.lat
+  }
+  // The corridor shape doesn't need full resolution; thinning it also damps GPS
+  // jitter so the bias is directional, not point-chasing.
+  const kept =
+    guide.length > 2 ? simplifyIndices(lons, lats, CORRIDOR_WIDTH_DEG / 3) : guide.map((_, i) => i)
+  const xs = new Float64Array(kept.length)
+  const ys = new Float64Array(kept.length)
+  for (let i = 0; i < kept.length; i++) {
+    xs[i] = lons[kept[i]!]! * refCos
+    ys[i] = lats[kept[i]!]!
+  }
+  return { xs, ys }
+}
+
+/** Min distance (deg) from a projected point to a projected polyline. */
+function distToPolyline(px: number, py: number, xs: Float64Array, ys: Float64Array): number {
+  if (xs.length === 0) return Infinity
+  if (xs.length === 1) return Math.hypot(px - xs[0]!, py - ys[0]!)
+  let best = Infinity
+  for (let i = 0; i < xs.length - 1; i++) {
+    const ax = xs[i]!
+    const ay = ys[i]!
+    const dx = xs[i + 1]! - ax
+    const dy = ys[i + 1]! - ay
+    const len2 = dx * dx + dy * dy
+    let t = len2 === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / len2
+    t = t < 0 ? 0 : t > 1 ? 1 : t
+    const d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+    if (d < best) best = d
+  }
+  return best
+}
+
+/** Total length (deg) of a guide polyline, for the routing budget. */
+export function guideLengthDeg(guide: ReadonlyArray<GuidePoint>): number {
+  if (guide.length < 2) return 0
+  const refCos = refCosOf(guide)
+  let len = 0
+  for (let i = 1; i < guide.length; i++) {
+    len += Math.hypot(
+      (guide[i]!.lon - guide[i - 1]!.lon) * refCos,
+      guide[i]!.lat - guide[i - 1]!.lat
+    )
+  }
+  return len
+}
+
 /** Build the routable road graph: real geometry for anchoring, class-weighted for routing. */
 export function buildDriveGraph(
   nodes: RailNodeInput[],
@@ -76,13 +159,55 @@ export function buildDriveGraph(
 }
 
 /**
- * Compute the arterial-preferring road route through `waypoints` in order.
- * Returns the snapped polyline (interleaved lon,lat) or an error to surface.
+ * Build the drive graph with a loose corridor bias toward the original track:
+ * each road's cost is multiplied by how far its midpoint sits from the track
+ * polyline, so the route follows where the user actually went (using the noisy
+ * intermediate points only directionally — never forced through any of them)
+ * while still preferring arterials among the roads in the corridor. Far-off
+ * roads are expensive but not forbidden. Falls back to the plain class-weighted
+ * graph when there's no usable guide.
+ */
+export function buildGuidedDriveGraph(
+  nodes: RailNodeInput[],
+  edges: ReadonlyArray<RailEdgeInput & { kind?: number }>,
+  guide: ReadonlyArray<GuidePoint>,
+  tuning: RailTuning = DRIVE_TUNING
+): RailGraph {
+  if (guide.length < 2) return buildDriveGraph(nodes, edges, tuning)
+  const refCos = refCosOf(guide)
+  const { xs, ys } = projectGuide(guide, refCos)
+  const coordById = new Map(nodes.map((n) => [n.id, n]))
+  // Precompute a corridor factor per edge (keyed by the edge object buildRailGraph
+  // will pass straight back into edgeCost), so the distance work happens once.
+  const factor = new Map<RailEdgeInput, number>()
+  for (const e of edges) {
+    const a = coordById.get(e.a)
+    const b = coordById.get(e.b)
+    if (!a || !b) continue
+    const mx = ((a.lon + b.lon) / 2) * refCos
+    const my = (a.lat + b.lat) / 2
+    const r = distToPolyline(mx, my, xs, ys) / CORRIDOR_WIDTH_DEG
+    factor.set(e, Math.min(CORRIDOR_MAX, 1 + CORRIDOR_STRENGTH * r * r))
+  }
+  return buildRailGraph(
+    nodes,
+    edges as RailEdgeInput[],
+    tuning,
+    (e, dist) => dist * penaltyForKind(e.kind) * (factor.get(e) ?? 1)
+  )
+}
+
+/**
+ * Compute the road route through `waypoints` in order, biased toward the
+ * (optional) original-track `guide`. Returns the snapped polyline (interleaved
+ * lon,lat) or an error to surface.
  */
 export function computeRoadRoute(
   nodes: RailNodeInput[],
   edges: ReadonlyArray<RailEdgeInput & { kind?: number }>,
-  waypoints: ReadonlyArray<{ lon: number; lat: number }>
+  waypoints: ReadonlyArray<{ lon: number; lat: number }>,
+  guide: ReadonlyArray<GuidePoint> = []
 ): { coords: Float32Array } | { error: string } {
-  return routeWaypoints(buildDriveGraph(nodes, edges), waypoints)
+  const graph = guide.length >= 2 ? buildGuidedDriveGraph(nodes, edges, guide) : buildDriveGraph(nodes, edges)
+  return routeWaypoints(graph, waypoints, guideLengthDeg(guide))
 }

@@ -53,6 +53,22 @@ describe('computeRoadRoute', () => {
     }
   })
 
+  it('follows the track corridor over the far arterial when given a guide', () => {
+    // The guide runs along the residential line (lon 0); the arterial detour is
+    // ~550 m east. The loose corridor bias should keep the route on the line the
+    // user actually took, overriding the arterial preference for a far road.
+    const guide = [
+      { lon: 0, lat: 0 },
+      { lon: 0, lat: 0.01 },
+      { lon: 0, lat: 0.02 }
+    ]
+    const res = computeRoadRoute(nodes, edges, [A, B], guide)
+    expect('coords' in res).toBe(true)
+    if ('coords' in res) {
+      expect(lonsOf(res.coords).every((l) => Math.abs(l) < 1e-4)).toBe(true)
+    }
+  })
+
   it('errors when a waypoint is too far from any road', () => {
     const res = computeRoadRoute(nodes, edges, [A, { lon: 5, lat: 5 }])
     expect('error' in res).toBe(true)
