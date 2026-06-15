@@ -507,13 +507,19 @@ export function matchRideToRail(
  * Route a road trip through an ordered list of waypoints (the manual reroute
  * tool, not the automatic matcher). Each waypoint anchors to the nearest road
  * and consecutive anchors are joined by a Dijkstra along the graph; the graph's
- * weights carry the arterial preference (see roadRoute). Unlike the rail
- * matcher there is no time gate or break sentinel — the user asked for a route,
- * so a leg that can't be routed is a hard failure to report, not a gap to draw.
+ * weights carry the arterial preference and (when the graph was built guided)
+ * the loose corridor bias toward the original track. Unlike the rail matcher
+ * there is no time gate or break sentinel — the user asked for a route, so a
+ * leg that can't be routed is a hard failure to report, not a gap to draw.
+ *
+ * `guideLenDeg` is the original track span's length: it widens the routing
+ * budget so a route that *follows a winding corridor* (long, even when its
+ * endpoints are close as the crow flies) isn't pruned as "too long".
  */
 export function routeWaypoints(
   g: RailGraph,
-  waypoints: ReadonlyArray<{ lon: number; lat: number }>
+  waypoints: ReadonlyArray<{ lon: number; lat: number }>,
+  guideLenDeg = 0
 ): { coords: Float32Array } | { error: string } {
   if (g.empty) return { error: 'no road network loaded for this area — fetch roads first' }
   if (waypoints.length < 2) return { error: 'need at least two points to route' }
@@ -541,11 +547,12 @@ export function routeWaypoints(
     const a = g.pos.get(from)!
     const b = g.pos.get(to)!
     const straight = Math.hypot(a.x - b.x, a.y - b.y)
-    // Cap in *weighted* units, so it must clear both a generous geometric
-    // detour and the road-class penalty inflation (edge weight is up to ~1.6×
-    // its length on the slowest class) — otherwise a valid but high-penalty
-    // detour gets rejected as "no route". 12× ≈ 1.6 × a 7.5× geometric detour.
-    const route = dijkstra(g, from, to, 12 * straight + 0.6)
+    // Cap in *weighted* units, so it must clear a generous geometric detour,
+    // the road-class penalty, and the corridor-bias inflation. The guide-length
+    // term lets a route track a long winding corridor whose ends are near in a
+    // straight line; the loaded graph is spatially bounded, so a generous cap
+    // just explores the local area, it doesn't run away.
+    const route = dijkstra(g, from, to, 12 * straight + 30 * guideLenDeg + 0.6)
     if (!route) {
       return { error: 'no road route between two of the points — add a via point or fetch more area' }
     }

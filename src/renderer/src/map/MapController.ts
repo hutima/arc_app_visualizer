@@ -911,6 +911,20 @@ export class MapController {
     return [{ lat: a.lat, lon: a.lon }, ...this.rerouteVias, { lat: b.lat, lon: b.lon }]
   }
 
+  /**
+   * The original track points across the span — the loose corridor the route
+   * follows directionally (the router uses them as bias, never as hard points).
+   */
+  private rerouteGuide(): RoutePoint[] {
+    if (!this.rerouteRange) return []
+    const out: RoutePoint[] = []
+    for (let i = this.rerouteRange.startIdx; i <= this.rerouteRange.endIdx; i++) {
+      const p = this.editPts[i]
+      if (p) out.push({ lat: p.lat, lon: p.lon })
+    }
+    return out
+  }
+
   /** Debounced re-preview, so dragging a via re-routes live without flooding IPC. */
   private schedulePreview(delayMs = 110): void {
     if (this.rerouteTimer) clearTimeout(this.rerouteTimer)
@@ -920,10 +934,11 @@ export class MapController {
   private async runPreview(): Promise<void> {
     const waypoints = this.rerouteWaypoints()
     if (!waypoints) return
+    const guide = this.rerouteGuide()
     const token = ++this.reroutePreviewToken
     this.rerouteBusy = true
     this.notifyReroute()
-    const res = await window.api.previewRoadRoute(waypoints)
+    const res = await window.api.previewRoadRoute(waypoints, guide)
     if (token !== this.reroutePreviewToken || this.destroyed) return
     this.rerouteBusy = false
     if (res.ok && res.coords && res.coords.length >= 4) {
@@ -946,6 +961,7 @@ export class MapController {
     if (this.editingId === null || !this.rerouteRange) return { ok: false, error: 'reroute not open' }
     const waypoints = this.rerouteWaypoints()
     if (!waypoints) return { ok: false, error: 'reroute not open' }
+    const guide = this.rerouteGuide()
     const { startIdx, endIdx } = this.rerouteRange
 
     // Recompute for the *current* via positions rather than trusting the
@@ -953,7 +969,7 @@ export class MapController {
     // otherwise apply the route through where the pin used to be.
     this.rerouteBusy = true
     this.notifyReroute()
-    const res = await window.api.previewRoadRoute(waypoints)
+    const res = await window.api.previewRoadRoute(waypoints, guide)
     if (this.destroyed) return { ok: false }
     this.rerouteBusy = false
     if (!res.ok || !res.coords || res.coords.length < 4) {

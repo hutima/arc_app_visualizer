@@ -28,7 +28,7 @@ import { averageRailTracks } from './db/railAverage'
 import { collectGpxFiles } from './importer/importFiles'
 import { analyzeImportOverlap } from './importer/importOverlap'
 import { RAIL_SNAP_TYPES, routeWaypoints, type RailGraph } from './rail/snapRail'
-import { buildDriveGraph } from './rail/roadRoute'
+import { buildDriveGraph, buildGuidedDriveGraph, guideLengthDeg } from './rail/roadRoute'
 import { rebuildRailMatches, rematchSegment } from './rail/buildMatches'
 import { fetchRailNetwork, fetchDriveNetwork } from './rail/overpass'
 import { addRailNetwork, getRailCoverage, clearRailNetwork, clearRailNetworkData } from './db/railStore'
@@ -84,12 +84,22 @@ export interface IpcContext {
 let activeImport: Worker | null = null
 
 /**
- * Cached drivable graph for the reroute preview. Building it from the stored
- * road edges is the costly step, so dragging a via pin (which re-routes live)
- * reuses one graph for a padded area instead of rebuilding each frame.
- * Invalidated whenever the road network changes (fetch / clear).
+ * Cached drivable graph for the reroute preview. Building it (and its corridor
+ * weighting) from the stored road edges is the costly step, so dragging a via
+ * pin (which re-routes live, with the span's corridor unchanged) reuses one
+ * graph for a padded area instead of rebuilding each frame. Keyed by the
+ * corridor guide too, so changing the span rebuilds. Invalidated whenever the
+ * road network changes (fetch / clear).
  */
-let routeGraphCache: { bbox: LatLonBBox; graph: RailGraph } | null = null
+let routeGraphCache: { bbox: LatLonBBox; guideKey: string; graph: RailGraph } | null = null
+
+/** Cheap identity of a corridor guide — span length + its endpoints. */
+const guideSignature = (guide: ReadonlyArray<RoutePoint>): string => {
+  if (guide.length === 0) return ''
+  const a = guide[0]!
+  const b = guide[guide.length - 1]!
+  return `${guide.length}:${a.lat.toFixed(5)},${a.lon.toFixed(5)}:${b.lat.toFixed(5)},${b.lon.toFixed(5)}`
+}
 
 const bboxOfPoints = (pts: ReadonlyArray<RoutePoint>): LatLonBBox => {
   let minLat = Infinity, minLon = Infinity, maxLat = -Infinity, maxLon = -Infinity
@@ -106,10 +116,21 @@ const bboxContains = (outer: LatLonBBox, inner: LatLonBBox): boolean =>
   inner.minLat >= outer.minLat && inner.maxLat <= outer.maxLat &&
   inner.minLon >= outer.minLon && inner.maxLon <= outer.maxLon
 
-/** A drivable graph covering the waypoints, reusing the cache when it still fits. */
-function routeGraphFor(db: DatabaseSync, waypoints: ReadonlyArray<RoutePoint>): RailGraph {
-  const wb = bboxOfPoints(waypoints)
-  if (routeGraphCache && bboxContains(routeGraphCache.bbox, wb)) return routeGraphCache.graph
+/**
+ * A drivable graph covering the waypoints + the corridor guide, reusing the
+ * cache when it still fits the same guide. The graph is corridor-weighted
+ * toward the guide (the original track span) so the route follows it loosely.
+ */
+function routeGraphFor(
+  db: DatabaseSync,
+  waypoints: ReadonlyArray<RoutePoint>,
+  guide: ReadonlyArray<RoutePoint>
+): RailGraph {
+  const wb = bboxOfPoints([...waypoints, ...guide])
+  const guideKey = guideSignature(guide)
+  if (routeGraphCache && routeGraphCache.guideKey === guideKey && bboxContains(routeGraphCache.bbox, wb)) {
+    return routeGraphCache.graph
+  }
   // Pad generously so (a) nearby pin drags keep reusing this graph and (b) the
   // best route has room to bow out past the waypoints' own box before the load
   // window clips it — at least ~4 km, or the span itself for a long reroute.
@@ -119,8 +140,10 @@ function routeGraphFor(db: DatabaseSync, waypoints: ReadonlyArray<RoutePoint>): 
     maxLat: wb.maxLat + pad, maxLon: wb.maxLon + pad
   }
   const { nodes, edges } = loadRouteForBbox(db, load)
-  routeGraphCache = { bbox: load, graph: buildDriveGraph(nodes, edges) }
-  return routeGraphCache.graph
+  const graph =
+    guide.length >= 2 ? buildGuidedDriveGraph(nodes, edges, guide) : buildDriveGraph(nodes, edges)
+  routeGraphCache = { bbox: load, guideKey, graph }
+  return graph
 }
 
 /** Simplify a routed polyline (interleaved lon,lat) so the draft stays light. */
@@ -585,14 +608,15 @@ export function registerIpc(ctx: IpcContext): void {
     routeGraphCache = null
     return { ok: true }
   })
-  ipcMain.handle('route:preview', (_e, waypoints: RoutePoint[]) => {
+  ipcMain.handle('route:preview', (_e, waypoints: RoutePoint[], guide?: RoutePoint[]) => {
     try {
-      if (
-        !Array.isArray(waypoints) || waypoints.length < 2 ||
-        !waypoints.every((w) => w && Number.isFinite(w.lat) && Number.isFinite(w.lon))
-      ) {
+      const validPt = (w: RoutePoint): boolean => !!w && Number.isFinite(w.lat) && Number.isFinite(w.lon)
+      if (!Array.isArray(waypoints) || waypoints.length < 2 || !waypoints.every(validPt)) {
         return { ok: false, error: 'need at least two valid points to route' }
       }
+      // The guide (original track span) is a loose corridor bias, not a
+      // constraint — drop any invalid points rather than failing the route.
+      const corridor = Array.isArray(guide) ? guide.filter(validPt) : []
       const boxes = routeCoverageBoxes(ctx.db)
       if (boxes.length === 0) {
         return { ok: false, error: 'no roads fetched — fetch roads in view first' }
@@ -601,7 +625,8 @@ export function registerIpc(ctx: IpcContext): void {
         return { ok: false, error: 'a point is outside fetched road coverage — fetch roads there first' }
       }
       const t0 = performance.now()
-      const res = routeWaypoints(routeGraphFor(ctx.db, waypoints), waypoints)
+      const graph = routeGraphFor(ctx.db, waypoints, corridor)
+      const res = routeWaypoints(graph, waypoints, guideLengthDeg(corridor))
       insertPerf(ctx.db, 'route.preview', performance.now() - t0, `points=${waypoints.length}`)
       if ('error' in res) return { ok: false, error: res.error }
       return { ok: true, coords: simplifyRoutePolyline(res.coords) }
