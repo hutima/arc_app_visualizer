@@ -129,6 +129,20 @@ export interface RoutePreviewResult {
 }
 
 /**
+ * How "select similar tracks" matches an anchor (always same type +
+ * direction-aware): 'endpoints' = the candidate's own start/end are within the
+ * radius; 'passthrough' = it has a point near the start then, later, near the end.
+ */
+export type SimilarMode = 'endpoints' | 'passthrough'
+
+/** Outcome of a bulk reroute over a selection of tracks. */
+export interface BulkRerouteResult {
+  rerouted: number
+  skipped: number
+  failed: number
+}
+
+/**
  * User-tweakable matcher ranges (meters), persisted in settings.json under
  * `rail` and editable from the Cleaning panel. Changing them re-runs the
  * cached match pass.
@@ -488,12 +502,14 @@ export interface ArcApi {
    * `useGuideCorridor` is true (the initial estimate), also a loose corridor
    * bias so the route follows where the user actually went. Once the user
    * starts dragging vias, pass `useGuideCorridor = false` so the GPS is ignored
-   * and the drags take priority. Needs road coverage over the waypoints.
+   * and the drags take priority. `type` is the track's activity type; a `bus`
+   * may route on bus-only ways, anything else can't. Needs road coverage.
    */
   previewRoadRoute(
     waypoints: RoutePoint[],
     guide: RoutePoint[],
-    useGuideCorridor: boolean
+    useGuideCorridor: boolean,
+    type: string
   ): Promise<RoutePreviewResult>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
   /** Effective points of one segment (raw + draft edits) for the editor. */
@@ -524,6 +540,18 @@ export interface ArcApi {
   setSegmentType(segmentId: number, type: string): Promise<{ ok: boolean; error?: string }>
   /** Delete a whole track (segment) and everything derived from it. */
   deleteSegment(segmentId: number): Promise<{ ok: boolean; error?: string }>
+  /**
+   * Tracks similar to the anchor (same type, direction-aware) for bulk cleaning:
+   * 'endpoints' matches tracks starting + ending within `radiusM`; 'passthrough'
+   * matches longer tracks running through both points. Includes the anchor.
+   */
+  findSimilarSegments(segmentId: number, radiusM: number, mode: SimilarMode): Promise<number[]>
+  /** Snap each given track to its own clean road route, as revertible drafts. */
+  bulkRerouteSegments(
+    segmentIds: number[]
+  ): Promise<{ ok: boolean; result?: BulkRerouteResult; error?: string }>
+  /** Delete many tracks at once. Returns how many were removed. */
+  bulkDeleteSegments(segmentIds: number[]): Promise<{ ok: boolean; count?: number; error?: string }>
   /**
    * Split a segment into two at one of its points (by seq). Commits the
    * segment's current overlay; returns the id of the new (second-half)

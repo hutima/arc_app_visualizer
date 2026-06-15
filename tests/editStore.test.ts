@@ -23,6 +23,7 @@ import {
   splitSegmentTyped,
   setSegmentType,
   deleteSegment,
+  bulkDeleteSegments,
   type CleanPoint
 } from '../src/main/db/editStore'
 import { queryViewportSegments } from '../src/main/db/queries'
@@ -635,5 +636,17 @@ describe('change type / delete track', () => {
     }
     expect(db.prepare('SELECT 1 FROM segments WHERE id = ?').get(segId)).toBeUndefined()
     expect(() => deleteSegment(db, segId)).toThrow(/unknown segment/)
+  })
+
+  it('bulk-deletes many segments, ignoring unknown ids', () => {
+    const a = seedSegment()
+    const b = seedSegment()
+    const c = seedSegment()
+    // Duplicates and a non-existent id are tolerated; count is distinct + real.
+    const removed = bulkDeleteSegments(db, [a, b, a, 999999])
+    expect(removed).toBe(2)
+    expect(db.prepare('SELECT 1 FROM segments WHERE id = ?').get(a)).toBeUndefined()
+    expect(db.prepare('SELECT 1 FROM segments WHERE id = ?').get(b)).toBeUndefined()
+    expect(db.prepare('SELECT 1 FROM segments WHERE id = ?').get(c)).toBeDefined()
   })
 })

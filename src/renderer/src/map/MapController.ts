@@ -85,6 +85,8 @@ const EDIT_RANGE_LAYER = 'arc-edit-range-circle'
 // Merge-mode highlights ride on the tracks source (filtered by segment id).
 const MERGE_CAND_LAYER = 'arc-merge-candidates-line'
 const MERGE_SEL_LAYER = 'arc-merge-selected-line'
+// Bulk-mode highlight (the similar-track selection), also on the tracks source.
+const BULK_HL_LAYER = 'arc-bulk-highlight-line'
 // Place highlight (stats inspection / merge selection): its own source of
 // rings at place centroids, so it works for off-screen places too.
 const PLACE_HL_SOURCE = 'arc-place-highlight'
@@ -105,10 +107,11 @@ const LINE_INSERT_TOLERANCE_PX = 8
 const PLACE_PICK_PAD_PX = 8
 
 /**
- * Editing sub-tool: per-point vertex editing, stitching tracks together, or
- * combining stationary places (and folding a track into one).
+ * Editing sub-tool: per-point vertex editing, stitching tracks together,
+ * combining stationary places (and folding a track into one), or bulk-selecting
+ * similar tracks for mass cleaning.
  */
-export type EditTool = 'points' | 'merge' | 'mergePlaces'
+export type EditTool = 'points' | 'merge' | 'mergePlaces' | 'bulk'
 
 /** A clicked/selected place: the rendered dot, a backend ref, name, location. */
 export interface PlacePick {
@@ -216,11 +219,15 @@ export class MapController {
   private editListener: ((s: EditSessionInfo | null) => void) | null = null
   private splitRequestListener: ((segmentId: number, seq: number) => void) | null = null
   private mergeAnchorListener: ((segmentId: number) => void) | null = null
+  /** Bulk tool: clicking a track reports it as the anchor for "find similar". */
+  private bulkAnchorListener: ((segmentId: number) => void) | null = null
   /** Notified after a permanent/structural change so React can refresh stats. */
   private datasetChangeListener: (() => void) | null = null
   /** Last merge highlight ids, so a theme re-add can restore them. */
   private mergeCandidateIds: number[] = []
   private mergeSelectedIds: number[] = []
+  /** Bulk-selection highlight ids, restored on a theme re-add. */
+  private bulkHighlightIds: number[] = []
   /** Stats mode: clicking a place reports it for inspection (no track edits). */
   private statsMode = false
   /** Centroids of highlighted places (rings); restored on a theme re-add. */
@@ -450,6 +457,16 @@ export class MapController {
       filter: matchIds([]),
       paint: { 'line-color': '#ffd166', 'line-width': 5, 'line-opacity': 1 }
     } as LayerSpecification)
+    // Bulk-selection highlight (the similar tracks), redrawn from the tracks
+    // source filtered by id; orange so it reads against the dimmed base tracks.
+    this.map.addLayer({
+      id: BULK_HL_LAYER,
+      type: 'line',
+      source: TRACKS_SOURCE,
+      layout: { 'line-cap': 'round', 'line-join': 'round', visibility: 'none' },
+      filter: matchIds([]),
+      paint: { 'line-color': '#fb923c', 'line-width': 4, 'line-opacity': 0.95 }
+    } as LayerSpecification)
 
     // Place highlight rings (stats inspection / merge-places selection), drawn
     // at place centroids on their own source so off-screen places still ring.
@@ -475,6 +492,7 @@ export class MapController {
     // any merge / place highlights.
     if (this.editingId !== null) this.updateEditLayers()
     this.setMergeHighlight(this.mergeCandidateIds, this.mergeSelectedIds)
+    this.setBulkHighlight(this.bulkHighlightIds)
     this.setPlaceHighlight(this.placeHighlight)
     this.updateSplitPreview()
     this.updateRerouteLayers()
@@ -640,6 +658,20 @@ export class MapController {
     this.mergeAnchorListener = cb
   }
 
+  /** Receives the segment clicked as the "find similar" anchor (bulk tool only). */
+  setBulkAnchorListener(cb: (segmentId: number) => void): void {
+    this.bulkAnchorListener = cb
+  }
+
+  /** Highlight the bulk-selected (similar) tracks by id; gated to the bulk tool. */
+  setBulkHighlight(ids: number[]): void {
+    this.bulkHighlightIds = ids
+    if (!this.map.getLayer(BULK_HL_LAYER)) return
+    const show = this.editMode && this.editTool === 'bulk'
+    this.map.setFilter(BULK_HL_LAYER, matchIds(ids))
+    this.map.setLayoutProperty(BULK_HL_LAYER, 'visibility', show ? 'visible' : 'none')
+  }
+
   /** Notified after a permanent/structural change so React can refresh stats. */
   setDatasetChangeListener(cb: () => void): void {
     this.datasetChangeListener = cb
@@ -661,6 +693,7 @@ export class MapController {
     if (!on) {
       this.closeEditSession()
       this.setMergeHighlight([], [])
+      this.setBulkHighlight([])
       this.setPlaceHighlight([])
     }
     this.applyEditEmphasis()
@@ -672,6 +705,7 @@ export class MapController {
     this.editTool = tool
     this.closeEditSession()
     this.setMergeHighlight([], [])
+    this.setBulkHighlight([])
     this.setPlaceHighlight([])
     this.applyEditEmphasis()
   }
@@ -958,7 +992,7 @@ export class MapController {
     const token = ++this.reroutePreviewToken
     this.rerouteBusy = true
     this.notifyReroute()
-    const res = await window.api.previewRoadRoute(waypoints, guide, use)
+    const res = await window.api.previewRoadRoute(waypoints, guide, use, this.editType)
     if (token !== this.reroutePreviewToken || this.destroyed) return
     this.rerouteBusy = false
     if (res.ok && res.coords && res.coords.length >= 4) {
@@ -990,7 +1024,7 @@ export class MapController {
     // same corridor state keeps this identical to what's shown.
     this.rerouteBusy = true
     this.notifyReroute()
-    const res = await window.api.previewRoadRoute(waypoints, guide, use)
+    const res = await window.api.previewRoadRoute(waypoints, guide, use, this.editType)
     if (this.destroyed) return { ok: false }
     this.rerouteBusy = false
     if (!res.ok || !res.coords || res.coords.length < 4) {
@@ -1346,6 +1380,11 @@ export class MapController {
       // Clicking a track anchors the merge window on it; selection happens in
       // the panel, so this is a fresh anchor each time.
       this.mergeAnchorListener?.(id)
+      return
+    }
+    if (this.editTool === 'bulk') {
+      // Clicking a track anchors the "find similar" search on it.
+      this.bulkAnchorListener?.(id)
       return
     }
     if (this.editTool === 'mergePlaces') {

@@ -7,7 +7,7 @@
  * snap runs offline. The JSON parser is pure so it's tested without network.
  */
 import { railKindCode, RAIL_KIND, type RailNodeInput, type RailEdgeInput } from './snapRail'
-import { roadClassKind, DRIVE_HIGHWAY_TYPES } from './roadRoute'
+import { roadClassKind, BUS_KIND, DRIVE_HIGHWAY_TYPES } from './roadRoute'
 import type { OsmLayer } from '../../shared/types'
 
 export interface BBox {
@@ -75,11 +75,19 @@ export function buildOverpassQuery(bbox: BBox, layer: OsmLayer): string {
  * The drivable road network for routing (the manual reroute tool). The full
  * road network, not just tunnels — so it's fetched separately and only on
  * demand. service ways are excluded (see roadRoute) to keep the graph routable.
+ * Also pulls bus-only ways (dedicated busways/guideways and roads where buses
+ * are allowed but general traffic is not), tagged BUS_KIND so they're used only
+ * when rerouting a bus. Tunnels are included implicitly (no tunnel filter).
  */
 export function buildDriveQuery(bbox: BBox): string {
   const b = `${bbox.minLat},${bbox.minLon},${bbox.maxLat},${bbox.maxLon}`
-  const selector = `  way["highway"~"^(${DRIVE_HIGHWAY_TYPES.join('|')})$"](${b});`
-  return ['[out:json][timeout:180];', '(', selector, ');', '(._;>;);', 'out qt;'].join('\n')
+  const selectors = [
+    `  way["highway"~"^(${DRIVE_HIGHWAY_TYPES.join('|')})$"](${b});`,
+    `  way["highway"~"^(busway|bus_guideway)$"](${b});`,
+    `  way["highway"]["psv"~"^(yes|designated)$"](${b});`,
+    `  way["highway"]["bus"~"^(yes|designated)$"](${b});`
+  ]
+  return ['[out:json][timeout:180];', '(', ...selectors, ');', '(._;>;);', 'out qt;'].join('\n')
 }
 
 /**
@@ -92,8 +100,15 @@ export type WayKind = (tags: Record<string, string>) => number
 const railWayKind: WayKind = (tags) =>
   tags.railway ? railKindCode(tags.railway) : tags.highway ? RAIL_KIND.road_tunnel : RAIL_KIND.unknown
 
-/** Drive layer: highway ways carry their road-class code (for arterial routing). */
-const driveWayKind: WayKind = (tags) => roadClassKind(tags.highway)
+/**
+ * Drive layer: a known drivable highway class carries its road-class code; any
+ * other highway way reached us via a bus selector (busway/guideway, or a road
+ * with bus/psv access), so it's BUS_KIND — usable only when rerouting a bus.
+ */
+const driveWayKind: WayKind = (tags) => {
+  const cls = roadClassKind(tags.highway)
+  return cls !== 0 ? cls : BUS_KIND
+}
 
 interface OverpassElement {
   type: 'node' | 'way' | 'relation'
