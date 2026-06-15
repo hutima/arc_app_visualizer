@@ -191,7 +191,14 @@ const cellKey = (cx: number, cy: number): string => `${cx}:${cy}`
 export function buildRailGraph(
   nodes: RailNodeInput[],
   edges: RailEdgeInput[],
-  tuning: RailTuning = DEFAULT_RAIL_TUNING
+  tuning: RailTuning = DEFAULT_RAIL_TUNING,
+  /**
+   * Optional per-edge weight. Defaults to geometric length (degrees) — what
+   * rail matching has always used. Road routing passes a road-class-scaled
+   * cost so the router prefers arterials; the spatial anchor index still uses
+   * true geometry regardless (anchoring is spatial, only routing is weighted).
+   */
+  edgeCost?: (edge: RailEdgeInput & { kind?: number }, distDeg: number) => number
 ): RailGraph {
   const snapRadiusDeg = tuning.snapRadiusM / M_PER_DEG
   const emptyGraph = (): RailGraph => ({
@@ -235,7 +242,8 @@ export function buildRailGraph(
   for (const e of kept) {
     const pa = pos.get(e.a)!
     const pb = pos.get(e.b)!
-    const w = Math.hypot(pa.x - pb.x, pa.y - pb.y)
+    const dist = Math.hypot(pa.x - pb.x, pa.y - pb.y)
+    const w = edgeCost ? edgeCost(e, dist) : dist
     link(e.a, e.b, w)
     link(e.b, e.a, w)
   }
@@ -493,6 +501,58 @@ export function matchRideToRail(
   }
   if (snappedHops === 0 || out.length < 4) return null
   return new Float32Array(out)
+}
+
+/**
+ * Route a road trip through an ordered list of waypoints (the manual reroute
+ * tool, not the automatic matcher). Each waypoint anchors to the nearest road
+ * and consecutive anchors are joined by a Dijkstra along the graph; the graph's
+ * weights carry the arterial preference (see roadRoute). Unlike the rail
+ * matcher there is no time gate or break sentinel — the user asked for a route,
+ * so a leg that can't be routed is a hard failure to report, not a gap to draw.
+ */
+export function routeWaypoints(
+  g: RailGraph,
+  waypoints: ReadonlyArray<{ lon: number; lat: number }>
+): { coords: Float32Array } | { error: string } {
+  if (g.empty) return { error: 'no road network loaded for this area — fetch roads first' }
+  if (waypoints.length < 2) return { error: 'need at least two points to route' }
+
+  // Anchor every waypoint; collapse consecutive identical anchors (two points
+  // landing on the same road node make no leg).
+  const anchors: number[] = []
+  for (const w of waypoints) {
+    const a = nearestAnchor(g, w.lon * g.refCos, w.lat)
+    if (a === null) return { error: 'a point is too far from any road — drag it onto a road' }
+    if (anchors.length === 0 || anchors[anchors.length - 1] !== a) anchors.push(a)
+  }
+  if (anchors.length < 2) return { error: 'the points snap to the same spot — move them apart' }
+
+  const out: number[] = []
+  const pushNode = (id: number): void => {
+    const p = g.pos.get(id)!
+    const m = out.length
+    if (m >= 2 && out[m - 2] === p.lon && out[m - 1] === p.lat) return
+    out.push(p.lon, p.lat)
+  }
+  for (let k = 1; k < anchors.length; k++) {
+    const from = anchors[k - 1]!
+    const to = anchors[k]!
+    const a = g.pos.get(from)!
+    const b = g.pos.get(to)!
+    const straight = Math.hypot(a.x - b.x, a.y - b.y)
+    // Cap in *weighted* units, so it must clear both a generous geometric
+    // detour and the road-class penalty inflation (edge weight is up to ~1.6×
+    // its length on the slowest class) — otherwise a valid but high-penalty
+    // detour gets rejected as "no route". 12× ≈ 1.6 × a 7.5× geometric detour.
+    const route = dijkstra(g, from, to, 12 * straight + 0.6)
+    if (!route) {
+      return { error: 'no road route between two of the points — add a via point or fetch more area' }
+    }
+    for (const id of route) pushNode(id)
+  }
+  if (out.length < 4) return { error: 'route too short to apply' }
+  return { coords: new Float32Array(out) }
 }
 
 /** Routed (or soft-bridged) fill between two anchors, time-gated; null = no believable fill. */

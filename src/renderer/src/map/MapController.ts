@@ -20,14 +20,16 @@ import type {
 } from 'maplibre-gl'
 import type { Feature, FeatureCollection } from 'geojson'
 import { decodeGeometry } from '../../../shared/geomCodec'
-import { WAYPOINT_COLOR } from '../../../shared/categories'
+import { WAYPOINT_COLOR, colorForCategory } from '../../../shared/categories'
 import { colorForYear, UNDATED_YEAR_COLOR } from '../../../shared/yearColors'
+import { spliceRoute } from '../../../shared/reroute'
 import type { DetailMode } from '../../../shared/displayDetail'
 import type {
   CategoryInfo,
   EditablePoint,
   EditSaveMode,
   PlaceRef,
+  RoutePoint,
   SegmentEditInput,
   TrackColorMode,
   ViewportResultMeta
@@ -49,6 +51,19 @@ export interface EditSessionInfo {
   hasDraft: boolean
 }
 
+/** Reroute sub-tool status for the panel (geometry — vias/route — stays here). */
+export interface RerouteInfo {
+  /** A range is active (the reroute tool is open). */
+  active: boolean
+  /** Must-pass via pins currently placed. */
+  viaCount: number
+  /** A preview request is in flight. */
+  previewing: boolean
+  /** A previewed route is ready to apply. */
+  hasPreview: boolean
+  error: string | null
+}
+
 const TRACKS_SOURCE = 'arc-tracks'
 const TRACKS_LAYER = 'arc-tracks-line'
 const PLACES_SOURCE = 'arc-places'
@@ -59,6 +74,14 @@ const EDIT_VERTEX_SOURCE = 'arc-edit-vertices'
 const EDIT_VERTEX_LAYER = 'arc-edit-vertices-circle'
 const EDIT_SPLIT_SOURCE = 'arc-edit-split'
 const EDIT_SPLIT_LAYER = 'arc-edit-split-circle'
+// Reroute tool overlays: the previewed road route, the draggable must-pass via
+// pins, and the two range-boundary markers (start green, end red).
+const EDIT_ROUTE_SOURCE = 'arc-edit-route'
+const EDIT_ROUTE_LAYER = 'arc-edit-route-line'
+const EDIT_VIA_SOURCE = 'arc-edit-via'
+const EDIT_VIA_LAYER = 'arc-edit-via-circle'
+const EDIT_RANGE_SOURCE = 'arc-edit-range'
+const EDIT_RANGE_LAYER = 'arc-edit-range-circle'
 // Merge-mode highlights ride on the tracks source (filtered by segment id).
 const MERGE_CAND_LAYER = 'arc-merge-candidates-line'
 const MERGE_SEL_LAYER = 'arc-merge-selected-line'
@@ -101,6 +124,20 @@ const EMPTY_FC: FeatureCollection = { type: 'FeatureCollection', features: [] }
 /** A MapLibre filter matching features whose id is in `ids` (empty ⇒ none). */
 const matchIds = (ids: number[]): ExpressionSpecification =>
   ['in', ['id'], ['literal', ids]] as unknown as ExpressionSpecification
+
+/** Interleaved [lon,lat,…] → [[lon,lat],…] for a GeoJSON LineString. */
+const pairs = (flat: ReadonlyArray<number>): number[][] => {
+  const out: number[][] = []
+  for (let i = 0; i + 1 < flat.length; i += 2) out.push([flat[i]!, flat[i + 1]!])
+  return out
+}
+
+/** A colored reroute range-boundary marker feature (start green / end red). */
+const rangeMarker = (lon: number, lat: number, color: string): Feature => ({
+  type: 'Feature',
+  properties: { color },
+  geometry: { type: 'Point', coordinates: [lon, lat] }
+})
 
 /** Used when the online basemap style cannot be fetched (e.g. offline). */
 const FALLBACK_STYLE: StyleSpecification = {
@@ -152,6 +189,19 @@ export class MapController {
   private deletedSeqs = new Map<number, { lat: number; lon: number }>()
   /** Split tool: editPts index previewed as the split point (null = none). */
   private splitPreviewIndex: number | null = null
+  /** Split tool: per-half colors so the two halves read by type (null = off). */
+  private splitColors: { first: string; second: string } | null = null
+  /** Reroute tool: the active [startIdx, endIdx] range, or null when closed. */
+  private rerouteRange: { startIdx: number; endIdx: number } | null = null
+  /** Reroute tool: must-pass via pins, in order placed. */
+  private rerouteVias: RoutePoint[] = []
+  /** Reroute tool: last previewed route (interleaved lon,lat), or null. */
+  private reroutePreview: number[] | null = null
+  private reroutePreviewToken = 0
+  private rerouteBusy = false
+  private rerouteError: string | null = null
+  private rerouteTimer: ReturnType<typeof setTimeout> | null = null
+  private rerouteListener: ((info: RerouteInfo | null) => void) | null = null
   /** How a click-off auto-save commits the session ('permanent' in skip mode). */
   private leaveSaveMode: EditSaveMode = 'draft'
   /** A mousedown that grabbed/inserted suppresses the click-off it precedes. */
@@ -301,7 +351,13 @@ export class MapController {
       type: 'line',
       source: EDIT_LINE_SOURCE,
       layout: { 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-color': '#ffd166', 'line-width': 3, 'line-opacity': 0.95 }
+      // Per-feature color so the split tool can paint each half by its type;
+      // the unsplit working line falls back to the editor yellow.
+      paint: {
+        'line-color': ['case', ['has', 'color'], ['get', 'color'], '#ffd166'] as unknown as ExpressionSpecification,
+        'line-width': 3,
+        'line-opacity': 0.95
+      }
     } as LayerSpecification)
     this.map.addLayer({
       id: EDIT_VERTEX_LAYER,
@@ -331,6 +387,41 @@ export class MapController {
         'circle-radius': 9,
         'circle-stroke-color': '#e879f9',
         'circle-stroke-width': 3
+      }
+    } as LayerSpecification)
+
+    // Reroute tool: the previewed road route (cyan, dashed), the range-boundary
+    // markers (start green / end red), then the draggable via pins on top.
+    this.map.addSource(EDIT_ROUTE_SOURCE, { type: 'geojson', data: EMPTY_FC })
+    this.map.addSource(EDIT_RANGE_SOURCE, { type: 'geojson', data: EMPTY_FC })
+    this.map.addSource(EDIT_VIA_SOURCE, { type: 'geojson', data: EMPTY_FC })
+    this.map.addLayer({
+      id: EDIT_ROUTE_LAYER,
+      type: 'line',
+      source: EDIT_ROUTE_SOURCE,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#22d3ee', 'line-width': 4, 'line-opacity': 0.95, 'line-dasharray': [2, 1] }
+    } as LayerSpecification)
+    this.map.addLayer({
+      id: EDIT_RANGE_LAYER,
+      type: 'circle',
+      source: EDIT_RANGE_SOURCE,
+      paint: {
+        'circle-color': ['get', 'color'] as unknown as ExpressionSpecification,
+        'circle-radius': 6,
+        'circle-stroke-color': '#000000',
+        'circle-stroke-width': 1.5
+      }
+    } as LayerSpecification)
+    this.map.addLayer({
+      id: EDIT_VIA_LAYER,
+      type: 'circle',
+      source: EDIT_VIA_SOURCE,
+      paint: {
+        'circle-color': '#fb7185',
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 6, 16, 8] as unknown as ExpressionSpecification,
+        'circle-stroke-color': '#ffffff',
+        'circle-stroke-width': 1.5
       }
     } as LayerSpecification)
 
@@ -380,6 +471,7 @@ export class MapController {
     this.setMergeHighlight(this.mergeCandidateIds, this.mergeSelectedIds)
     this.setPlaceHighlight(this.placeHighlight)
     this.updateSplitPreview()
+    this.updateRerouteLayers()
   }
 
   /**
@@ -717,12 +809,347 @@ export class MapController {
    * Preview the precise-split point at an editPts index (the split slider),
    * or clear it with null. Index is clamped to the editable range.
    */
-  setSplitPreview(index: number | null): void {
+  setSplitPreview(index: number | null, firstType?: string, secondType?: string): void {
     this.splitPreviewIndex =
       index === null || this.editingId === null
         ? null
         : Math.max(0, Math.min(this.editPts.length - 1, Math.round(index)))
+    // Color each half by its chosen type so the split reads at a glance, on the
+    // map line as well as the panel slider.
+    this.splitColors =
+      this.splitPreviewIndex !== null && firstType && secondType
+        ? { first: this.colorForType(firstType), second: this.colorForType(secondType) }
+        : null
+    this.updateEditLayers()
     this.updateSplitPreview()
+  }
+
+  /** The display color for an activity type (custom if set, else palette default). */
+  private colorForType(type: string): string {
+    return this.categories.find((c) => c.name === type)?.color ?? colorForCategory(type)
+  }
+
+  // --- Reroute tool ---------------------------------------------------------
+
+  /** Receives reroute status (vias/preview/errors) for the panel; null = closed. */
+  setRerouteListener(cb: (info: RerouteInfo | null) => void): void {
+    this.rerouteListener = cb
+  }
+
+  /** True while the reroute tool owns the map (its range is set). */
+  private get rerouteActive(): boolean {
+    return this.rerouteRange !== null && this.editingId !== null
+  }
+
+  /**
+   * Open/refresh the reroute tool over an [startIdx, endIdx] span of the
+   * editable points, or close it with null. The span comes from the panel's
+   * whole-track checkbox or its start/end sliders; opening draws the boundary
+   * markers and kicks off a preview.
+   */
+  setRerouteRange(range: { startIdx: number; endIdx: number } | null): void {
+    if (this.editingId === null || range === null) {
+      this.resetRerouteState()
+      this.updateRerouteLayers()
+      this.notifyReroute()
+      return
+    }
+    const last = this.editPts.length - 1
+    const startIdx = Math.max(0, Math.min(last - 1, Math.round(range.startIdx)))
+    const endIdx = Math.max(startIdx + 1, Math.min(last, Math.round(range.endIdx)))
+    this.rerouteRange = { startIdx, endIdx }
+    this.reroutePreview = null
+    this.rerouteError = null
+    this.updateRerouteLayers()
+    this.notifyReroute()
+    this.schedulePreview(0)
+  }
+
+  /** Reset all reroute state (close / tool switch / session end). */
+  private resetRerouteState(): void {
+    if (this.rerouteTimer) {
+      clearTimeout(this.rerouteTimer)
+      this.rerouteTimer = null
+    }
+    this.reroutePreviewToken++ // invalidate any in-flight preview
+    this.rerouteRange = null
+    this.rerouteVias = []
+    this.reroutePreview = null
+    this.rerouteBusy = false
+    this.rerouteError = null
+  }
+
+  /** Drop the via pins but keep the tool open; re-previews the direct route. */
+  clearRerouteVias(): void {
+    if (!this.rerouteActive) return
+    this.rerouteVias = []
+    this.updateRerouteLayers()
+    this.notifyReroute()
+    this.schedulePreview(0)
+  }
+
+  private notifyReroute(): void {
+    this.rerouteListener?.(
+      this.rerouteRange === null
+        ? null
+        : {
+            active: true,
+            viaCount: this.rerouteVias.length,
+            previewing: this.rerouteBusy,
+            hasPreview: this.reroutePreview !== null,
+            error: this.rerouteError
+          }
+    )
+  }
+
+  /** The ordered waypoints to route: range start, the vias, range end. */
+  private rerouteWaypoints(): RoutePoint[] | null {
+    if (!this.rerouteRange) return null
+    const a = this.editPts[this.rerouteRange.startIdx]
+    const b = this.editPts[this.rerouteRange.endIdx]
+    if (!a || !b) return null
+    return [{ lat: a.lat, lon: a.lon }, ...this.rerouteVias, { lat: b.lat, lon: b.lon }]
+  }
+
+  /** Debounced re-preview, so dragging a via re-routes live without flooding IPC. */
+  private schedulePreview(delayMs = 110): void {
+    if (this.rerouteTimer) clearTimeout(this.rerouteTimer)
+    this.rerouteTimer = setTimeout(() => void this.runPreview(), delayMs)
+  }
+
+  private async runPreview(): Promise<void> {
+    const waypoints = this.rerouteWaypoints()
+    if (!waypoints) return
+    const token = ++this.reroutePreviewToken
+    this.rerouteBusy = true
+    this.notifyReroute()
+    const res = await window.api.previewRoadRoute(waypoints)
+    if (token !== this.reroutePreviewToken || this.destroyed) return
+    this.rerouteBusy = false
+    if (res.ok && res.coords && res.coords.length >= 4) {
+      this.reroutePreview = res.coords
+      this.rerouteError = null
+    } else {
+      this.reroutePreview = null
+      this.rerouteError = res.error ?? 'could not compute a route'
+    }
+    this.updateRerouteLayers()
+    this.notifyReroute()
+  }
+
+  /**
+   * Apply the previewed route: splice it into the editable points as overlay
+   * inserts/deletes (the two boundaries kept) and persist as a draft — so it's
+   * revertible and raw points survive. Closes the tool; saving refreshes the map.
+   */
+  async applyReroute(): Promise<{ ok: boolean; error?: string }> {
+    if (this.editingId === null || !this.rerouteRange) return { ok: false, error: 'reroute not open' }
+    const waypoints = this.rerouteWaypoints()
+    if (!waypoints) return { ok: false, error: 'reroute not open' }
+    const { startIdx, endIdx } = this.rerouteRange
+
+    // Recompute for the *current* via positions rather than trusting the
+    // debounced preview — a drop that lands between debounce ticks would
+    // otherwise apply the route through where the pin used to be.
+    this.rerouteBusy = true
+    this.notifyReroute()
+    const res = await window.api.previewRoadRoute(waypoints)
+    if (this.destroyed) return { ok: false }
+    this.rerouteBusy = false
+    if (!res.ok || !res.coords || res.coords.length < 4) {
+      this.rerouteError = res.error ?? 'could not compute a route'
+      if (res.ok) this.reroutePreview = null
+      this.notifyReroute()
+      return { ok: false, error: this.rerouteError }
+    }
+
+    // Snapshot so a failed save never strands a phantom routed line in the
+    // session (which a later click-off could silently commit).
+    const prevPts = this.editPts
+    const prevDeleted = new Map(this.deletedSeqs)
+    const prevDirty = this.editDirty
+    let spliced
+    try {
+      spliced = spliceRoute(this.editPts, startIdx, endIdx, res.coords)
+    } catch (err) {
+      this.notifyReroute()
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+    this.editPts = spliced.points
+    for (const d of spliced.deleted) this.deletedSeqs.set(d.seq, { lat: d.lat, lon: d.lon })
+    this.editDirty = true
+    this.resetRerouteState()
+    this.updateRerouteLayers()
+    this.updateEditLayers()
+    this.notifyReroute()
+    this.notifyEdit()
+
+    const saved = await this.saveEdits('draft')
+    if (!saved.ok && !this.destroyed) {
+      // Nothing persisted — roll the session back to before the splice.
+      this.editPts = prevPts
+      this.deletedSeqs = prevDeleted
+      this.editDirty = prevDirty
+      this.updateEditLayers()
+      this.notifyEdit()
+    }
+    return saved
+  }
+
+  private updateRerouteLayers(): void {
+    const routeSrc = this.map.getSource(EDIT_ROUTE_SOURCE) as GeoJSONSource | undefined
+    const viaSrc = this.map.getSource(EDIT_VIA_SOURCE) as GeoJSONSource | undefined
+    const rangeSrc = this.map.getSource(EDIT_RANGE_SOURCE) as GeoJSONSource | undefined
+    routeSrc?.setData(
+      this.reroutePreview && this.reroutePreview.length >= 4
+        ? {
+            type: 'FeatureCollection',
+            features: [
+              {
+                type: 'Feature',
+                properties: {},
+                geometry: { type: 'LineString', coordinates: pairs(this.reroutePreview) }
+              }
+            ]
+          }
+        : EMPTY_FC
+    )
+    viaSrc?.setData({
+      type: 'FeatureCollection',
+      features: this.rerouteVias.map((v, i) => ({
+        type: 'Feature',
+        id: i,
+        properties: { idx: i },
+        geometry: { type: 'Point', coordinates: [v.lon, v.lat] }
+      }))
+    })
+    const markers: Feature[] = []
+    const range = this.rerouteRange
+    if (range) {
+      const a = this.editPts[range.startIdx]
+      const b = this.editPts[range.endIdx]
+      if (a) markers.push(rangeMarker(a.lon, a.lat, '#34d399'))
+      if (b) markers.push(rangeMarker(b.lon, b.lat, '#f87171'))
+    }
+    rangeSrc?.setData({ type: 'FeatureCollection', features: markers })
+  }
+
+  /**
+   * Mousedown while the reroute tool is open: grab a via pin (alt-click removes
+   * it, else drag — which re-routes live), or, when the click lands on the
+   * working line or the previewed route, drop a new must-pass via there and
+   * start dragging it. Clicks in empty space fall through to map panning.
+   */
+  private handleRerouteDown(e: MapMouseEvent): void {
+    const v = this.nearestVia(e.point)
+    if (v && v.distPx <= VERTEX_GRAB_TOLERANCE_PX) {
+      e.preventDefault()
+      this.suppressClickOff = true
+      if (e.originalEvent.altKey) this.removeVia(v.idx)
+      else this.beginViaDrag(v.idx)
+      return
+    }
+    const onLine = this.nearestEditSegment(e.point)
+    const onRoute = this.nearestPreviewPoint(e.point)
+    const lineD = onLine?.distPx ?? Infinity
+    const routeD = onRoute?.distPx ?? Infinity
+    if (Math.min(lineD, routeD) > LINE_INSERT_TOLERANCE_PX) return
+    e.preventDefault()
+    this.suppressClickOff = true
+    const at = routeD <= lineD ? onRoute! : onLine!
+    this.beginViaDrag(this.addViaOrdered(at.lng, at.lat))
+  }
+
+  /** Nearest via pin to a screen point, in pixels (grab / cursor feedback). */
+  private nearestVia(point: { x: number; y: number }): { idx: number; distPx: number } | null {
+    let best: { idx: number; distPx: number } | null = null
+    for (let i = 0; i < this.rerouteVias.length; i++) {
+      const p = this.map.project([this.rerouteVias[i]!.lon, this.rerouteVias[i]!.lat])
+      const distPx = Math.hypot(point.x - p.x, point.y - p.y)
+      if (!best || distPx < best.distPx) best = { idx: i, distPx }
+    }
+    return best
+  }
+
+  /** Nearest point on the previewed route to a screen point, in pixels. */
+  private nearestPreviewPoint(
+    point: { x: number; y: number }
+  ): { lng: number; lat: number; distPx: number } | null {
+    const flat = this.reroutePreview
+    if (!flat || flat.length < 4) return null
+    let best: { lng: number; lat: number; distPx: number } | null = null
+    for (let i = 0; i + 3 < flat.length; i += 2) {
+      const a = this.map.project([flat[i]!, flat[i + 1]!])
+      const b = this.map.project([flat[i + 2]!, flat[i + 3]!])
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      const len2 = dx * dx + dy * dy
+      let t = len2 === 0 ? 0 : ((point.x - a.x) * dx + (point.y - a.y) * dy) / len2
+      t = Math.max(0, Math.min(1, t))
+      const cx = a.x + t * dx
+      const cy = a.y + t * dy
+      const distPx = Math.hypot(point.x - cx, point.y - cy)
+      if (!best || distPx < best.distPx) {
+        const ll = this.map.unproject([cx, cy])
+        best = { lng: ll.lng, lat: ll.lat, distPx }
+      }
+    }
+    return best
+  }
+
+  /**
+   * Add a via at lng/lat, inserted into the sequence at the nearest leg of the
+   * current waypoint chain so multiple vias stay in travel order (the route
+   * passes start → vias → end in list order). Returns the new via's index.
+   */
+  private addViaOrdered(lng: number, lat: number): number {
+    const wps = this.rerouteWaypoints() ?? []
+    const click = this.map.project([lng, lat])
+    let bestLeg = this.rerouteVias.length
+    let bestD = Infinity
+    for (let i = 0; i < wps.length - 1; i++) {
+      const a = this.map.project([wps[i]!.lon, wps[i]!.lat])
+      const b = this.map.project([wps[i + 1]!.lon, wps[i + 1]!.lat])
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      const len2 = dx * dx + dy * dy
+      let t = len2 === 0 ? 0 : ((click.x - a.x) * dx + (click.y - a.y) * dy) / len2
+      t = Math.max(0, Math.min(1, t))
+      const d = Math.hypot(click.x - (a.x + t * dx), click.y - (a.y + t * dy))
+      if (d < bestD) {
+        bestD = d
+        bestLeg = i
+      }
+    }
+    this.rerouteVias.splice(bestLeg, 0, { lat, lon: lng })
+    this.updateRerouteLayers()
+    this.notifyReroute()
+    this.schedulePreview(0)
+    return bestLeg
+  }
+
+  private beginViaDrag(idx: number): void {
+    const onMove = (ev: MapMouseEvent): void => {
+      const v = this.rerouteVias[idx]
+      if (!v) return
+      v.lon = ev.lngLat.lng
+      v.lat = ev.lngLat.lat
+      this.updateRerouteLayers()
+      this.schedulePreview() // live re-route while dragging
+    }
+    const onUp = (): void => {
+      this.map.off('mousemove', onMove)
+      this.schedulePreview(0) // settle on a final route at drop
+    }
+    this.map.on('mousemove', onMove)
+    this.map.once('mouseup', onUp)
+  }
+
+  private removeVia(idx: number): void {
+    this.rerouteVias.splice(idx, 1)
+    this.updateRerouteLayers()
+    this.notifyReroute()
+    this.schedulePreview(0)
   }
 
   private updateSplitPreview(): void {
@@ -775,11 +1202,15 @@ export class MapController {
     this.editHasDraft = false
     this.editType = ''
     this.splitPreviewIndex = null
+    this.splitColors = null
+    this.resetRerouteState()
     this.updateEditLayers()
     this.updateSplitPreview()
+    this.updateRerouteLayers()
     this.applyTypeFilter()
     this.map.getCanvas().style.cursor = ''
     this.notifyEdit()
+    this.notifyReroute()
   }
 
   /** The complete overlay for the current session (moves, inserts, deletes). */
@@ -866,6 +1297,8 @@ export class MapController {
 
   private handleTrackClick(e: MapLayerMouseEvent): void {
     if (!this.editMode) return
+    // While rerouting, clicks place/grab via pins — never switch the track.
+    if (this.rerouteActive) return
     const raw = e.features?.[0]?.id
     const id = typeof raw === 'number' ? raw : Number(raw)
     if (!Number.isInteger(id)) return
@@ -915,6 +1348,8 @@ export class MapController {
   /** A plain click off the edited track (empty map) commits + deselects it. */
   private handleEmptyClick(e: MapMouseEvent): void {
     if (!this.editMode || this.editTool !== 'points' || this.editingId === null) return
+    // The reroute tool consumes clicks itself; never commit-leave underneath it.
+    if (this.rerouteActive) return
     if (this.suppressClickOff) {
       this.suppressClickOff = false
       return
@@ -980,6 +1415,11 @@ export class MapController {
   private handleMapDown(e: MapMouseEvent): void {
     this.suppressClickOff = false
     if (!this.editMode || this.editingId === null) return
+    // Reroute tool owns map gestures while open (via pins, not vertex edits).
+    if (this.rerouteActive) {
+      this.handleRerouteDown(e)
+      return
+    }
     const v = this.nearestEditVertex(e.point)
     if (v && v.distPx <= VERTEX_GRAB_TOLERANCE_PX) {
       e.preventDefault()
@@ -1113,6 +1553,18 @@ export class MapController {
   private updateEditCursor(e: MapMouseEvent): void {
     if (!this.editMode) return
     const canvas = this.map.getCanvas()
+    if (this.rerouteActive) {
+      // Move over a via pin; copy where a click would drop one (line / route).
+      const v = this.nearestVia(e.point)
+      if (v && v.distPx <= VERTEX_GRAB_TOLERANCE_PX) {
+        canvas.style.cursor = 'move'
+        return
+      }
+      const lineD = this.nearestEditSegment(e.point)?.distPx ?? Infinity
+      const routeD = this.nearestPreviewPoint(e.point)?.distPx ?? Infinity
+      canvas.style.cursor = Math.min(lineD, routeD) <= LINE_INSERT_TOLERANCE_PX ? 'copy' : ''
+      return
+    }
     if (this.editingId !== null) {
       const v = this.nearestEditVertex(e.point)
       if (v && v.distPx <= VERTEX_GRAB_TOLERANCE_PX) {
@@ -1138,19 +1590,7 @@ export class MapController {
       verts.setData(EMPTY_FC)
       return
     }
-    line.setData({
-      type: 'FeatureCollection',
-      features: [
-        {
-          type: 'Feature',
-          properties: {},
-          geometry: {
-            type: 'LineString',
-            coordinates: this.editPts.map((p) => [p.lon, p.lat])
-          }
-        }
-      ]
-    })
+    line.setData({ type: 'FeatureCollection', features: this.editLineFeatures() })
     verts.setData({
       type: 'FeatureCollection',
       features: this.editPts.map((p, i) => ({
@@ -1162,6 +1602,31 @@ export class MapController {
     })
     // Keep the split marker on its point as edits move the geometry.
     this.updateSplitPreview()
+  }
+
+  /**
+   * The working line as GeoJSON: one yellow line normally, or two type-colored
+   * halves when the split tool is previewing (the split point is shared, so the
+   * halves meet cleanly at it — same partition splitSegmentTyped will write).
+   */
+  private editLineFeatures(): Feature[] {
+    const coords = this.editPts.map((p) => [p.lon, p.lat])
+    const idx = this.splitPreviewIndex
+    if (this.splitColors && idx !== null && idx > 0 && idx < coords.length - 1) {
+      return [
+        {
+          type: 'Feature',
+          properties: { color: this.splitColors.first },
+          geometry: { type: 'LineString', coordinates: coords.slice(0, idx + 1) }
+        },
+        {
+          type: 'Feature',
+          properties: { color: this.splitColors.second },
+          geometry: { type: 'LineString', coordinates: coords.slice(idx) }
+        }
+      ]
+    }
+    return [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }]
   }
 
   /** The lat/lon box currently on screen (e.g. to fetch OSM rail for it). */

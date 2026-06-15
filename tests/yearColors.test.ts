@@ -1,25 +1,28 @@
 import { describe, it, expect } from 'vitest'
 import { colorForYear, yearRange, UNDATED_YEAR_COLOR } from '../src/shared/yearColors'
 
-/** Rec. 601 luma of a #rrggbb string. */
-const luma = (hex: string): number => {
-  const n = parseInt(hex.slice(1), 16)
-  return 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)
+/** Parse an `hsl(h, s%, l%)` string. */
+const parseHsl = (c: string): { h: number; s: number; l: number } => {
+  const m = /^hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)$/.exec(c)
+  if (!m) throw new Error(`expected hsl(), got ${c}`)
+  return { h: Number(m[1]), s: Number(m[2]), l: Number(m[3]) }
 }
 
 describe('yearColors', () => {
-  it('makes the newest year brighter than the oldest', () => {
-    expect(luma(colorForYear(2025, 2015, 2025))).toBeGreaterThan(
-      luma(colorForYear(2015, 2015, 2025))
-    )
+  it('paints the newest year a saturated blue and the oldest a desaturated yellow', () => {
+    const recent = parseHsl(colorForYear(2025, 2015, 2025))
+    const oldest = parseHsl(colorForYear(2015, 2015, 2025))
+    expect(recent.h).toBeGreaterThan(180) // blue end
+    expect(oldest.h).toBeLessThan(90) // yellow end
+    expect(recent.s).toBeGreaterThan(oldest.s) // most saturated = newest
   })
 
-  it('increases brightness monotonically across the range (a gradient)', () => {
+  it('rotates the hue monotonically across the span (a distinct color per year)', () => {
     let prev = -1
     for (let y = 2015; y <= 2025; y++) {
-      const l = luma(colorForYear(y, 2015, 2025))
-      expect(l).toBeGreaterThan(prev)
-      prev = l
+      const { h } = parseHsl(colorForYear(y, 2015, 2025))
+      expect(h).toBeGreaterThan(prev)
+      prev = h
     }
   })
 
@@ -27,9 +30,9 @@ describe('yearColors', () => {
     expect(colorForYear(2020, 2015, 2025)).toBe(colorForYear(2020, 2015, 2025))
   })
 
-  it('returns the bright end for a single-year dataset', () => {
-    expect(colorForYear(2020, 2020, 2020)).toMatch(/^#[0-9a-f]{6}$/)
+  it('returns the recent (blue) end for a single-year dataset', () => {
     expect(colorForYear(2020, 2020, 2020)).toBe(colorForYear(2025, 2015, 2025))
+    expect(colorForYear(2020, 2020, 2020)).toMatch(/^hsl\(/)
   })
 
   it('maps undated (0) to the neutral color', () => {

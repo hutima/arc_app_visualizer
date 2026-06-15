@@ -100,6 +100,35 @@ export interface RailMatchProgress {
 }
 
 /**
+ * Coverage of the drivable OSM road network fetched for the manual reroute
+ * tool. Separate from RailCoverage: this network is only routed on demand, not
+ * bulk map-matched, so there's no cached-geometry count here.
+ */
+export interface RouteCoverage {
+  regions: LatLonBBox[]
+  nodeCount: number
+  edgeCount: number
+  lastFetchedAtMs: number
+}
+
+/** One waypoint a road route must pass through (track endpoint or a via pin). */
+export interface RoutePoint {
+  lat: number
+  lon: number
+}
+
+/**
+ * A computed road route for the reroute preview: the snapped polyline as
+ * interleaved [lon, lat, …] pairs (already simplified for display + draft).
+ */
+export interface RoutePreviewResult {
+  ok: boolean
+  /** Interleaved lon,lat pairs from the first waypoint's anchor to the last. */
+  coords?: number[]
+  error?: string
+}
+
+/**
  * User-tweakable matcher ranges (meters), persisted in settings.json under
  * `rail` and editable from the Cleaning panel. Changing them re-runs the
  * cached match pass.
@@ -432,11 +461,32 @@ export interface ArcApi {
   rebuildRailMatches(): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
   /** Persist new matcher ranges and re-run the match pass with them. */
   setRailTuning(t: RailTuning): Promise<{ ok: boolean; coverage?: RailCoverage; error?: string }>
-  /** Wipe all fetched OSM data (both layers) and the cached matched geometry. */
-  clearRailNetwork(): Promise<{ ok: boolean }>
+  /**
+   * Wipe fetched OSM rail/road data. With `keepMatched`, the bulky network
+   * (nodes/edges/coverage) is dropped but the cached map-matched geometry is
+   * kept — snapped rides keep rendering from cache, you just can't re-match
+   * (or match new rides) until you re-fetch. Without it, everything goes.
+   */
+  clearRailNetwork(keepMatched?: boolean): Promise<{ ok: boolean }>
   /** Progress of the post-fetch / rebuild map-matching pass. */
   onRailProgress(cb: (p: RailMatchProgress) => void): () => void
   getRailCoverage(): Promise<RailCoverage | null>
+  /**
+   * Fetch the drivable road network for the given on-screen bbox (for the
+   * manual reroute tool); regions accumulate. Routing happens later, on demand.
+   */
+  fetchRouteNetwork(
+    bbox: LatLonBBox
+  ): Promise<{ ok: boolean; coverage?: RouteCoverage; error?: string }>
+  getRouteCoverage(): Promise<RouteCoverage | null>
+  /** Drop the fetched road network. Applied reroutes (edit overlays) are unaffected. */
+  clearRouteNetwork(): Promise<{ ok: boolean }>
+  /**
+   * Compute the best (arterial-preferring) road route through the given
+   * waypoints in order, for the reroute preview. Needs road coverage over the
+   * waypoints; returns the snapped polyline or an error to surface.
+   */
+  previewRoadRoute(waypoints: RoutePoint[]): Promise<RoutePreviewResult>
   getRecentPerf(limit: number): Promise<PerfEntry[]>
   /** Effective points of one segment (raw + draft edits) for the editor. */
   getSegmentEditState(segmentId: number): Promise<SegmentEditState | null>

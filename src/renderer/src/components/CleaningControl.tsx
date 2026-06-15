@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import { DEFAULT_RAIL_TUNING } from '../../../shared/types'
-import type { OsmLayer, RailCoverage, RailMatchProgress, RailTuning } from '../../../shared/types'
+import type {
+  OsmLayer,
+  RailCoverage,
+  RailMatchProgress,
+  RailTuning,
+  RouteCoverage
+} from '../../../shared/types'
 
 interface Props {
   averageRail: boolean
@@ -12,12 +18,19 @@ interface Props {
   railProgress: RailMatchProgress | null
   railError: string | null
   railTuning: RailTuning | null
+  /** Drivable road network for the manual reroute tool (separate fetch). */
+  routeCoverage: RouteCoverage | null
+  routeFetching: boolean
+  routeError: string | null
   onChangeAverage: (on: boolean) => void
   onChangeSnap: (on: boolean) => void
   onChangeSnapRoad: (on: boolean) => void
   onFetchRail: (layer: OsmLayer) => void
-  onClearRail: () => void
+  /** keepMatched drops the network but keeps cached snapped geometry. */
+  onClearRail: (keepMatched?: boolean) => void
   onApplyTuning: (t: RailTuning) => void
+  onFetchRoute: () => void
+  onClearRoute: () => void
 }
 
 const fmtDate = (ms: number): string => new Date(ms).toLocaleDateString()
@@ -37,17 +50,27 @@ export function CleaningControl({
   railProgress,
   railError,
   railTuning,
+  routeCoverage,
+  routeFetching,
+  routeError,
   onChangeAverage,
   onChangeSnap,
   onChangeSnapRoad,
   onFetchRail,
   onClearRail,
-  onApplyTuning
+  onApplyTuning,
+  onFetchRoute,
+  onClearRoute
 }: Props): React.JSX.Element {
-  const hasNetwork = railCoverage !== null
   const busy = railFetching || railRebuilding
   const railAreas = railCoverage?.regions.filter((r) => r.layer === 'rail').length ?? 0
   const roadAreas = railCoverage?.regions.filter((r) => r.layer === 'road').length ?? 0
+  const matchedRides = railCoverage?.matchedRides ?? 0
+  // Network present vs. cleared-but-cached: with the network gone (regions
+  // empty) the snap toggles still work from cached matched geometry, but
+  // re-matching / tuning needs a re-fetch, so those are hidden.
+  const hasRegions = (railCoverage?.regions.length ?? 0) > 0
+  const routeAreas = routeCoverage?.regions.length ?? 0
 
   // Range inputs are local drafts; Apply persists + re-matches.
   const [snapM, setSnapM] = useState(String(railTuning?.snapRadiusM ?? DEFAULT_RAIL_TUNING.snapRadiusM))
@@ -77,7 +100,7 @@ export function CleaningControl({
         <input
           type="checkbox"
           checked={snapRail}
-          disabled={railAreas === 0 || busy}
+          disabled={(railAreas === 0 && matchedRides === 0) || busy}
           onChange={(e) => onChangeSnap(e.target.checked)}
         />
         <span>Snap rail to OSM tracks</span>
@@ -86,7 +109,7 @@ export function CleaningControl({
         <input
           type="checkbox"
           checked={snapRoad}
-          disabled={roadAreas === 0 || busy}
+          disabled={(roadAreas === 0 && matchedRides === 0) || busy}
           onChange={(e) => onChangeSnapRoad(e.target.checked)}
         />
         <span>Bridge road tunnels (car/taxi/bus)</span>
@@ -124,20 +147,32 @@ export function CleaningControl({
               : 'Matching rides…'}
         </p>
       )}
-      {railCoverage && !busy && (
+      {railCoverage && hasRegions && !busy && (
         <p className="hint">
           OSM: <strong>{railAreas}</strong> rail{railAreas === 1 ? ' area' : ' areas'},{' '}
           <strong>{roadAreas}</strong> road-tunnel{roadAreas === 1 ? ' area' : ' areas'} —{' '}
-          {fmt(railCoverage.edgeCount)} segments; <strong>{fmt(railCoverage.matchedRides)} rides
+          {fmt(railCoverage.edgeCount)} segments; <strong>{fmt(matchedRides)} rides
           matched</strong> (updated {fmtDate(railCoverage.lastFetchedAtMs)}).{' '}
-          <button type="button" className="link-button" onClick={onClearRail}>
-            Clear OSM tracks
+          <button type="button" className="link-button" onClick={() => onClearRail(false)}>
+            Clear all
+          </button>{' · '}
+          <button type="button" className="link-button" onClick={() => onClearRail(true)}>
+            Clear network, keep snapped
+          </button>
+        </p>
+      )}
+      {railCoverage && !hasRegions && matchedRides > 0 && !busy && (
+        <p className="hint">
+          OSM network cleared — <strong>{fmt(matchedRides)} rides still snapped</strong> from
+          cache. Re-fetch an area to update or match more.{' '}
+          <button type="button" className="link-button" onClick={() => onClearRail(false)}>
+            Clear cached snapping
           </button>
         </p>
       )}
       {railError && <p className="hint status-line error">{railError}</p>}
 
-      {hasNetwork && (
+      {hasRegions && (
         <div className="rail-tuning">
           <label>
             <span>Snap within (m)</span>
@@ -191,6 +226,31 @@ export function CleaningControl({
           </p>
         </div>
       )}
+
+      <div className="cleaning-divider">
+        <p className="hint">
+          <strong>Road routing</strong> — drivable roads for the manual reroute
+          tool (Edit → Edit points → “Snap part to road route”). Fetch an area,
+          then route on it offline; applied reroutes are kept even if you clear
+          the roads. Roads are dense, so fetch a small area at a time.
+        </p>
+        <div className="rail-fetch-actions">
+          <button type="button" onClick={onFetchRoute} disabled={routeFetching}>
+            {routeFetching ? 'Fetching…' : `${routeAreas > 0 ? 'Add' : 'Fetch'} roads in view`}
+          </button>
+        </div>
+        {routeCoverage && (
+          <p className="hint">
+            Roads: <strong>{routeAreas}</strong> {routeAreas === 1 ? 'area' : 'areas'} —{' '}
+            {fmt(routeCoverage.edgeCount)} segments (updated{' '}
+            {fmtDate(routeCoverage.lastFetchedAtMs)}).{' '}
+            <button type="button" className="link-button" onClick={onClearRoute}>
+              Clear roads
+            </button>
+          </p>
+        )}
+        {routeError && <p className="hint status-line error">{routeError}</p>}
+      </div>
 
       <label className="color-mode-option cleaning-divider">
         <input

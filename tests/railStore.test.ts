@@ -12,6 +12,7 @@ import {
   coverageBoxes,
   loadRailForViewport,
   clearRailNetwork,
+  clearRailNetworkData,
   hasRailNetwork
 } from '../src/main/db/railStore'
 
@@ -98,5 +99,22 @@ describe('rail store', () => {
     expect(getRailCoverage(db)).toBeNull()
     expect(hasRailNetwork(db)).toBe(false)
     expect(coverageBoxes(db, 'rail')).toHaveLength(0)
+  })
+
+  it('clears the network but keeps cached matched geometry', () => {
+    addRailNetwork(db, cityA, boxA)
+    // A cached snapped ride (one detail level) for segment 1.
+    db.prepare(
+      'INSERT INTO rail_matched_geom (segment_id, detail, point_count, coords) VALUES (1, 0, 2, ?)'
+    ).run(new Uint8Array(16))
+
+    clearRailNetworkData(db)
+    expect(hasRailNetwork(db)).toBe(false) // network gone
+    const cov = getRailCoverage(db)!
+    expect(cov.regions).toHaveLength(0) // …yet coverage reports the cache
+    expect(cov.matchedRides).toBe(1) // snapped rides keep rendering
+
+    clearRailNetwork(db) // full clear drops the cache too
+    expect(getRailCoverage(db)).toBeNull()
   })
 })

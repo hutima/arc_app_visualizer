@@ -1,55 +1,40 @@
 /**
- * Sequential color for the "color tracks by year" mode: a perceptual-ish
- * gradient (plasma-derived) running from a dim cool tone for the oldest year
- * to bright yellow for the newest, so recency reads as brightness at a glance.
- *
- * Unlike a categorical/divergent palette, colors here depend on the dataset's
- * [minYear, maxYear] so the whole span maps across the ramp. Legend and map
- * share this function, so they never drift.
+ * Sequential color for the "color tracks by year" mode: an HSL ramp that
+ * auto-scales to the dataset's [minYear, maxYear]. The newest year is a
+ * saturated blue; going older rotates the hue through cyan/green to a
+ * desaturated yellow and drops saturation — so recency reads as a vivid blue
+ * and each year in the span gets a distinct hue (no two adjacent years
+ * collide, however many years there are). Legend and map share this function,
+ * so they never drift.
  */
 
 /** Tracks whose segments carry no timestamp ("undated"). */
 export const UNDATED_YEAR_COLOR = '#7d8590'
 
-// Plasma control stops (sRGB). We sample the brighter 0.35..1.0 of the ramp
-// so even the oldest year stays legible on a dark basemap.
-const PLASMA: ReadonlyArray<readonly [number, number, number]> = [
-  [13, 8, 135],
-  [126, 3, 168],
-  [204, 71, 120],
-  [248, 149, 64],
-  [240, 249, 33]
-]
-const RAMP_START = 0.35
+// Ramp endpoints in HSL. Recent = saturated blue; oldest = soft, desaturated
+// yellow. Hue spans 48°→215° so an N-year dataset gets N evenly-spaced,
+// distinguishable hues; saturation rises toward recent so it also reads as
+// "most saturated = newest". Lightness stays in a legible band on dark maps.
+const OLDEST = { h: 48, s: 48, l: 62 }
+const RECENT = { h: 215, s: 85, l: 55 }
 
-function plasma(t: number): [number, number, number] {
-  const u = Math.min(1, Math.max(0, t)) * (PLASMA.length - 1)
-  const i = Math.min(PLASMA.length - 2, Math.floor(u))
-  const f = u - i
-  const a = PLASMA[i]!
-  const b = PLASMA[i + 1]!
-  return [
-    Math.round(a[0] + (b[0] - a[0]) * f),
-    Math.round(a[1] + (b[1] - a[1]) * f),
-    Math.round(a[2] + (b[2] - a[2]) * f)
-  ]
-}
-
-const toHex = (rgb: [number, number, number]): string =>
-  '#' + rgb.map((v) => v.toString(16).padStart(2, '0')).join('')
+const lerp = (a: number, b: number, t: number): number => a + (b - a) * t
 
 /**
- * Gradient color for a year. With a known [minYear, maxYear] the year is
- * placed along the ramp (newest brightest); without one (or a single-year
- * dataset) it returns the brightest end.
+ * Gradient color for a year, placed across [minYear, maxYear] (newest = blue).
+ * Without a known extent (or a single-year dataset) it returns the recent end.
  */
 export function colorForYear(year: number, minYear?: number, maxYear?: number): string {
   if (!Number.isFinite(year) || year <= 0) return UNDATED_YEAR_COLOR
-  let t = 1 // lone year / unknown extent → newest-brightest end
+  let t = 1 // lone year / unknown extent → newest (saturated blue) end
   if (minYear != null && maxYear != null && maxYear > minYear) {
     t = (year - minYear) / (maxYear - minYear)
   }
-  return toHex(plasma(RAMP_START + (1 - RAMP_START) * t))
+  t = Math.min(1, Math.max(0, t))
+  const h = Math.round(lerp(OLDEST.h, RECENT.h, t))
+  const s = Math.round(lerp(OLDEST.s, RECENT.s, t))
+  const l = Math.round(lerp(OLDEST.l, RECENT.l, t))
+  return `hsl(${h}, ${s}%, ${l}%)`
 }
 
 /** Inclusive UTC year range of a dataset, oldest first; [] when undated. */

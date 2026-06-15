@@ -27,10 +27,20 @@ import {
 import { averageRailTracks } from './db/railAverage'
 import { collectGpxFiles } from './importer/importFiles'
 import { analyzeImportOverlap } from './importer/importOverlap'
-import { RAIL_SNAP_TYPES } from './rail/snapRail'
+import { RAIL_SNAP_TYPES, routeWaypoints, type RailGraph } from './rail/snapRail'
+import { buildDriveGraph } from './rail/roadRoute'
 import { rebuildRailMatches, rematchSegment } from './rail/buildMatches'
-import { fetchRailNetwork } from './rail/overpass'
-import { addRailNetwork, getRailCoverage, clearRailNetwork } from './db/railStore'
+import { fetchRailNetwork, fetchDriveNetwork } from './rail/overpass'
+import { addRailNetwork, getRailCoverage, clearRailNetwork, clearRailNetworkData } from './db/railStore'
+import {
+  addRoadNetwork,
+  getRouteCoverage,
+  clearRouteNetwork,
+  routeCoverageBoxes,
+  routeBoxesCover,
+  loadRouteForBbox
+} from './db/routeStore'
+import { simplifyIndices } from './importer/simplify'
 import {
   getSegmentEditState,
   saveSegmentEdits,
@@ -58,6 +68,7 @@ import type {
   LatLonBBox,
   OverwriteWindow,
   RailTuning,
+  RoutePoint,
   SegmentEditInput,
   ViewportQuery,
   ViewportResult
@@ -71,6 +82,62 @@ export interface IpcContext {
 }
 
 let activeImport: Worker | null = null
+
+/**
+ * Cached drivable graph for the reroute preview. Building it from the stored
+ * road edges is the costly step, so dragging a via pin (which re-routes live)
+ * reuses one graph for a padded area instead of rebuilding each frame.
+ * Invalidated whenever the road network changes (fetch / clear).
+ */
+let routeGraphCache: { bbox: LatLonBBox; graph: RailGraph } | null = null
+
+const bboxOfPoints = (pts: ReadonlyArray<RoutePoint>): LatLonBBox => {
+  let minLat = Infinity, minLon = Infinity, maxLat = -Infinity, maxLon = -Infinity
+  for (const p of pts) {
+    if (p.lat < minLat) minLat = p.lat
+    if (p.lat > maxLat) maxLat = p.lat
+    if (p.lon < minLon) minLon = p.lon
+    if (p.lon > maxLon) maxLon = p.lon
+  }
+  return { minLat, minLon, maxLat, maxLon }
+}
+
+const bboxContains = (outer: LatLonBBox, inner: LatLonBBox): boolean =>
+  inner.minLat >= outer.minLat && inner.maxLat <= outer.maxLat &&
+  inner.minLon >= outer.minLon && inner.maxLon <= outer.maxLon
+
+/** A drivable graph covering the waypoints, reusing the cache when it still fits. */
+function routeGraphFor(db: DatabaseSync, waypoints: ReadonlyArray<RoutePoint>): RailGraph {
+  const wb = bboxOfPoints(waypoints)
+  if (routeGraphCache && bboxContains(routeGraphCache.bbox, wb)) return routeGraphCache.graph
+  // Pad generously so (a) nearby pin drags keep reusing this graph and (b) the
+  // best route has room to bow out past the waypoints' own box before the load
+  // window clips it — at least ~4 km, or the span itself for a long reroute.
+  const pad = Math.max(0.04, wb.maxLat - wb.minLat, wb.maxLon - wb.minLon)
+  const load: LatLonBBox = {
+    minLat: wb.minLat - pad, minLon: wb.minLon - pad,
+    maxLat: wb.maxLat + pad, maxLon: wb.maxLon + pad
+  }
+  const { nodes, edges } = loadRouteForBbox(db, load)
+  routeGraphCache = { bbox: load, graph: buildDriveGraph(nodes, edges) }
+  return routeGraphCache.graph
+}
+
+/** Simplify a routed polyline (interleaved lon,lat) so the draft stays light. */
+function simplifyRoutePolyline(coords: Float32Array): number[] {
+  const n = coords.length / 2
+  if (n < 2) return Array.from(coords)
+  const lons = new Float64Array(n)
+  const lats = new Float64Array(n)
+  for (let i = 0; i < n; i++) {
+    lons[i] = coords[i * 2]!
+    lats[i] = coords[i * 2 + 1]!
+  }
+  const kept = simplifyIndices(lons, lats, 1e-5) // ~1 m: drops collinear road vertices
+  const out: number[] = []
+  for (const k of kept) out.push(lons[k]!, lats[k]!)
+  return out
+}
 
 /** A place reference from the renderer: a merged place id, or a visit's id. */
 const validPlaceRef = (r: unknown): r is PlaceRef =>
@@ -459,8 +526,11 @@ export function registerIpc(ctx: IpcContext): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
-  ipcMain.handle('rail:clear', () => {
-    clearRailNetwork(ctx.db)
+  ipcMain.handle('rail:clear', (_e, keepMatched?: boolean) => {
+    // keepMatched drops the bulky network but keeps the cached snapped
+    // geometry, so already-matched rides keep rendering from cache.
+    if (keepMatched) clearRailNetworkData(ctx.db)
+    else clearRailNetwork(ctx.db)
     return { ok: true }
   })
   ipcMain.handle('rail:rebuildMatches', async (event) => {
@@ -481,6 +551,65 @@ export function registerIpc(ctx: IpcContext): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
+  // --- Drivable road network (manual reroute tool) -------------------------
+  ipcMain.handle('route:fetch', async (_event, view: LatLonBBox) => {
+    const nums = [view?.minLat, view?.maxLat, view?.minLon, view?.maxLon]
+    if (nums.some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
+      return { ok: false, error: 'no view to fetch' }
+    }
+    // Roads are far denser than rail, so keep fetches small: a whole city of
+    // full road geometry already strains Overpass. Fetch area by area.
+    const MAX_SPAN_DEG = 2
+    if (view.maxLat - view.minLat > MAX_SPAN_DEG || view.maxLon - view.minLon > MAX_SPAN_DEG) {
+      return { ok: false, error: 'view too large — zoom in and fetch roads area by area' }
+    }
+    const pad = 0.01
+    const bbox = {
+      minLat: Math.max(-90, view.minLat - pad), minLon: Math.max(-180, view.minLon - pad),
+      maxLat: Math.min(90, view.maxLat + pad), maxLon: Math.min(180, view.maxLon + pad)
+    }
+    try {
+      const t0 = performance.now()
+      const fetched = await fetchDriveNetwork(bbox)
+      const coverage = addRoadNetwork(ctx.db, fetched, bbox)
+      routeGraphCache = null // network changed
+      insertPerf(ctx.db, 'route.fetch', performance.now() - t0, `edges=${coverage.edgeCount}`)
+      return { ok: true, coverage }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('route:coverage', () => getRouteCoverage(ctx.db))
+  ipcMain.handle('route:clear', () => {
+    clearRouteNetwork(ctx.db)
+    routeGraphCache = null
+    return { ok: true }
+  })
+  ipcMain.handle('route:preview', (_e, waypoints: RoutePoint[]) => {
+    try {
+      if (
+        !Array.isArray(waypoints) || waypoints.length < 2 ||
+        !waypoints.every((w) => w && Number.isFinite(w.lat) && Number.isFinite(w.lon))
+      ) {
+        return { ok: false, error: 'need at least two valid points to route' }
+      }
+      const boxes = routeCoverageBoxes(ctx.db)
+      if (boxes.length === 0) {
+        return { ok: false, error: 'no roads fetched — fetch roads in view first' }
+      }
+      if (!routeBoxesCover(boxes, waypoints)) {
+        return { ok: false, error: 'a point is outside fetched road coverage — fetch roads there first' }
+      }
+      const t0 = performance.now()
+      const res = routeWaypoints(routeGraphFor(ctx.db, waypoints), waypoints)
+      insertPerf(ctx.db, 'route.preview', performance.now() - t0, `points=${waypoints.length}`)
+      if ('error' in res) return { ok: false, error: res.error }
+      return { ok: true, coords: simplifyRoutePolyline(res.coords) }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   ipcMain.handle('perf:recent', (_e, limit: number) => getRecentPerf(ctx.db, Math.min(limit, 200)))
   ipcMain.handle('app:getConfig', () => ({
     basemapStyleUrl:

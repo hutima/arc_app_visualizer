@@ -69,14 +69,23 @@ export function addRailNetwork(
   return getRailCoverage(db)!
 }
 
-/** All fetched regions (layer-tagged) plus live totals; null when empty. */
+/**
+ * All fetched regions (layer-tagged) plus live totals; null when nothing is
+ * fetched *and* nothing is cached. When the network was cleared but its
+ * matched geometry kept, regions are empty yet matchedRides > 0 — so snapped
+ * rides keep rendering and the snap toggles stay usable from cache alone.
+ */
 export function getRailCoverage(db: DatabaseSync): RailCoverage | null {
   const rows = db.prepare(
     `SELECT category, min_lat AS minLat, min_lon AS minLon, max_lat AS maxLat, max_lon AS maxLon,
             fetched_at_ms AS fetchedAtMs
      FROM rail_coverage ORDER BY fetched_at_ms ASC, id ASC`
   ).all() as Array<{ category: string; minLat: number; minLon: number; maxLat: number; maxLon: number; fetchedAtMs: number }>
-  if (rows.length === 0) return null
+  const matchedRides = matchedRideCount(db)
+  if (rows.length === 0) {
+    if (matchedRides === 0) return null
+    return { regions: [], nodeCount: 0, edgeCount: 0, matchedRides, lastFetchedAtMs: 0 }
+  }
 
   // Counts come from the tables, not per-region sums: overlaps would double-count.
   const { n } = db.prepare('SELECT COUNT(*) AS n FROM rail_nodes').get() as { n: number }
@@ -89,7 +98,7 @@ export function getRailCoverage(db: DatabaseSync): RailCoverage | null {
     })),
     nodeCount: n,
     edgeCount: e,
-    matchedRides: matchedRideCount(db),
+    matchedRides,
     lastFetchedAtMs: rows[rows.length - 1]!.fetchedAtMs
   }
 }
@@ -107,6 +116,26 @@ export function clearRailNetwork(db: DatabaseSync): void {
   db.exec('BEGIN')
   try {
     db.exec('DELETE FROM rail_matched_geom')
+    db.exec('DELETE FROM rail_edges')
+    db.exec('DELETE FROM rail_nodes')
+    db.exec('DELETE FROM rail_coverage')
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+/**
+ * Drop the bulky fetched network (nodes/edges/coverage) but keep the cached
+ * map-matched geometry, so already-snapped rides keep rendering from cache.
+ * Re-matching (or matching new/edited rides) needs a re-fetch afterward; the
+ * display query substitutes matched geometry by segment id alone, independent
+ * of the network tables, so the kept cache stays valid.
+ */
+export function clearRailNetworkData(db: DatabaseSync): void {
+  db.exec('BEGIN')
+  try {
     db.exec('DELETE FROM rail_edges')
     db.exec('DELETE FROM rail_nodes')
     db.exec('DELETE FROM rail_coverage')
