@@ -125,6 +125,12 @@ export interface RoutePreviewResult {
   ok: boolean
   /** Interleaved lon,lat pairs from the first waypoint's anchor to the last. */
   coords?: number[]
+  /**
+   * True when no clean arterial route existed and the result instead follows
+   * the GPS track shape, snapped to the nearest roads (the matchTrackToRoads
+   * fallback) — the UI tells the user so they know it tracks their GPS.
+   */
+  followedTrack?: boolean
   error?: string
 }
 
@@ -513,7 +519,9 @@ export interface ArcApi {
    * bias so the route follows where the user actually went. Once the user
    * starts dragging vias, pass `useGuideCorridor = false` so the GPS is ignored
    * and the drags take priority. `type` is the track's activity type; a `bus`
-   * may route on bus-only ways, anything else can't. Needs road coverage.
+   * may route on bus-only ways, anything else can't. Needs road coverage. When
+   * no clean route exists the result falls back to following the track shape
+   * (`followedTrack` set), so a bus on a non-fastest path still snaps.
    */
   previewRoadRoute(
     waypoints: RoutePoint[],

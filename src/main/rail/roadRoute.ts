@@ -8,7 +8,14 @@
  * a motorway/primary route wins over an equal-length crawl through residential
  * streets. We reuse the rail graph + Dijkstra; only the edge weighting differs.
  */
-import { buildRailGraph, routeWaypoints, type RailGraph, type RailNodeInput, type RailEdgeInput } from './snapRail'
+import {
+  buildRailGraph,
+  routeWaypoints,
+  matchTrackToRoads,
+  type RailGraph,
+  type RailNodeInput,
+  type RailEdgeInput
+} from './snapRail'
 import { simplifyIndices } from '../importer/simplify'
 import type { RailTuning } from '../../shared/types'
 
@@ -258,10 +265,96 @@ export function buildGuidedDriveGraph(
 }
 
 /**
+ * Weave the via pins into the track guide at their nearest position along it, so
+ * the follow-mode fallback bends toward a dragged pin — a via becomes one more
+ * anchor the matched line routes through (the same "must pass here" intent the
+ * strict router gives a via). Monotonic: each via is placed at or after the
+ * previous one's slot, so out-of-order GPS noise can't make the line double back.
+ */
+export function weaveVias(
+  guide: ReadonlyArray<GuidePoint>,
+  vias: ReadonlyArray<GuidePoint>
+): GuidePoint[] {
+  if (vias.length === 0) return [...guide]
+  if (guide.length < 2) return [...guide, ...vias] // no shape to weave into
+  const refCos = refCosOf(guide)
+  // Insert each via into the guide *segment* it sits closest to (projected onto
+  // the segment, not snapped to the nearer endpoint) so a via mid-segment lands
+  // between its two vertices instead of jumping ahead of one — which would make
+  // the followed line double back. Monotonic in the segment index.
+  const slots: Array<{ at: number; via: GuidePoint }> = []
+  let fromSeg = 0
+  for (const via of vias) {
+    const vx = via.lon * refCos
+    let bestSeg = fromSeg
+    let bestD = Infinity
+    for (let s = fromSeg; s < guide.length - 1; s++) {
+      const d = distPointToSeg(
+        vx, via.lat,
+        guide[s]!.lon * refCos, guide[s]!.lat,
+        guide[s + 1]!.lon * refCos, guide[s + 1]!.lat
+      )
+      if (d < bestD) {
+        bestD = d
+        bestSeg = s
+      }
+    }
+    slots.push({ at: bestSeg + 1, via }) // between guide[bestSeg] and guide[bestSeg+1]
+    fromSeg = bestSeg
+  }
+  const out = [...guide]
+  // Splice from the end so earlier insertion indices stay valid.
+  for (let i = slots.length - 1; i >= 0; i--) out.splice(slots[i]!.at, 0, slots[i]!.via)
+  return out
+}
+
+/** Distance from a projected point to a projected segment (clamped to its ends). */
+function distPointToSeg(
+  px: number, py: number,
+  ax: number, ay: number,
+  bx: number, by: number
+): number {
+  const dx = bx - ax
+  const dy = by - ay
+  const len2 = dx * dx + dy * dy
+  let t = len2 === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / len2
+  t = t < 0 ? 0 : t > 1 ? 1 : t
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+}
+
+/**
+ * Route through `waypoints`, preferring a clean arterial path; if none exists
+ * (routeWaypoints fails — a bus that didn't take the quickest way, a one-way
+ * maze, a tunnel with no GPS, a slightly disconnected fetch), fall back to
+ * following the original track shape onto the roads (matchTrackToRoads), with
+ * the via pins woven in so drags still steer the result. `followGuide` is the
+ * full original track span used only by the fallback's shape; `guideLenDeg`
+ * widens the strict router's budget for a winding corridor. `followedTrack`
+ * flags that the fallback produced the result, so the UI can tell the user the
+ * line tracks their GPS rather than the fastest route.
+ */
+export function routeOrFollow(
+  g: RailGraph,
+  waypoints: ReadonlyArray<{ lon: number; lat: number }>,
+  followGuide: ReadonlyArray<GuidePoint>,
+  guideLenDeg = 0
+): { coords: Float32Array; followedTrack?: boolean } | { error: string } {
+  const strict = routeWaypoints(g, waypoints, guideLenDeg)
+  if ('coords' in strict) return strict
+  const base = followGuide.length >= 2 ? followGuide : waypoints
+  const followed = matchTrackToRoads(g, weaveVias(base, waypoints.slice(1, -1)))
+  if ('coords' in followed) return { coords: followed.coords, followedTrack: true }
+  // Both failed: the strict routing error is the more actionable one to surface.
+  return strict
+}
+
+/**
  * Compute the road route through `waypoints` in order, biased toward the
  * (optional) original-track `guide`, with a road-class `emphasis` (≥1, higher
  * = prefer highways harder). `includeBus` keeps bus-only ways in play (set it
- * for bus trips). Returns the snapped polyline (interleaved lon,lat) or an error.
+ * for bus trips). Falls back to following the track shape when no clean route
+ * exists (see routeOrFollow). Returns the snapped polyline (interleaved
+ * lon,lat) or an error.
  */
 export function computeRoadRoute(
   nodes: RailNodeInput[],
@@ -270,11 +363,11 @@ export function computeRoadRoute(
   guide: ReadonlyArray<GuidePoint> = [],
   emphasis = 1,
   includeBus = false
-): { coords: Float32Array } | { error: string } {
+): { coords: Float32Array; followedTrack?: boolean } | { error: string } {
   const usable = filterDriveEdges(edges, includeBus)
   const graph =
     guide.length >= 2
       ? buildGuidedDriveGraph(nodes, usable, guide, emphasis)
       : buildDriveGraph(nodes, usable, emphasis)
-  return routeWaypoints(graph, waypoints, guideLengthDeg(guide))
+  return routeOrFollow(graph, waypoints, guide, guideLengthDeg(guide))
 }

@@ -133,6 +133,13 @@ const GAP_FACTOR = 4
 /** …plus this slack (~330 m), so short hops aren't over-constrained. */
 const GAP_SLACK_DEG = 3e-3
 /**
+ * Follow-mode (matchTrackToRoads) joins two adjacent track anchors with a more
+ * generous budget than the automatic matcher: the user explicitly asked to
+ * follow their track and reviews the result, so a hop may bow out further —
+ * enough to cross a GPS dropout (a tunnel with no fixes inside) along the road.
+ */
+const FOLLOW_HOP_FACTOR = 8
+/**
  * An unroutable hop no longer than this (~155 m) is bridged straight instead
  * of breaking the run: adjacent parallel tracks (one way per direction) make
  * noisy anchors ping-pong across rails whose crossover is far away.
@@ -559,6 +566,87 @@ export function routeWaypoints(
     for (const id of route) pushNode(id)
   }
   if (out.length < 4) return { error: 'route too short to apply' }
+  return { coords: new Float32Array(out) }
+}
+
+/**
+ * Fallback for routeWaypoints: snap the *actual track shape* onto the roads
+ * instead of computing a fastest A→B path. This is what the user wants when no
+ * clean route exists — a bus that doesn't take the quickest way, a one-way
+ * maze, a slightly disconnected fetch, or a tunnel with no GPS inside. Each
+ * track vertex anchors to the nearest road (sticky to the running road
+ * component, so noise doesn't flip the line onto a parallel street) and
+ * consecutive anchors are joined by a short Dijkstra; any stretch that can't
+ * anchor or route keeps its raw GPS, so the line stays continuous and nothing
+ * is dropped. Unlike the rail matcher there's no time gate and no break
+ * sentinel — the user asked for a continuous line and reviews it before
+ * applying. Returns an error only when nothing at all snapped, so the caller
+ * can fall back to reporting the (more actionable) strict routing failure.
+ */
+export function matchTrackToRoads(
+  g: RailGraph,
+  guide: ReadonlyArray<{ lon: number; lat: number }>
+): { coords: Float32Array } | { error: string } {
+  if (g.empty) return { error: 'no road network loaded for this area — fetch roads first' }
+  const n = guide.length
+  if (n < 2) return { error: 'need at least two points to route' }
+
+  const out: number[] = []
+  const pushLonLat = (lon: number, lat: number): void => {
+    const m = out.length
+    if (m >= 2 && out[m - 2] === lon && out[m - 1] === lat) return
+    out.push(lon, lat)
+  }
+  const pushNode = (id: number): void => {
+    const p = g.pos.get(id)!
+    pushLonLat(p.lon, p.lat)
+  }
+
+  let prev: number | null = null // last anchored road node, or null after a raw stretch
+  let prevComp = -1 // its road component, so anchoring stays on one street
+  let snappedHops = 0
+  for (let i = 0; i < n; i++) {
+    const lon = guide[i]!.lon
+    const lat = guide[i]!.lat
+    const anchor = nearestAnchor(g, lon * g.refCos, lat, prevComp)
+    if (anchor === null) {
+      // Off the network here: keep the raw point so the line follows the track.
+      pushLonLat(lon, lat)
+      prev = null
+      prevComp = -1
+      continue
+    }
+    if (prev === null) {
+      pushNode(anchor)
+      prev = anchor
+      prevComp = g.comp.get(anchor) ?? -1
+      continue
+    }
+    if (anchor === prev) continue // no movement on the graph (dwell / dense GPS)
+    const a = g.pos.get(prev)!
+    const b = g.pos.get(anchor)!
+    const straight = Math.hypot(a.x - b.x, a.y - b.y)
+    const route = dijkstra(g, prev, anchor, FOLLOW_HOP_FACTOR * straight + GAP_SLACK_DEG)
+    if (route) {
+      for (let j = 1; j < route.length; j++) pushNode(route[j]!)
+      snappedHops++
+    } else if (straight <= SOFT_BRIDGE_DEG) {
+      pushNode(anchor) // parallel-track / one-way ping-pong: bridge the few meters
+      snappedHops++
+    } else {
+      // Can't stay on roads between these two fixes: drop to the raw track point
+      // and re-acquire the network at the next vertex (line stays continuous).
+      pushLonLat(lon, lat)
+      prev = null
+      prevComp = -1
+      continue
+    }
+    prev = anchor
+    prevComp = g.comp.get(anchor) ?? -1
+  }
+  if (snappedHops === 0 || out.length < 4) {
+    return { error: 'no roads near the track to follow — fetch more area' }
+  }
   return { coords: new Float32Array(out) }
 }
 

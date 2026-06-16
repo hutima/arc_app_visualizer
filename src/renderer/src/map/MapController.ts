@@ -61,6 +61,8 @@ export interface RerouteInfo {
   previewing: boolean
   /** A previewed route is ready to apply. */
   hasPreview: boolean
+  /** The preview follows the GPS track (no clean road route existed). */
+  followedTrack: boolean
   error: string | null
 }
 
@@ -208,6 +210,8 @@ export class MapController {
   private reroutePreview: number[] | null = null
   private reroutePreviewToken = 0
   private rerouteBusy = false
+  /** Last preview came from the track-following fallback, not a clean route. */
+  private rerouteFollowedTrack = false
   private rerouteError: string | null = null
   private rerouteTimer: ReturnType<typeof setTimeout> | null = null
   private rerouteListener: ((info: RerouteInfo | null) => void) | null = null
@@ -980,6 +984,7 @@ export class MapController {
     const endIdx = Math.max(startIdx + 1, Math.min(last, Math.round(range.endIdx)))
     this.rerouteRange = { startIdx, endIdx }
     this.reroutePreview = null
+    this.rerouteFollowedTrack = false
     this.rerouteError = null
     // A new span gets a fresh GPS-guided initial estimate.
     this.rerouteGuideConsumed = false
@@ -1000,6 +1005,7 @@ export class MapController {
     this.rerouteVias = []
     this.reroutePreview = null
     this.rerouteBusy = false
+    this.rerouteFollowedTrack = false
     this.rerouteError = null
   }
 
@@ -1032,6 +1038,7 @@ export class MapController {
             viaCount: this.rerouteVias.length,
             previewing: this.rerouteBusy,
             hasPreview: this.reroutePreview !== null,
+            followedTrack: this.rerouteFollowedTrack,
             error: this.rerouteError
           }
     )
@@ -1078,9 +1085,11 @@ export class MapController {
     this.rerouteBusy = false
     if (res.ok && res.coords && res.coords.length >= 4) {
       this.reroutePreview = res.coords
+      this.rerouteFollowedTrack = res.followedTrack === true
       this.rerouteError = null
     } else {
       this.reroutePreview = null
+      this.rerouteFollowedTrack = false
       this.rerouteError = res.error ?? 'could not compute a route'
     }
     this.updateRerouteLayers()

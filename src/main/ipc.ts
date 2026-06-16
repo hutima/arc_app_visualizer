@@ -27,13 +27,14 @@ import {
 import { averageRailTracks } from './db/railAverage'
 import { collectGpxFiles } from './importer/importFiles'
 import { analyzeImportOverlap } from './importer/importOverlap'
-import { RAIL_SNAP_TYPES, routeWaypoints, type RailGraph } from './rail/snapRail'
+import { RAIL_SNAP_TYPES, type RailGraph } from './rail/snapRail'
 import {
   buildDriveGraph,
   buildGuidedDriveGraph,
   filterDriveEdges,
   guideLengthDeg,
   emphasisForDistanceDeg,
+  routeOrFollow,
   simplifyRoutePolyline
 } from './rail/roadRoute'
 import { findSimilarSegments, type SimilarMode } from './db/similarSegments'
@@ -672,13 +673,16 @@ export function registerIpc(ctx: IpcContext): void {
         const includeBus = type === 'bus'
         const t0 = performance.now()
         const graph = routeGraphFor(ctx.db, waypoints, corridor, emphasis, includeBus)
-        const res = routeWaypoints(graph, waypoints, guideLengthDeg(corridor))
+        // Strict arterial routing first; if no clean route exists, fall back to
+        // following the full track span (`span`, not the maybe-empty corridor).
+        const res = routeOrFollow(graph, waypoints, span, guideLengthDeg(corridor))
+        const followed = 'coords' in res && res.followedTrack === true
         insertPerf(
           ctx.db, 'route.preview', performance.now() - t0,
-          `points=${waypoints.length} emphasis=${emphasis.toFixed(1)} corridor=${corridor.length > 0} bus=${includeBus}`
+          `points=${waypoints.length} emphasis=${emphasis.toFixed(1)} corridor=${corridor.length > 0} bus=${includeBus} followed=${followed}`
         )
         if ('error' in res) return { ok: false, error: res.error }
-        return { ok: true, coords: simplifyRoutePolyline(res.coords) }
+        return { ok: true, coords: simplifyRoutePolyline(res.coords), followedTrack: res.followedTrack }
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) }
       }

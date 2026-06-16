@@ -9,6 +9,9 @@ import {
   roadClassKind,
   emphasisForDistanceDeg,
   filterDriveEdges,
+  routeOrFollow,
+  weaveVias,
+  buildDriveGraph,
   BUS_KIND,
   DRIVE_HIGHWAY_TYPES,
   ROAD_CLASS
@@ -192,5 +195,75 @@ describe('road class + drive query', () => {
     const parsed = parseOverpassJson(json, (tags) => roadClassKind(tags.highway))
     expect(parsed.edges).toHaveLength(1)
     expect(parsed.edges[0]!.kind).toBe(ROAD_CLASS.primary)
+  })
+})
+
+describe('weaveVias', () => {
+  const guide = [
+    { lon: 0, lat: 0 },
+    { lon: 0.01, lat: 0 },
+    { lon: 0.02, lat: 0 },
+    { lon: 0.03, lat: 0 }
+  ]
+
+  it('returns the guide unchanged when there are no vias', () => {
+    expect(weaveVias(guide, []).map((p) => p.lon)).toEqual([0, 0.01, 0.02, 0.03])
+  })
+
+  it('inserts a mid-segment via in order (no doubling back)', () => {
+    const woven = weaveVias(guide, [{ lon: 0.025, lat: 0 }])
+    expect(woven.map((p) => p.lon)).toEqual([0, 0.01, 0.02, 0.025, 0.03])
+  })
+
+  it('keeps multiple vias monotonic along the guide', () => {
+    const woven = weaveVias(guide, [{ lon: 0.005, lat: 0 }, { lon: 0.022, lat: 0 }])
+    expect(woven.map((p) => p.lon)).toEqual([0, 0.005, 0.01, 0.02, 0.022, 0.03])
+  })
+
+  it('appends vias when the guide has no shape to weave into', () => {
+    expect(weaveVias([{ lon: 0, lat: 0 }], [{ lon: 1, lat: 1 }])).toHaveLength(2)
+  })
+})
+
+describe('routeOrFollow (fallback to following the track)', () => {
+  // Two unconnected road fragments: a near one (lon 0..0.02) and a far one
+  // (lon 0.10..0.12). No A→B path exists between them.
+  const nodes: RailNodeInput[] = [
+    { id: 1, lat: 0, lon: 0 },
+    { id: 2, lat: 0, lon: 0.01 },
+    { id: 3, lat: 0, lon: 0.02 },
+    { id: 4, lat: 0, lon: 0.1 },
+    { id: 5, lat: 0, lon: 0.11 },
+    { id: 6, lat: 0, lon: 0.12 }
+  ]
+  const RES = ROAD_CLASS.residential
+  const edges = [
+    { a: 1, b: 2, kind: RES },
+    { a: 2, b: 3, kind: RES },
+    { a: 4, b: 5, kind: RES },
+    { a: 5, b: 6, kind: RES }
+  ]
+  const guide = nodes.map((n) => ({ lon: n.lon, lat: n.lat }))
+  const ends = [{ lon: 0, lat: 0 }, { lon: 0.12, lat: 0 }]
+
+  it('falls back to the track shape when no clean route exists, flagging it', () => {
+    const g = buildDriveGraph(nodes, edges)
+    const res = routeOrFollow(g, ends, guide)
+    expect('coords' in res).toBe(true)
+    if ('coords' in res) expect(res.followedTrack).toBe(true)
+  })
+
+  it('returns the clean route (no fallback flag) when one exists', () => {
+    const connected = [...edges, { a: 3, b: 4, kind: RES }] // bridge the gap
+    const g = buildDriveGraph(nodes, connected)
+    const res = routeOrFollow(g, ends, guide)
+    expect('coords' in res).toBe(true)
+    if ('coords' in res) expect(res.followedTrack).toBeFalsy()
+  })
+
+  it('surfaces through computeRoadRoute end to end', () => {
+    const res = computeRoadRoute(nodes, edges, ends, guide)
+    expect('coords' in res).toBe(true)
+    if ('coords' in res) expect(res.followedTrack).toBe(true)
   })
 })

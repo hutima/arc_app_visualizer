@@ -10,6 +10,7 @@ import {
   bridgeRoadGaps,
   buildRailGraph,
   matchRideToRail,
+  matchTrackToRoads,
   RAIL_KIND,
   ROAD_TUNING,
   type RailNodeInput,
@@ -273,6 +274,67 @@ describe('matchRideToRail', () => {
     // Every output point lies on one of the two tracks — never off-network.
     const lats = new Set([0, Math.fround(0.0001)])
     for (let i = 1; i < c.length; i += 2) expect(lats.has(c[i]!)).toBe(true)
+  })
+})
+
+describe('matchTrackToRoads (follow-track fallback)', () => {
+  const graph = buildRailGraph(LINE_NODES, LINE_EDGES)
+
+  it('snaps a noisy track onto the line, following its shape', () => {
+    const jitter = [
+      { lon: 0, lat: 0.0004 },
+      { lon: 0.03, lat: -0.0005 },
+      { lon: 0.06, lat: 0.0004 },
+      { lon: 0.1, lat: -0.0003 }
+    ]
+    const res = matchTrackToRoads(graph, jitter)
+    expect('coords' in res).toBe(true)
+    if ('coords' in res) {
+      const c = coordsOf(res.coords)
+      for (let i = 1; i < c.length; i += 2) expect(Math.abs(c[i]!)).toBeLessThan(1e-9)
+    }
+  })
+
+  it('bridges a GPS dropout (tunnel) with no time gate', () => {
+    // Only the two ends are seen; the middle is a tunnel with no fixes. Unlike
+    // the rail matcher, follow-mode never time-gates — the user asked to follow.
+    const ends = [{ lon: 0, lat: 0.0003 }, { lon: 0.1, lat: -0.0003 }]
+    const res = matchTrackToRoads(graph, ends)
+    expect('coords' in res).toBe(true)
+    if ('coords' in res) {
+      const c = coordsOf(res.coords)
+      expect(c.length / 2).toBe(11) // filled with the intermediate nodes
+      for (let i = 1; i < c.length; i += 2) expect(c[i]).toBe(0)
+    }
+  })
+
+  it('keeps raw GPS where the track leaves the network (continuous, not dropped)', () => {
+    // Runs along the line, detours far off it, then returns — the off-network
+    // stretch stays raw so the line is continuous rather than rejected.
+    const track = [
+      { lon: 0, lat: 0 },
+      { lon: 0.02, lat: 0 },
+      { lon: 0.05, lat: 5 }, // way off any road
+      { lon: 0.08, lat: 0 },
+      { lon: 0.1, lat: 0 }
+    ]
+    const res = matchTrackToRoads(graph, track)
+    expect('coords' in res).toBe(true)
+    if ('coords' in res) {
+      const c = coordsOf(res.coords)
+      // The raw detour vertex survives verbatim (kept, not snapped to lat 0).
+      expect(c.some((v, i) => i % 2 === 1 && v === 5)).toBe(true)
+      // …and on-network stretches did snap (some points sit exactly on lat 0).
+      expect(c.some((v, i) => i % 2 === 1 && v === 0)).toBe(true)
+    }
+  })
+
+  it('errors on an empty network', () => {
+    expect('error' in matchTrackToRoads(buildRailGraph([], []), [{ lon: 0, lat: 0 }, { lon: 0.1, lat: 0 }])).toBe(true)
+  })
+
+  it('errors when nothing is near a road', () => {
+    expect('error' in matchTrackToRoads(graph, [{ lon: 5, lat: 5 }, { lon: 5.1, lat: 5 }])).toBe(true)
   })
 })
 

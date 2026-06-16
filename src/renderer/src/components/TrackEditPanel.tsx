@@ -423,6 +423,12 @@ export function RerouteTool({
               Clear vias
             </button>
           </div>
+          {reroute?.followedTrack && !reroute?.error && (
+            <p className="hint status-line">
+              No through-road route found — following your track and snapping it
+              to the nearest roads. Drag via pins to refine, then apply.
+            </p>
+          )}
           {reroute?.error && <p className="hint status-line error">{reroute.error}</p>}
           {routeError && <p className="hint status-line error">{routeError}</p>}
           <button
