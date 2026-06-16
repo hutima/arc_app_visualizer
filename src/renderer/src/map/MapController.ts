@@ -1444,22 +1444,28 @@ export class MapController {
     }
     if (this.editTool === 'bulk') {
       // A mousedown already handled as an archetype edit (vertex grab / line
-      // insert) must not also re-anchor or deselect on the trailing click.
+      // insert) must not also act on the trailing click.
       if (this.suppressClickOff) {
         this.suppressClickOff = false
         return
       }
-      // The archetype is the open edit session; its clicks are edits (handled in
-      // handleMapDown) — never deselect or re-anchor it here.
-      if (id === this.editingId) return
-      // Clicking an already-selected track drops it from the batch (an
-      // inadvertent match the user wants out).
-      if (this.bulkHighlightIds.includes(id)) {
-        this.bulkDeselectListener?.(id)
+      // Overlapping commutes make the single topmost feature unreliable, so look
+      // at every track under the click and prefer dropping a currently-selected
+      // one — that's the match the user is aiming at when deselecting.
+      const under = (e.features ?? [])
+        .map((f) => (typeof f.id === 'number' ? f.id : Number(f.id)))
+        .filter((fid) => Number.isInteger(fid))
+      const toDrop = under.find((fid) => this.bulkHighlightIds.includes(fid))
+      if (toDrop !== undefined) {
+        this.bulkDeselectListener?.(toDrop)
         return
       }
-      // Any other track becomes a fresh archetype + similar search.
-      void this.commitArchetypeAndAnchor(id)
+      // No selected track here. The batch locks once anchored — switching the
+      // base/archetype track is an active choice (press Clear first), so a stray
+      // click on another track can't blow away the curated set. Only the first
+      // pick (nothing anchored yet) starts a fresh archetype + search.
+      const anchored = this.editingId !== null || this.bulkHighlightIds.length > 0
+      if (!anchored) void this.commitArchetypeAndAnchor(id)
       return
     }
     if (this.editTool === 'mergePlaces') {

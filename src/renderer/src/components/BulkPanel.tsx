@@ -113,8 +113,8 @@ export function BulkPanel({
           </p>
           <p className="hint">
             Drag the archetype’s points to clean it up; click any orange match to
-            drop it from the batch. Then apply the shape — each track keeps its
-            own timing.
+            drop it from the batch. Apply the shape — each track keeps its own
+            timing. The set stays locked: press Clear to start over on a new track.
           </p>
         </>
       )}
