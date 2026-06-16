@@ -10,7 +10,6 @@ import type {
 import type { DetailMode } from '../../shared/displayDetail'
 import type {
   BulkApplyResult,
-  BulkRerouteResult,
   DatasetStats,
   EditSaveMode,
   MergeCandidate,
@@ -100,8 +99,10 @@ export function App(): React.JSX.Element {
   const bulkSelectionRef = useRef<number[]>([])
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkError, setBulkError] = useState<string | null>(null)
-  const [bulkResult, setBulkResult] = useState<BulkRerouteResult | null>(null)
   const [bulkApplyResult, setBulkApplyResult] = useState<BulkApplyResult | null>(null)
+  // Bulk phase: false = picking/deselecting matches; true = the matches are
+  // confirmed (hidden) and the lone archetype is being edited/rerouted/applied.
+  const [bulkConfirmed, setBulkConfirmed] = useState(false)
   const [appMode, setAppMode] = useState<AppMode>('display')
   const [editTool, setEditTool] = useState<EditTool>('points')
   const [editSession, setEditSession] = useState<EditSessionInfo | null>(null)
@@ -190,7 +191,6 @@ export function App(): React.JSX.Element {
       controller.setEditListener((s) => setEditSession(s))
       controller.setRerouteListener((info) => setRerouteInfo(info))
       controller.setBulkAnchorListener((segmentId) => {
-        setBulkResult(null)
         setBulkApplyResult(null)
         setBulkError(null)
         setBulkAnchorId(segmentId)
@@ -529,9 +529,17 @@ export function App(): React.JSX.Element {
     setEditError(null)
     void controller.applyReroute().then((res) => {
       setEditBusy(false)
-      if (!res.ok) setEditError(res.error ?? 'apply failed')
+      if (!res.ok) {
+        setEditError(res.error ?? 'apply failed')
+        return
+      }
+      // Applying a reroute closes the edit session; in Bulk clean the archetype
+      // must stay editable (for vertex tweaks) and ready to stamp, so reopen it.
+      if (editTool === 'bulk' && bulkAnchorId !== null) {
+        void controller.reopenArchetype(bulkAnchorId)
+      }
     })
-  }, [])
+  }, [editTool, bulkAnchorId])
 
   const clearMerge = useCallback((): void => {
     setMergeCandidates([])
@@ -546,11 +554,28 @@ export function App(): React.JSX.Element {
     setBulkSelection([])
     bulkSelectionRef.current = []
     setBulkError(null)
-    setBulkResult(null)
     setBulkApplyResult(null)
+    setBulkConfirmed(false)
+    controllerRef.current?.setBulkArchetypeOnly(false)
     controllerRef.current?.setBulkHighlight([])
     // Save the archetype's edits (if any) as a draft, then close its session.
     void controllerRef.current?.closeArchetype()
+  }, [])
+
+  // Confirm the picked set: hide the other matches so only the archetype shows,
+  // then it's edited/rerouted as a single track before stamping.
+  const handleBulkConfirm = useCallback((): void => {
+    if (bulkAnchorId === null || bulkSelection.length === 0) return
+    setBulkConfirmed(true)
+    controllerRef.current?.setBulkArchetypeOnly(true)
+  }, [bulkAnchorId, bulkSelection.length])
+
+  // Go back to picking matches (un-hide them) without losing the selection.
+  const handleBulkReselect = useCallback((): void => {
+    setBulkConfirmed(false)
+    setBulkApplyResult(null)
+    controllerRef.current?.setRerouteRange(null) // close any open reroute tool
+    controllerRef.current?.setBulkArchetypeOnly(false)
   }, [])
 
   // Find the anchor's similar tracks (debounced for radius typing) and highlight
@@ -573,32 +598,6 @@ export function App(): React.JSX.Element {
       clearTimeout(handle)
     }
   }, [appMode, editTool, bulkAnchorId, bulkRadiusM, bulkMode])
-
-  // Reroute every selected track to its own clean road route (revertible drafts).
-  const handleBulkRerouteAll = useCallback((): void => {
-    if (bulkSelection.length === 0) return
-    if (
-      !skipConfirmRef.current &&
-      !window.confirm(
-        `Reroute ${bulkSelection.length} track${bulkSelection.length === 1 ? '' : 's'} to clean road routes? They're saved as drafts you can review or discard.`
-      )
-    ) {
-      return
-    }
-    setBulkBusy(true)
-    setBulkError(null)
-    setBulkResult(null)
-    void window.api.bulkRerouteSegments(bulkSelection).then((res) => {
-      setBulkBusy(false)
-      if (res.ok && res.result) {
-        setBulkResult(res.result)
-        controllerRef.current?.scheduleRefresh(0)
-        refreshDraftCount()
-      } else {
-        setBulkError(res.error ?? 'bulk reroute failed')
-      }
-    })
-  }, [bulkSelection, refreshDraftCount])
 
   // Stamp the edited archetype's shape onto every selected track as drafts,
   // each timed from its own progression. Flush the archetype's own edits first
@@ -632,6 +631,8 @@ export function App(): React.JSX.Element {
       setBulkBusy(false)
       if (res.ok && res.result) {
         setBulkApplyResult(res.result)
+        // Reveal the matches again so the stamped result is visible on the map.
+        controllerRef.current?.setBulkArchetypeOnly(false)
         controllerRef.current?.scheduleRefresh(0)
         refreshDraftCount()
       } else {
@@ -1371,17 +1372,25 @@ export function App(): React.JSX.Element {
                 count={bulkSelection.length}
                 radiusM={bulkRadiusM}
                 mode={bulkMode}
-                busy={bulkBusy}
+                busy={bulkBusy || editBusy}
                 error={bulkError}
-                result={bulkResult}
                 applyResult={bulkApplyResult}
+                confirmed={bulkConfirmed}
+                session={editSession}
+                reroute={rerouteInfo}
                 hasRouteCoverage={routeCoverage !== null}
                 routeFetching={routeFetching}
+                routeError={routeError}
                 onRadiusChange={setBulkRadiusM}
                 onModeChange={setBulkMode}
+                onConfirm={handleBulkConfirm}
+                onReselect={handleBulkReselect}
+                onRerouteRange={handleRerouteRange}
+                onClearVias={handleClearVias}
+                onApplyReroute={handleApplyReroute}
                 onApplyArchetype={handleApplyArchetype}
-                onRerouteAll={handleBulkRerouteAll}
                 onDeleteAll={handleBulkDeleteAll}
+                onCommitAll={handleCommitAllDrafts}
                 onFetchRoads={handleFetchRoute}
                 onClear={clearBulk}
               />

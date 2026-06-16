@@ -146,21 +146,25 @@ tests/         vitest; *.test.ts mirror the module they cover
   structural, like split. Map highlights candidate/selected segments by id
   (`setMergeHighlight`, filtered on the tracks source).
 - **Bulk clean** (`db/similarSegments.ts` + `db/archetypeApply.ts` +
-  `BulkPanel`): clean a commute logged hundreds of times in one pass. Click a
-  track → `findSimilarSegments` selects same-type tracks sharing its start/end
-  (direction-aware; `endpoints` or `passthrough`), highlighted orange on the
-  tracks source (`setBulkHighlight`). The clicked track becomes an editable
-  **archetype** — the normal point-edit session opens on it (drag/insert/delete
-  reuse the tool-agnostic gesture handlers), and clicking another highlighted
-  track **deselects** it (drops an inadvertent match). **Apply**
-  (`applyArchetypeToSegments`) stamps the archetype's edited shape onto every
-  selected track as a revertible **draft**, timing each copy by transferring
+  `BulkPanel`): clean a commute logged hundreds of times in one pass, two phases.
+  *Select:* click a track → `findSimilarSegments` picks same-type tracks sharing
+  its start/end (direction-aware; `endpoints` or `passthrough`), highlighted
+  orange (`setBulkHighlight`); clicking a match **deselects** it (overlap-robust —
+  it drops a *selected* track under the click, not the topmost), and the set
+  **locks** once anchored (re-pick a base track only via Clear). *Edit archetype:*
+  Confirm hides the other matches (`setBulkArchetypeOnly` → the type filter drops
+  the match ids) so only the clicked track — the **archetype** — shows in a normal
+  point-edit session (drag/insert/delete via the tool-agnostic gesture handlers)
+  plus the shared `RerouteTool` (snap **just the archetype** to roads — one route,
+  not hundreds; `applyReroute` closes the session so `reopenArchetype` reloads it).
+  **Apply** (`applyArchetypeToSegments`) stamps the archetype's edited shape onto
+  every selected track as a revertible **draft**, timing each copy by transferring
   *that track's own* speed profile onto the shared shape (`computeLayeredTimes`:
   a vertex at fraction f of the archetype's length takes the track's time at
   fraction f of its own length), so every trip keeps its real duration. Those
   per-vertex times ride the overlay's `segment_edits.ts_ms` (explicit insert
-  timestamps; null still interpolates by seq). The panel also keeps per-track
-  auto road-reroute (`bulkRoute.ts`) and delete-all.
+  timestamps; null still interpolates by seq). Then "Save all permanently"
+  (`commitAllDrafts`); delete-all is also here.
 - Any edit/split/merge rebuilds the segment's `display_geometries` + bbox and
   drops its cached `rail_matched_geom`. `prepareEffectivePoints` is the
   raw-point read path for the match pass and 'all points' queries, so **edits

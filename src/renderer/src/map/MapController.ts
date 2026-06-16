@@ -230,6 +230,9 @@ export class MapController {
   private mergeSelectedIds: number[] = []
   /** Bulk-selection highlight ids, restored on a theme re-add. */
   private bulkHighlightIds: number[] = []
+  /** Bulk edit phase: once confirmed, hide the non-archetype matches so only the
+   * archetype shows for editing/rerouting. */
+  private bulkArchetypeOnly = false
   /** Stats mode: clicking a place reports it for inspection (no track edits). */
   private statsMode = false
   /** Centroids of highlighted places (rings); restored on a theme re-add. */
@@ -570,12 +573,14 @@ export class MapController {
       this.categories.length === 0
         ? (['literal', true] as unknown as ExpressionSpecification)
         : (['in', ['get', 'type'], ['literal', visible]] as unknown as ExpressionSpecification)
-    // While editing, the original line hides under the editable copy.
-    const filter: ExpressionSpecification =
-      this.editingId !== null
-        ? (['all', base, ['!=', ['id'], this.editingId]] as unknown as ExpressionSpecification)
-        : base
-    this.map.setFilter(TRACKS_LAYER, filter)
+    // While editing, the original line hides under the editable copy; in the
+    // confirmed bulk phase the matched tracks hide too so only the archetype shows.
+    const clauses: unknown[] = ['all', base]
+    if (this.editingId !== null) clauses.push(['!=', ['id'], this.editingId])
+    if (this.bulkArchetypeOnly && this.bulkHighlightIds.length > 0) {
+      clauses.push(['!', ['in', ['id'], ['literal', this.bulkHighlightIds]]])
+    }
+    this.map.setFilter(TRACKS_LAYER, clauses as unknown as ExpressionSpecification)
   }
 
   private applyWaypointVisibility(): void {
@@ -674,11 +679,28 @@ export class MapController {
   setBulkHighlight(ids: number[]): void {
     this.bulkHighlightIds = ids
     if (!this.map.getLayer(BULK_HL_LAYER)) return
-    const show = this.editMode && this.editTool === 'bulk'
+    // Hidden once the selection is confirmed (only the archetype shows then).
+    const show = this.editMode && this.editTool === 'bulk' && !this.bulkArchetypeOnly
     // The archetype (the open edit session) is shown with editable handles, so
     // drop it from the orange highlight or that line paints over the handles.
     this.map.setFilter(BULK_HL_LAYER, matchIds(ids.filter((id) => id !== this.editingId)))
     this.map.setLayoutProperty(BULK_HL_LAYER, 'visibility', show ? 'visible' : 'none')
+  }
+
+  /**
+   * Enter/leave the "archetype only" phase. Confirming the selection hides the
+   * other matches (both the orange highlight and their dimmed base lines) so the
+   * user edits/reroutes a single clean archetype; leaving brings them back.
+   */
+  setBulkArchetypeOnly(on: boolean): void {
+    this.bulkArchetypeOnly = on
+    this.applyTypeFilter()
+    this.setBulkHighlight(this.bulkHighlightIds)
+  }
+
+  /** Re-open the archetype for editing (e.g. after a reroute closed its session). */
+  async reopenArchetype(segmentId: number): Promise<void> {
+    await this.loadSegmentForEdit(segmentId)
   }
 
   /**
@@ -748,6 +770,7 @@ export class MapController {
     if (on === this.editMode) return
     this.editMode = on
     if (!on) {
+      this.bulkArchetypeOnly = false // restore hidden matches when leaving edit
       this.closeEditSession()
       this.setMergeHighlight([], [])
       this.setBulkHighlight([])
@@ -760,6 +783,7 @@ export class MapController {
   setEditTool(tool: EditTool): void {
     if (tool === this.editTool) return
     this.editTool = tool
+    this.bulkArchetypeOnly = false // a fresh tool shows all base tracks again
     this.closeEditSession()
     this.setMergeHighlight([], [])
     this.setBulkHighlight([])
