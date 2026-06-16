@@ -230,13 +230,15 @@ export function CleaningControl({
       <div className="cleaning-divider">
         <p className="hint">
           <strong>Road routing</strong> — drivable roads for the manual reroute
-          tool (Edit → Edit points → “Snap part to road route”). Fetch an area,
-          then route on it offline; applied reroutes are kept even if you clear
-          the roads. Roads are dense, so fetch a small area at a time.
+          tool (Edit → Edit points, or Bulk clean → “Snap … to road route”). This
+          is a <em>separate</em> network from the “road tunnels” cleaning layer
+          above. Fetch the area covering the <em>whole</em> route you’ll snap (a
+          reroute needs roads under both ends), then route on it offline; applied
+          reroutes are kept even if you clear the roads.
         </p>
         <div className="rail-fetch-actions">
           <button type="button" onClick={onFetchRoute} disabled={routeFetching}>
-            {routeFetching ? 'Fetching…' : `${routeAreas > 0 ? 'Add' : 'Fetch'} roads in view`}
+            {routeFetching ? 'Fetching…' : `${routeAreas > 0 ? 'Add' : 'Fetch'} driving roads in view`}
           </button>
         </div>
         {routeCoverage && (

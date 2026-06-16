@@ -656,10 +656,10 @@ export function registerIpc(ctx: IpcContext): void {
         const span = Array.isArray(guide) ? guide.filter(validPt) : []
         const boxes = routeCoverageBoxes(ctx.db)
         if (boxes.length === 0) {
-          return { ok: false, error: 'no roads fetched — fetch roads in view first' }
+          return { ok: false, error: 'no driving roads fetched — fetch them in view first (separate from “road tunnels”)' }
         }
         if (!routeBoxesCover(boxes, waypoints)) {
-          return { ok: false, error: 'a point is outside fetched road coverage — fetch roads there first' }
+          return { ok: false, error: 'part of this route is outside the fetched roads — zoom out to the whole route and fetch driving roads again' }
         }
         // Highway emphasis scales with the trip's length (always — even when the
         // corridor is off, long legs through the vias still funnel onto highways).
