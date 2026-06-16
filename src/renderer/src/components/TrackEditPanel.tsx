@@ -358,11 +358,13 @@ export function RerouteTool({
       {open && !hasRouteCoverage && (
         <>
           <p className="hint">
-            No roads fetched here yet — routing needs the drivable network for
-            this area. It only fetches what&apos;s on screen.
+            No driving roads fetched yet for routing. This is a separate network
+            from the “road tunnels” cleaning layer — fetch it here (or in Cleaning
+            → Road routing). Zoom so the whole route is on screen first; it only
+            fetches what&apos;s in view.
           </p>
           <button type="button" disabled={busy || routeFetching} onClick={onFetchRoads}>
-            {routeFetching ? 'Fetching…' : 'Fetch roads in view'}
+            {routeFetching ? 'Fetching…' : 'Fetch driving roads in view'}
           </button>
           {routeError && <p className="hint status-line error">{routeError}</p>}
         </>
@@ -429,7 +431,7 @@ export function RerouteTool({
             disabled={busy || routeFetching}
             onClick={onFetchRoads}
           >
-            {routeFetching ? 'Fetching roads…' : 'Fetch more roads in view'}
+            {routeFetching ? 'Fetching roads…' : 'Fetch more driving roads in view'}
           </button>
         </>
       )}
