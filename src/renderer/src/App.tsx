@@ -9,6 +9,7 @@ import type {
 } from '../../shared/types'
 import type { DetailMode } from '../../shared/displayDetail'
 import type {
+  BulkApplyResult,
   BulkRerouteResult,
   DatasetStats,
   EditSaveMode,
@@ -94,9 +95,13 @@ export function App(): React.JSX.Element {
   const [bulkRadiusM, setBulkRadiusM] = useState(100)
   const [bulkMode, setBulkMode] = useState<SimilarMode>('endpoints')
   const [bulkSelection, setBulkSelection] = useState<number[]>([])
+  // Synchronous mirror of the selection so the once-bound deselect listener can
+  // read the current set without re-binding on every change.
+  const bulkSelectionRef = useRef<number[]>([])
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkError, setBulkError] = useState<string | null>(null)
   const [bulkResult, setBulkResult] = useState<BulkRerouteResult | null>(null)
+  const [bulkApplyResult, setBulkApplyResult] = useState<BulkApplyResult | null>(null)
   const [appMode, setAppMode] = useState<AppMode>('display')
   const [editTool, setEditTool] = useState<EditTool>('points')
   const [editSession, setEditSession] = useState<EditSessionInfo | null>(null)
@@ -186,8 +191,18 @@ export function App(): React.JSX.Element {
       controller.setRerouteListener((info) => setRerouteInfo(info))
       controller.setBulkAnchorListener((segmentId) => {
         setBulkResult(null)
+        setBulkApplyResult(null)
         setBulkError(null)
         setBulkAnchorId(segmentId)
+      })
+      // Clicking an already-selected track drops it from the batch (and the map
+      // highlight) without re-running the search — the deselect for inadvertent
+      // matches. The ref gives this once-bound listener the live selection.
+      controller.setBulkDeselectListener((segmentId) => {
+        const next = bulkSelectionRef.current.filter((id) => id !== segmentId)
+        bulkSelectionRef.current = next
+        setBulkSelection(next)
+        controller.setBulkHighlight(next)
       })
       // Permanent/structural changes (incl. a permanent click-off save) change
       // counts/types, so refresh the dataset stats afterward.
@@ -529,9 +544,13 @@ export function App(): React.JSX.Element {
   const clearBulk = useCallback((): void => {
     setBulkAnchorId(null)
     setBulkSelection([])
+    bulkSelectionRef.current = []
     setBulkError(null)
     setBulkResult(null)
+    setBulkApplyResult(null)
     controllerRef.current?.setBulkHighlight([])
+    // Save the archetype's edits (if any) as a draft, then close its session.
+    void controllerRef.current?.closeArchetype()
   }, [])
 
   // Find the anchor's similar tracks (debounced for radius typing) and highlight
@@ -544,6 +563,7 @@ export function App(): React.JSX.Element {
         // Guard the in-flight query too: a slower earlier anchor must not
         // overwrite a newer one's selection (latest-wins).
         if (cancelled) return
+        bulkSelectionRef.current = ids
         setBulkSelection(ids)
         controllerRef.current?.setBulkHighlight(ids)
       })
@@ -579,6 +599,46 @@ export function App(): React.JSX.Element {
       }
     })
   }, [bulkSelection, refreshDraftCount])
+
+  // Stamp the edited archetype's shape onto every selected track as drafts,
+  // each timed from its own progression. Flush the archetype's own edits first
+  // so the backend reads the shape the user just drew.
+  const handleApplyArchetype = useCallback((): void => {
+    if (bulkAnchorId === null || bulkSelection.length === 0) return
+    if (
+      !skipConfirmRef.current &&
+      !window.confirm(
+        `Apply this track's shape to ${bulkSelection.length} track${
+          bulkSelection.length === 1 ? '' : 's'
+        }? They're saved as drafts you can review or discard.`
+      )
+    ) {
+      return
+    }
+    setBulkBusy(true)
+    setBulkError(null)
+    setBulkApplyResult(null)
+    void (async () => {
+      const flush = controllerRef.current?.flushArchetypeDraft()
+      if (flush) {
+        const fres = await flush
+        if (!fres.ok) {
+          setBulkBusy(false)
+          setBulkError(fres.error ?? 'could not save the archetype')
+          return
+        }
+      }
+      const res = await window.api.applyArchetypeToSegments(bulkAnchorId, bulkSelection)
+      setBulkBusy(false)
+      if (res.ok && res.result) {
+        setBulkApplyResult(res.result)
+        controllerRef.current?.scheduleRefresh(0)
+        refreshDraftCount()
+      } else {
+        setBulkError(res.error ?? 'apply failed')
+      }
+    })()
+  }, [bulkAnchorId, bulkSelection, refreshDraftCount])
 
   // Delete every selected track (destructive) after a confirm.
   const handleBulkDeleteAll = useCallback((): void => {
@@ -1314,10 +1374,12 @@ export function App(): React.JSX.Element {
                 busy={bulkBusy}
                 error={bulkError}
                 result={bulkResult}
+                applyResult={bulkApplyResult}
                 hasRouteCoverage={routeCoverage !== null}
                 routeFetching={routeFetching}
                 onRadiusChange={setBulkRadiusM}
                 onModeChange={setBulkMode}
+                onApplyArchetype={handleApplyArchetype}
                 onRerouteAll={handleBulkRerouteAll}
                 onDeleteAll={handleBulkDeleteAll}
                 onFetchRoads={handleFetchRoute}

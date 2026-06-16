@@ -133,6 +133,13 @@ describe('applyEdits (pure overlay merge)', () => {
     const out = applyEdits(base, [{ seq: 1, kind: 2, lat: 0, lon: 0 }])
     expect(out.map((p) => p.seq)).toEqual([0, 2, 3])
   })
+
+  it('an inserted vertex with an explicit ts keeps it (no interpolation)', () => {
+    // The bulk archetype apply stamps each vertex's time directly; by-seq it
+    // would have interpolated to 2500, but the explicit 12345 must win.
+    const out = applyEdits(base, [{ seq: 0.25, kind: 1, lat: 0.05, lon: 0.004, tsMs: 12345 }])
+    expect(out[1]).toMatchObject({ seq: 0.25, edit: 'insert', tsMs: 12345 })
+  })
 })
 
 describe('draft save', () => {
@@ -275,6 +282,27 @@ describe('permanent save', () => {
       'SELECT lat FROM points WHERE segment_id = ? AND seq = 1'
     ).get(segId) as { lat: number }
     expect(moved.lat).toBeCloseTo(0.05, 9)
+  })
+})
+
+describe('explicit insert timestamps (bulk archetype apply)', () => {
+  const TIMED_INSERT = { seq: 0.5, lat: 0.02, lon: 0.005, kind: 'insert' as const, tsMs: 7777 }
+
+  it('round-trips an explicit ts through a draft into the effective points', () => {
+    const segId = seedSegment()
+    saveSegmentEdits(db, segId, [TIMED_INSERT], 'draft')
+    const pts = prepareEffectivePoints(db)(segId)
+    // By-seq it would interpolate to 5000; the stored 7777 must survive instead.
+    expect(pts[1]).toMatchObject({ seq: 0.5, edit: 'insert', tsMs: 7777 })
+  })
+
+  it('bakes the explicit ts into the raw point on a permanent save', () => {
+    const segId = seedSegment()
+    saveSegmentEdits(db, segId, [TIMED_INSERT], 'permanent')
+    const baked = db.prepare(
+      'SELECT ts_ms AS ts FROM points WHERE segment_id = ? AND lon = 0.005'
+    ).get(segId) as { ts: number }
+    expect(baked.ts).toBe(7777)
   })
 })
 

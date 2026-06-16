@@ -51,6 +51,8 @@ const api: ArcApi = {
     ipcRenderer.invoke('edits:findSimilar', segmentId, radiusM, mode),
   bulkRerouteSegments: (segmentIds) => ipcRenderer.invoke('edits:bulkReroute', segmentIds),
   bulkDeleteSegments: (segmentIds) => ipcRenderer.invoke('edits:bulkDelete', segmentIds),
+  applyArchetypeToSegments: (archetypeId, segmentIds) =>
+    ipcRenderer.invoke('edits:applyArchetype', archetypeId, segmentIds),
   splitSegment: (segmentId, seq) => ipcRenderer.invoke('edits:split', segmentId, seq),
   splitSegmentTyped: (segmentId, seq, firstType, secondType) =>
     ipcRenderer.invoke('edits:splitTyped', segmentId, seq, firstType, secondType),

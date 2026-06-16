@@ -38,6 +38,7 @@ import {
 } from './rail/roadRoute'
 import { findSimilarSegments, type SimilarMode } from './db/similarSegments'
 import { bulkRerouteSegments } from './rail/bulkRoute'
+import { applyArchetypeToSegments } from './db/archetypeApply'
 import { rebuildRailMatches, rematchSegment } from './rail/buildMatches'
 import { fetchRailNetwork, fetchDriveNetwork } from './rail/overpass'
 import { addRailNetwork, getRailCoverage, clearRailNetwork, clearRailNetworkData } from './db/railStore'
@@ -429,6 +430,26 @@ export function registerIpc(ctx: IpcContext): void {
         return { ok: false, error: 'invalid bulk delete request' }
       }
       return { ok: true, count: bulkDeleteSegments(ctx.db, segmentIds) }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+  ipcMain.handle('edits:applyArchetype', async (_e, archetypeId: number, segmentIds: number[]) => {
+    try {
+      if (
+        !Number.isInteger(archetypeId) ||
+        !Array.isArray(segmentIds) ||
+        !segmentIds.every((id) => Number.isInteger(id))
+      ) {
+        return { ok: false, error: 'invalid apply request' }
+      }
+      const t0 = performance.now()
+      const result = await applyArchetypeToSegments(ctx.db, archetypeId, segmentIds)
+      insertPerf(
+        ctx.db, 'edits.applyArchetype', performance.now() - t0,
+        `applied=${result.applied} skipped=${result.skipped} failed=${result.failed}`
+      )
+      return { ok: true, result }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }

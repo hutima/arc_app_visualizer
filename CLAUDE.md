@@ -107,10 +107,10 @@ tests/         vitest; *.test.ts mirror the module they cover
 - **Display vs Edit modes** (top-of-sidebar toggle in `App.tsx`): Display is
   the normal view (filters, cleaning, basemap); Edit swaps in the editing tools
   and de-emphasizes the base tracks (`MapController.applyEditEmphasis` dims them
-  so the working overlay reads clearly). Edit has three sub-tools (`EditTool`):
-  **Edit points**, **Merge tracks**, and **Merge places**; the active tool
-  routes what a track / place click does. The third top-level mode, **Stats**,
-  makes place pins clickable for inspection instead.
+  so the working overlay reads clearly). Edit has four sub-tools (`EditTool`):
+  **Edit points**, **Merge tracks**, **Merge places**, and **Bulk clean**; the
+  active tool routes what a track / place click does. The third top-level mode,
+  **Stats**, makes place pins clickable for inspection instead.
 - **Track editing** (`db/editStore.ts` + `TrackEditPanel`): user edits live in
   `segment_edits`, an overlay keyed by seq — moves reuse the raw point's integer
   seq, inserts take a fractional seq between neighbors, deletes flag an integer
@@ -145,6 +145,22 @@ tests/         vitest; *.test.ts mirror the module they cover
   the longest leg), like the split tool's per-half types. Permanent and
   structural, like split. Map highlights candidate/selected segments by id
   (`setMergeHighlight`, filtered on the tracks source).
+- **Bulk clean** (`db/similarSegments.ts` + `db/archetypeApply.ts` +
+  `BulkPanel`): clean a commute logged hundreds of times in one pass. Click a
+  track → `findSimilarSegments` selects same-type tracks sharing its start/end
+  (direction-aware; `endpoints` or `passthrough`), highlighted orange on the
+  tracks source (`setBulkHighlight`). The clicked track becomes an editable
+  **archetype** — the normal point-edit session opens on it (drag/insert/delete
+  reuse the tool-agnostic gesture handlers), and clicking another highlighted
+  track **deselects** it (drops an inadvertent match). **Apply**
+  (`applyArchetypeToSegments`) stamps the archetype's edited shape onto every
+  selected track as a revertible **draft**, timing each copy by transferring
+  *that track's own* speed profile onto the shared shape (`computeLayeredTimes`:
+  a vertex at fraction f of the archetype's length takes the track's time at
+  fraction f of its own length), so every trip keeps its real duration. Those
+  per-vertex times ride the overlay's `segment_edits.ts_ms` (explicit insert
+  timestamps; null still interpolates by seq). The panel also keeps per-track
+  auto road-reroute (`bulkRoute.ts`) and delete-all.
 - Any edit/split/merge rebuilds the segment's `display_geometries` + bbox and
   drops its cached `rail_matched_geom`. `prepareEffectivePoints` is the
   raw-point read path for the match pass and 'all points' queries, so **edits
@@ -199,7 +215,7 @@ inside one transaction, bumping `PRAGMA user_version`. To change schema:
    canonicalization). `CREATE IF NOT EXISTS` can't add columns — use
    `ensureColumn`.
 
-Current version: **12**. History is in the comment above `SCHEMA_VERSION`.
+Current version: **15**. History is in the comment above `SCHEMA_VERSION`.
 
 ## Rail / OSM snapping subsystem
 

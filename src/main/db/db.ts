@@ -67,6 +67,10 @@ function migrate(db: DatabaseSync): void {
     // v13: place pins resolve their full same-name cluster every viewport query
     // (so they don't drift with zoom); index name to keep that lookup cheap.
     db.exec('CREATE INDEX IF NOT EXISTS idx_waypoints_name ON waypoints(name)')
+    // v15: inserted vertices can carry an explicit timestamp (the bulk archetype
+    // apply stores each track's layered timing). NULL on older rows keeps the
+    // by-seq interpolation behavior unchanged.
+    ensureColumn(db, 'segment_edits', 'ts_ms', 'ts_ms INTEGER')
     seedCategories(db)
     // v5: 'unknown' joins 'bogus' as excluded-by-default (existing databases
     // seeded it visible before this rule existed).

@@ -21,8 +21,10 @@
 // v12: places + waypoints.place_id (user-merged stationary places);
 // v13: idx_waypoints_name (full-cluster place pins resolve same-name visits);
 // v14: route_* tables (drivable OSM road network for the manual reroute tool,
-//      kept separate from the rail snapping network)
-export const SCHEMA_VERSION = 14
+//      kept separate from the rail snapping network);
+// v15: segment_edits.ts_ms (explicit timestamp for an inserted vertex — the
+//      bulk archetype apply layers each track's own speed onto the shared shape)
+export const SCHEMA_VERSION = 15
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS imported_files (
@@ -193,6 +195,7 @@ CREATE TABLE IF NOT EXISTS segment_edits (
   kind         INTEGER NOT NULL DEFAULT 0, -- 0 = move, 1 = insert, 2 = delete
   lat          REAL NOT NULL,
   lon          REAL NOT NULL,
+  ts_ms        INTEGER, -- explicit ts for an inserted vertex; NULL = interpolate by seq
   edited_at_ms INTEGER NOT NULL,
   PRIMARY KEY (segment_id, seq)
 ) WITHOUT ROWID;
