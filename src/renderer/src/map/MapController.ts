@@ -221,6 +221,8 @@ export class MapController {
   private mergeAnchorListener: ((segmentId: number) => void) | null = null
   /** Bulk tool: clicking a track reports it as the anchor for "find similar". */
   private bulkAnchorListener: ((segmentId: number) => void) | null = null
+  /** Bulk tool: clicking an already-selected track reports it to be dropped. */
+  private bulkDeselectListener: ((segmentId: number) => void) | null = null
   /** Notified after a permanent/structural change so React can refresh stats. */
   private datasetChangeListener: (() => void) | null = null
   /** Last merge highlight ids, so a theme re-add can restore them. */
@@ -663,13 +665,68 @@ export class MapController {
     this.bulkAnchorListener = cb
   }
 
+  /** Receives an already-selected track clicked to be dropped (bulk tool only). */
+  setBulkDeselectListener(cb: (segmentId: number) => void): void {
+    this.bulkDeselectListener = cb
+  }
+
   /** Highlight the bulk-selected (similar) tracks by id; gated to the bulk tool. */
   setBulkHighlight(ids: number[]): void {
     this.bulkHighlightIds = ids
     if (!this.map.getLayer(BULK_HL_LAYER)) return
     const show = this.editMode && this.editTool === 'bulk'
-    this.map.setFilter(BULK_HL_LAYER, matchIds(ids))
+    // The archetype (the open edit session) is shown with editable handles, so
+    // drop it from the orange highlight or that line paints over the handles.
+    this.map.setFilter(BULK_HL_LAYER, matchIds(ids.filter((id) => id !== this.editingId)))
     this.map.setLayoutProperty(BULK_HL_LAYER, 'visibility', show ? 'visible' : 'none')
+  }
+
+  /**
+   * Save the open bulk archetype's unsaved edits as a draft, keeping it open so
+   * the user can keep tweaking or re-apply. Returns the save promise, or null if
+   * there's nothing to flush. Captures the id + overlay synchronously so it's
+   * safe to fire just before closing the session.
+   */
+  flushArchetypeDraft(): Promise<{ ok: boolean; error?: string }> | null {
+    if (this.editingId === null || !this.editDirty) return null
+    const id = this.editingId
+    const overlay = this.buildOverlay()
+    return window.api.saveSegmentEdits(id, overlay, 'draft').then((res) => {
+      if (res.ok && !this.destroyed && this.editingId === id) {
+        this.editDirty = false
+        this.editHasDraft = true
+        this.notifyEdit()
+      }
+      return res
+    })
+  }
+
+  /**
+   * Re-anchor the bulk archetype on a different track: save the current one's
+   * edits (so switching never loses work, like the point tool's click-off),
+   * then open the new track for editing and report it as the new anchor.
+   */
+  private async commitArchetypeAndAnchor(id: number): Promise<void> {
+    const flush = this.flushArchetypeDraft()
+    if (flush) {
+      const res = await flush
+      if (this.destroyed) return
+      if (!res.ok) return // keep the current archetype open so its edits survive
+    }
+    this.closeEditSession()
+    this.bulkAnchorListener?.(id)
+    await this.loadSegmentForEdit(id)
+    this.scheduleRefresh(0)
+  }
+
+  /** Leave the bulk archetype (Clear / tool switch): save its edits, then close. */
+  async closeArchetype(): Promise<void> {
+    if (this.editingId === null) return
+    const flush = this.flushArchetypeDraft()
+    if (flush) await flush
+    if (this.destroyed) return
+    this.closeEditSession()
+    this.scheduleRefresh(0)
   }
 
   /** Notified after a permanent/structural change so React can refresh stats. */
@@ -1282,6 +1339,9 @@ export class MapController {
     this.updateSplitPreview()
     this.updateRerouteLayers()
     this.applyTypeFilter()
+    // With no archetype editing, a still-selected former archetype rejoins the
+    // bulk highlight (no-op for the other tools).
+    if (this.editTool === 'bulk') this.setBulkHighlight(this.bulkHighlightIds)
     this.map.getCanvas().style.cursor = ''
     this.notifyEdit()
     this.notifyReroute()
@@ -1383,8 +1443,23 @@ export class MapController {
       return
     }
     if (this.editTool === 'bulk') {
-      // Clicking a track anchors the "find similar" search on it.
-      this.bulkAnchorListener?.(id)
+      // A mousedown already handled as an archetype edit (vertex grab / line
+      // insert) must not also re-anchor or deselect on the trailing click.
+      if (this.suppressClickOff) {
+        this.suppressClickOff = false
+        return
+      }
+      // The archetype is the open edit session; its clicks are edits (handled in
+      // handleMapDown) — never deselect or re-anchor it here.
+      if (id === this.editingId) return
+      // Clicking an already-selected track drops it from the batch (an
+      // inadvertent match the user wants out).
+      if (this.bulkHighlightIds.includes(id)) {
+        this.bulkDeselectListener?.(id)
+        return
+      }
+      // Any other track becomes a fresh archetype + similar search.
+      void this.commitArchetypeAndAnchor(id)
       return
     }
     if (this.editTool === 'mergePlaces') {
@@ -1481,6 +1556,9 @@ export class MapController {
     this.applyTypeFilter()
     this.updateEditLayers()
     this.updateSplitPreview()
+    // Bulk archetype: refresh the highlight so the now-editing track drops out
+    // of the orange overlay (its handles read clearly on top).
+    if (this.editTool === 'bulk') this.setBulkHighlight(this.bulkHighlightIds)
     this.notifyEdit()
   }
 
@@ -1517,7 +1595,9 @@ export class MapController {
   /** Act on a grabbed vertex: shift = split, alt = delete, else move-drag. */
   private grabVertex(idx: number, oe: MouseEvent): void {
     if (oe.shiftKey) {
-      this.requestSplitAt(idx)
+      // Splitting is a points-tool structural op; in the bulk tool the same
+      // vertex is part of the archetype, so shift does nothing there.
+      if (this.editTool === 'points') this.requestSplitAt(idx)
       return
     }
     if (oe.altKey) {

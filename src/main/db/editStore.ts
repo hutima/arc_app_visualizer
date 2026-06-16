@@ -53,6 +53,8 @@ interface EditRow {
   kind: number
   lat: number
   lon: number
+  /** Explicit time for an inserted vertex; null/absent means interpolate by seq. */
+  tsMs?: number | null
 }
 
 /** Raw point row with the columns baking/splitting must preserve. */
@@ -95,9 +97,11 @@ export function applyEdits(points: CleanPoint[], edits: EditRow[]): EditablePoin
     out.push({ seq: p.seq, lat: p.lat, lon: p.lon, tsMs: p.tsMs, edit: null })
   }
   // Anything left is an insert (a stray delete/move on a missing seq is inert).
+  // An explicit ts (bulk archetype apply) carries through; null inserts get a
+  // by-seq interpolated time below.
   for (const e of bySeq.values()) {
     if (e.kind === KIND_INSERT) {
-      out.push({ seq: e.seq, lat: e.lat, lon: e.lon, tsMs: null, edit: 'insert' })
+      out.push({ seq: e.seq, lat: e.lat, lon: e.lon, tsMs: e.tsMs ?? null, edit: 'insert' })
     }
   }
   out.sort((a, b) => a.seq - b.seq)
@@ -152,7 +156,7 @@ export function prepareEffectivePoints(
     ORDER BY seq
   `)
   const editsStmt = db.prepare(
-    'SELECT seq, kind, lat, lon FROM segment_edits WHERE segment_id = ? ORDER BY seq'
+    'SELECT seq, kind, lat, lon, ts_ms AS tsMs FROM segment_edits WHERE segment_id = ? ORDER BY seq'
   )
   return (segmentId) => {
     const pts = pointsStmt.all(segmentId) as unknown as CleanPoint[]
@@ -179,6 +183,8 @@ function validOverlay(edits: SegmentEditInput[]): boolean {
     if (!Number.isFinite(e.seq)) return false
     if (e.kind === 'delete') return true // coords irrelevant; only the seq matters
     if (e.kind !== 'move' && e.kind !== 'insert') return false
+    // An insert may carry an explicit ts; if present it must be a real number.
+    if (e.kind === 'insert' && e.tsMs != null && !Number.isFinite(e.tsMs)) return false
     return (
       Number.isFinite(e.lat) && Math.abs(e.lat) <= 90 &&
       Number.isFinite(e.lon) && Math.abs(e.lon) <= 180
@@ -190,7 +196,8 @@ const toEditRow = (e: SegmentEditInput): EditRow => ({
   seq: e.seq,
   kind: kindToInt(e.kind),
   lat: e.lat,
-  lon: e.lon
+  lon: e.lon,
+  tsMs: e.tsMs ?? null
 })
 
 function loadCleanPoints(db: DatabaseSync, segmentId: number): CleanPoint[] {
@@ -210,7 +217,7 @@ function loadRawRows(db: DatabaseSync, segmentId: number): RawRow[] {
 
 function loadOverlay(db: DatabaseSync, segmentId: number): EditRow[] {
   return db
-    .prepare('SELECT seq, kind, lat, lon FROM segment_edits WHERE segment_id = ?')
+    .prepare('SELECT seq, kind, lat, lon, ts_ms AS tsMs FROM segment_edits WHERE segment_id = ?')
     .all(segmentId) as unknown as EditRow[]
 }
 
@@ -237,10 +244,10 @@ export function saveSegmentEdits(
   try {
     db.prepare('DELETE FROM segment_edits WHERE segment_id = ?').run(segmentId)
     const ins = db.prepare(
-      'INSERT INTO segment_edits (segment_id, seq, kind, lat, lon, edited_at_ms) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO segment_edits (segment_id, seq, kind, lat, lon, ts_ms, edited_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)'
     )
     const now = Date.now()
-    for (const e of edits) ins.run(segmentId, e.seq, kindToInt(e.kind), e.lat, e.lon, now)
+    for (const e of edits) ins.run(segmentId, e.seq, kindToInt(e.kind), e.lat, e.lon, e.tsMs ?? null, now)
     // Permanent baking rewrites points and rebuilds; draft just rebuilds.
     if (mode === 'permanent') bakeEditsIntoPoints(db, segmentId)
     else rebuildDerivedGeometry(db, segmentId)
@@ -562,7 +569,8 @@ function mergeOverlay(raw: RawRow[], overlay: EditRow[]): MergedRow[] {
   }
   for (const e of bySeq.values()) {
     if (e.kind === KIND_INSERT) {
-      out.push({ seq: e.seq, tsMs: null, lat: e.lat, lon: e.lon, ele: null, flags: 0, inserted: true })
+      // Bake the explicit ts when present (archetype apply); else interpolate.
+      out.push({ seq: e.seq, tsMs: e.tsMs ?? null, lat: e.lat, lon: e.lon, ele: null, flags: 0, inserted: true })
     }
   }
   out.sort((a, b) => a.seq - b.seq)

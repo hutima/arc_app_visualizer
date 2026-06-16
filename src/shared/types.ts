@@ -142,6 +142,16 @@ export interface BulkRerouteResult {
   failed: number
 }
 
+/** Outcome of stamping an archetype's shape across a selection of tracks. */
+export interface BulkApplyResult {
+  /** Tracks stamped (as drafts). */
+  applied: number
+  /** Tracks left untouched (too few points, or the archetype itself). */
+  skipped: number
+  /** Tracks that errored mid-apply. */
+  failed: number
+}
+
 /**
  * User-tweakable matcher ranges (meters), persisted in settings.json under
  * `rail` and editable from the Cleaning panel. Changing them re-runs the
@@ -202,6 +212,13 @@ export interface SegmentEditInput {
   lat: number
   lon: number
   kind: EditKind
+  /**
+   * For inserts only: an explicit timestamp (ms). Omitted/null means the
+   * inserted vertex's time is interpolated by seq between dated neighbors (the
+   * default for hand edits); the bulk archetype apply sets it so each stamped
+   * track keeps its own speed.
+   */
+  tsMs?: number | null
 }
 
 /**
@@ -552,6 +569,17 @@ export interface ArcApi {
   ): Promise<{ ok: boolean; result?: BulkRerouteResult; error?: string }>
   /** Delete many tracks at once. Returns how many were removed. */
   bulkDeleteSegments(segmentIds: number[]): Promise<{ ok: boolean; count?: number; error?: string }>
+  /**
+   * Stamp the archetype's edited shape onto each given track as a revertible
+   * draft, timing every copy from its own start→end point progression so each
+   * keeps its real speed (undated tracks get no timestamps). The archetype id is
+   * skipped if present. Reads the archetype's effective (edited) points, so its
+   * own draft must be flushed first.
+   */
+  applyArchetypeToSegments(
+    archetypeId: number,
+    segmentIds: number[]
+  ): Promise<{ ok: boolean; result?: BulkApplyResult; error?: string }>
   /**
    * Split a segment into two at one of its points (by seq). Commits the
    * segment's current overlay; returns the id of the new (second-half)
