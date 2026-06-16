@@ -135,13 +135,6 @@ export interface RoutePreviewResult {
  */
 export type SimilarMode = 'endpoints' | 'passthrough'
 
-/** Outcome of a bulk reroute over a selection of tracks. */
-export interface BulkRerouteResult {
-  rerouted: number
-  skipped: number
-  failed: number
-}
-
 /** Outcome of stamping an archetype's shape across a selection of tracks. */
 export interface BulkApplyResult {
   /** Tracks stamped (as drafts). */
@@ -563,10 +556,6 @@ export interface ArcApi {
    * matches longer tracks running through both points. Includes the anchor.
    */
   findSimilarSegments(segmentId: number, radiusM: number, mode: SimilarMode): Promise<number[]>
-  /** Snap each given track to its own clean road route, as revertible drafts. */
-  bulkRerouteSegments(
-    segmentIds: number[]
-  ): Promise<{ ok: boolean; result?: BulkRerouteResult; error?: string }>
   /** Delete many tracks at once. Returns how many were removed. */
   bulkDeleteSegments(segmentIds: number[]): Promise<{ ok: boolean; count?: number; error?: string }>
   /**

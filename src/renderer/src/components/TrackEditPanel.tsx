@@ -303,8 +303,10 @@ interface RerouteProps {
  * live), and apply the previewed road route as a revertible draft. Routing is
  * local (over fetched OSM roads) and prefers arterials — so it only works where
  * roads have been fetched, and every route is reviewed before it's applied.
+ *
+ * Exported so Bulk clean can reroute its archetype with the same engine.
  */
-function RerouteTool({
+export function RerouteTool({
   session,
   reroute,
   hasRouteCoverage,

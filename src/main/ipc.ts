@@ -37,7 +37,6 @@ import {
   simplifyRoutePolyline
 } from './rail/roadRoute'
 import { findSimilarSegments, type SimilarMode } from './db/similarSegments'
-import { bulkRerouteSegments } from './rail/bulkRoute'
 import { applyArchetypeToSegments } from './db/archetypeApply'
 import { rebuildRailMatches, rematchSegment } from './rail/buildMatches'
 import { fetchRailNetwork, fetchDriveNetwork } from './rail/overpass'
@@ -407,22 +406,6 @@ export function registerIpc(ctx: IpcContext): void {
     if (!Number.isInteger(segmentId) || !Number.isFinite(radiusM) || radiusM <= 0) return []
     const m: SimilarMode = mode === 'passthrough' ? 'passthrough' : 'endpoints'
     return findSimilarSegments(ctx.db, segmentId, Math.min(radiusM, 5000), m)
-  })
-  ipcMain.handle('edits:bulkReroute', async (_e, segmentIds: number[]) => {
-    try {
-      if (!Array.isArray(segmentIds) || !segmentIds.every((id) => Number.isInteger(id))) {
-        return { ok: false, error: 'invalid bulk reroute request' }
-      }
-      const t0 = performance.now()
-      const result = await bulkRerouteSegments(ctx.db, segmentIds)
-      insertPerf(
-        ctx.db, 'route.bulk', performance.now() - t0,
-        `rerouted=${result.rerouted} skipped=${result.skipped} failed=${result.failed}`
-      )
-      return { ok: true, result }
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
-    }
   })
   ipcMain.handle('edits:bulkDelete', (_e, segmentIds: number[]) => {
     try {
